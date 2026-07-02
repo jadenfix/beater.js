@@ -140,7 +140,7 @@ CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` 
 - **RSC + client hydration** — the chunked isolate→host streaming plumbing is the substrate; add the flight protocol + client bundle step next.
 - **Wasmtime sandbox** — fourth `impl` kind in the tool registry, for untrusted/agent-generated code.
 - **C++ tools** — via `cxx` on the Rust built-in path when a real use case appears.
-- **Agentic browsing** — reuse beater-agents' CDP/Playwright crates as a tool provider.
+- **Production agentic browsing** — the registry has a mock CDP browser provider for contract tests; reuse beater-agents' real CDP/Playwright crates as the production provider.
 - **Deploy** — the host is one binary + assets; `beater build` → container image with the venv baked in.
 - **Isolate pool / per-request isolation** — channel protocol already supports N workers; current serialization is documented in `docs/runtime-limits.md`.
 - **LLM streaming (SSE to browser)** — journal needs partial-step records first.

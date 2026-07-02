@@ -9,6 +9,7 @@ beater.js is pre-alpha. Version numbers are semver-shaped, but compatibility is 
 - Added `beater dev --host` / `[app] host` for container and remote test binding.
 - Added `beater new <app>` to scaffold a runnable hello app.
 - Added `remoteMcpTool` / `remote_mcp` registry support for mock-tested networked MCP tool sources.
+- Added `browserTool` / `browser` registry support with a mock CDP provider for agent-loop and session-cleanup tests.
 - Added slow-tool fixtures for the M2 live crash/resume gate.
 
 ## Versioning Policy

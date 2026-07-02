@@ -187,7 +187,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 - [x] Network bind control: `--host` / `[app] host` makes container, VM, and remote-management smoke tests possible.
 - [x] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, browser preflight/CORS support, public base URL metadata, and a safe way to expose a dev/prod agent endpoint beyond localhost.
 - [x] Networked integration contract (v0.1 direct `tools/call`): `remote_mcp` tool sources, request timeouts/retries, bearer-secret handling, `tool_use_id` idempotency keys, review parking, and egress policy are tested against mock servers. Provider discovery and MCP sessions remain Phase C item 8.
-- [ ] Agentic browsing foundation: CDP/Playwright provider contract, browser session lifecycle cleanup, and e2e tests proving an agent can complete a browser task through a tool declaration.
+- [x] Agentic browsing foundation (v0.1 mock CDP): `browserTool` provider contract, allowed-origin policy, per-tool-call mock session cleanup on success/failure/timeout, and mocked agent-loop e2e prove an agent can complete a browser task through a tool declaration. Real run-attached Playwright/CDP providers remain Phase C item 9.
 - [x] Integration registry docs: `docs/integrations.md` shows how first-party Python/Rust tools, remote MCP servers, and browser providers coexist in one agent config without queues or sidecar services.
 
 ### Security floor (currently: dev-mode assumptions everywhere)
@@ -198,7 +198,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 ### Docs
 - [x] README quickstart actually runnable start-to-finish by a stranger (install Rust, install Python 3.11+, cargo build, `beater new`, `beater dev`)
 - [x] `docs/tools.md`: the pyTool/rustTool contract (TOOL dict, run(), idempotency rules)
-- [x] `docs/integrations.md`: one-registry contract for first-party tools, planned remote MCP sources, planned browser providers, secrets, retries, idempotency, egress, and journal audit rules
+- [x] `docs/integrations.md`: one-registry contract for first-party tools, remote MCP sources, mock browser providers, production browser-provider acceptance criteria, secrets, retries, idempotency, egress, and journal audit rules
 - [x] `docs/runtime-limits.md`: current single-isolate route serialization, one-app-per-dev-server limit, operational guidance, and isolate-pool acceptance path
 - [x] CHANGELOG + versioning policy (deno_core pin-bump cadence)
 

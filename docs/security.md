@@ -50,4 +50,4 @@ Networked tools have explicit timeouts, retry policy, idempotency keys, secret h
 
 ## Agentic Browsing
 
-Browser automation is powerful enough to read authenticated pages and perform destructive actions. Browser-provider work must include session lifecycle cleanup, scoped credentials, and e2e tests for crash handling before it is considered production-ready.
+Browser automation is powerful enough to read authenticated pages and perform destructive actions. The current `mock_cdp` provider is only a deterministic contract and lifecycle test provider. Production Playwright/CDP providers must include real session cleanup across crashes, scoped credentials, and browser e2e tests before they are considered production-ready.
