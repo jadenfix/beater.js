@@ -8,6 +8,55 @@ This is the honest completion contract: what is verified today, the exact gap be
 
 ---
 
+## Working model: 2 goal-oriented agents
+
+This file is also the coordination contract for finishing `beater.js` in parallel. Each agent should work in small, reviewable PRs; run the relevant tests before publishing; request or perform an independent review; merge only after the slice is verified; then update this file if the completion evidence changed.
+
+### Agent 1 — MVP e2e gate owner
+
+**Owner:** this Codex thread.
+
+**Goal:** make [A] actually true: prove the M2 live gate end to end, record the evidence, and flip the docs from "pending live gate" to "done" only after A3-A5 pass.
+
+**Primary PR sequence:**
+- [ ] Add the slow-tool fixtures for A2 with the smallest possible example-app surface.
+- [ ] Run and record A3 happy path with the live Anthropic API.
+- [ ] Run and record A4 crash/resume idempotent proof.
+- [ ] Run and record A5 non-idempotent `needs_review` proof.
+- [ ] Update README.md, ARCHITECTURE.md, and this file with exact evidence.
+
+**Likely touched files:** `examples/hello/agents/support/**`, `README.md`, `ARCHITECTURE.md`, `final.md`, and only agent/runtime code if the live gate exposes a real bug.
+
+**Do not claim done unless:** transcripts exist, `beater agent runs` shows the expected terminal states, the journal query proves the resume invariant, and the branch has passed the relevant local checks.
+
+### Agent 2 — v0.1 release-hardening owner
+
+**Owner:** second goal-oriented agent started separately by Jaden.
+
+**Goal:** make [B] shippable by removing author-machine assumptions and adding automated confidence that does not depend on the live Anthropic API.
+
+**Primary PR sequence:**
+- [ ] Add focused unit tests for router matching, journal lifecycle/resume invariants, and loader transpile-cache behavior.
+- [ ] Add `ANTHROPIC_BASE_URL` support plus mocked journal-resume tests.
+- [ ] Add the no-key integration test that spawns `beater dev` and checks `/api/health`, `/`, and `/mcp`.
+- [ ] Add CI for fmt, clippy, and tests on macOS/Linux with rusty_v8 caching.
+- [ ] Improve portability/docs: Python discovery guidance, host binding, quickstart, `docs/tools.md`, and security notes.
+
+**Likely touched files:** `crates/**`, `.github/workflows/**`, docs under `docs/**`, `README.md`, `ARCHITECTURE.md`, and `final.md`.
+
+**Do not claim done unless:** the tests prove the requirement they are attached to, CI or local equivalents are green, and any docs marked complete have been checked from a clean-user perspective.
+
+### Coordination rules
+
+- Branches: use `codex/agent1-<slice>` and `codex/agent2-<slice>` so PR ownership is obvious.
+- PR size: one vertical slice per PR; avoid bundling unrelated roadmap items.
+- Review: every PR gets an independent subagent review before merge; fix or explicitly document any finding.
+- Merge order: Agent 1 has priority on files needed for [A]. Agent 2 should avoid editing `examples/hello/agents/support/**` while Agent 1 is proving M2.
+- Rebase/pull after each merge before starting the next PR.
+- Evidence beats intention: update checkboxes only when the command output, transcript, test, or merged PR proves the item.
+
+---
+
 ## 0. Verified today (evidence, not aspiration)
 
 | Slice | Evidence |
