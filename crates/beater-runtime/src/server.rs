@@ -36,13 +36,17 @@ struct DevState {
 
 pub async fn serve(
     config: AppConfig,
+    host: std::net::IpAddr,
     port: u16,
     registry: ToolRegistry,
     agents: Vec<String>,
 ) -> Result<()> {
     let table = RouteTable::scan(&config.app_dir)?;
     if table.is_empty() {
-        tracing::warn!("no routes found under {}/app/routes", config.app_dir.display());
+        tracing::warn!(
+            "no routes found under {}/app/routes",
+            config.app_dir.display()
+        );
     }
     for route in table.iter() {
         tracing::info!("route {} -> {}", route.pattern, route.file.display());
@@ -58,7 +62,7 @@ pub async fn serve(
         registry: Arc::new(registry),
         app_name: config.name.clone(),
         agents: Arc::new(agents),
-        base_url: format!("http://127.0.0.1:{port}"),
+        base_url: format!("http://{host}:{port}"),
     };
 
     spawn_reloader(config.app_dir.clone(), state.clone());
@@ -71,11 +75,14 @@ pub async fn serve(
         .route("/.well-known/beater.json", get(handle_well_known))
         .fallback(handle)
         .with_state(state);
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = std::net::SocketAddr::from((host, port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
-    tracing::info!("beater dev listening on http://{addr} (app: {})", config.name);
+    tracing::info!(
+        "beater dev listening on http://{addr} (app: {})",
+        config.name
+    );
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -93,25 +100,26 @@ fn spawn_reloader(app_dir: PathBuf, state: DevState) {
     let watch_dir = app_dir.clone();
     std::thread::spawn(move || {
         use notify::Watcher;
-        let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove() {
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(event) = res
+                    && (event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove())
+                {
                     let _ = tx.blocking_send(());
                 }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::error!("watcher failed to start: {e}");
-                return;
-            }
-        };
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::error!("watcher failed to start: {e}");
+                    return;
+                }
+            };
         for sub in ["app", "agents"] {
             let dir = watch_dir.join(sub);
-            if dir.is_dir() {
-                if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::Recursive) {
-                    tracing::error!("watch {}: {e}", dir.display());
-                }
+            if dir.is_dir()
+                && let Err(e) = watcher.watch(&dir, notify::RecursiveMode::Recursive)
+            {
+                tracing::error!("watch {}: {e}", dir.display());
             }
         }
         // keep the watcher alive forever; the dev process owns its lifetime
@@ -218,7 +226,10 @@ async fn route_meta(state: &DevState, specifier: String) -> Option<RouteMeta> {
         .worker_tx
         .read()
         .await
-        .send(WorkerMsg::RouteMeta { specifier, reply: reply_tx })
+        .send(WorkerMsg::RouteMeta {
+            specifier,
+            reply: reply_tx,
+        })
         .await
         .ok()?;
     match tokio::time::timeout(REQUEST_TIMEOUT, reply_rx).await {
@@ -264,7 +275,12 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
                     .map_err(|_| anyhow::anyhow!("bad route path {}", route.file.display()))?;
                 (spec.to_string(), params, route.kind)
             }
-            None => return Ok(text_response(StatusCode::NOT_FOUND, format!("no route for {path}"))),
+            None => {
+                return Ok(text_response(
+                    StatusCode::NOT_FOUND,
+                    format!("no route for {path}"),
+                ));
+            }
         }
     };
 
@@ -279,7 +295,12 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
     let headers: HashMap<String, String> = req
         .headers()
         .iter()
-        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                String::from_utf8_lossy(v.as_bytes()).into_owned(),
+            )
+        })
         .collect();
     let body_bytes = axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await?;
     let body = if body_bytes.is_empty() {

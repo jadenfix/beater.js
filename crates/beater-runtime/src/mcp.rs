@@ -27,7 +27,11 @@ pub fn origin_allowed(headers: &HeaderMap) -> bool {
     }
 }
 
-pub async fn handle_post(registry: &ToolRegistry, headers: &HeaderMap, body: &[u8]) -> Response<Body> {
+pub async fn handle_post(
+    registry: &ToolRegistry,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Response<Body> {
     if !origin_allowed(headers) {
         return http_response(
             StatusCode::FORBIDDEN,
@@ -80,7 +84,9 @@ pub fn handle_get() -> Response<Body> {
     Response::builder()
         .status(StatusCode::METHOD_NOT_ALLOWED)
         .header("allow", "POST")
-        .body(Body::from("this MCP endpoint does not offer a server-initiated stream"))
+        .body(Body::from(
+            "this MCP endpoint does not offer a server-initiated stream",
+        ))
         .expect("static response")
 }
 

@@ -19,24 +19,29 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 /// Start the dev server for the app at `app_dir`. Blocks until ctrl-c.
-pub fn dev(app_dir: &Path, port_override: Option<u16>) -> Result<()> {
+pub fn dev(
+    app_dir: &Path,
+    port_override: Option<u16>,
+    host_override: Option<std::net::IpAddr>,
+) -> Result<()> {
     let config = AppConfig::load(app_dir)?;
     let port = port_override.unwrap_or(config.port);
+    let host = host_override.unwrap_or(config.host);
 
     // Agent surfaces are built before the runtime starts: config extraction
     // spins one-shot isolates (their own mini-runtimes), and the venv attach
     // must precede any Python tool loading.
-    if let Some(venv) = &config.python_venv {
-        if venv.is_dir() {
-            beater_py::attach_venv(venv)?;
-        }
+    if let Some(venv) = &config.python_venv
+        && venv.is_dir()
+    {
+        beater_py::attach_venv(venv)?;
     }
     let (registry, agents) = build_registry(&config.app_dir)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(server::serve(config, port, registry, agents))
+    rt.block_on(server::serve(config, host, port, registry, agents))
 }
 
 /// Merge every agent's tools into the registry served over /mcp.

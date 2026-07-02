@@ -122,3 +122,102 @@ impl RouteTable {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{RouteKind, RouteTable};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "beater-router-{name}-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn write(&self, rel: &str, contents: &str) {
+            let path = self.path.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn scans_index_api_page_and_param_routes() {
+        let app = TempDir::new("scan");
+        app.write("app/routes/index.tsx", "export default function Home() {}");
+        app.write("app/routes/api/health.ts", "export function GET() {}");
+        app.write(
+            "app/routes/users/[id].tsx",
+            "export default function User() {}",
+        );
+        app.write("app/routes/ignored.css", "body {}");
+
+        let table = RouteTable::scan(app.path()).unwrap();
+        let patterns: Vec<_> = table.iter().map(|route| route.pattern.as_str()).collect();
+
+        assert!(patterns.contains(&"/"));
+        assert!(patterns.contains(&"/api/health"));
+        assert!(patterns.contains(&"/users/[id]"));
+        assert_eq!(patterns.len(), 3);
+
+        let (route, _) = table.match_path("/").unwrap();
+        assert_eq!(route.kind, RouteKind::Page);
+        let (route, _) = table.match_path("/api/health").unwrap();
+        assert_eq!(route.kind, RouteKind::Api);
+        let (_, params) = table.match_path("/users/42").unwrap();
+        assert_eq!(params.get("id").map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn static_routes_win_over_dynamic_collisions() {
+        let app = TempDir::new("collision");
+        app.write(
+            "app/routes/users/[id].tsx",
+            "export default function User() {}",
+        );
+        app.write(
+            "app/routes/users/settings.tsx",
+            "export default function Settings() {}",
+        );
+
+        let table = RouteTable::scan(app.path()).unwrap();
+        let (route, params) = table.match_path("/users/settings").unwrap();
+
+        assert_eq!(route.pattern, "/users/settings");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn rejects_wrong_depth_or_unknown_path() {
+        let app = TempDir::new("miss");
+        app.write(
+            "app/routes/users/[id].tsx",
+            "export default function User() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        assert!(table.match_path("/users").is_none());
+        assert!(table.match_path("/users/1/extra").is_none());
+        assert!(table.match_path("/posts/1").is_none());
+    }
+}

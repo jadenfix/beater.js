@@ -55,7 +55,12 @@ pub fn load_agent_config(app_dir: &Path, name: &str) -> Result<serde_json::Value
         let default = namespace
             .get(scope, key.into())
             .filter(|v| !v.is_undefined())
-            .with_context(|| format!("{} has no default export (defineAgent)", agent_file.display()))?;
+            .with_context(|| {
+                format!(
+                    "{} has no default export (defineAgent)",
+                    agent_file.display()
+                )
+            })?;
         let config: serde_json::Value = deno_core::serde_v8::from_v8(scope, default)
             .context("agent config is not plain JSON (defineAgent output)")?;
         Ok(config)
