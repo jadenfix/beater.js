@@ -29,6 +29,7 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
         .arg("--port")
         .arg(port.to_string())
         .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("BEATER_BASE_URL")
         .env_remove("BEATER_MCP_TOKEN")
         .env_remove("BEATER_MCP_TRUSTED_ORIGINS")
         .stdout(Stdio::null())
@@ -90,7 +91,10 @@ fn dev_server_requires_mcp_bearer_token_when_configured() {
         .arg("0.0.0.0")
         .arg("--port")
         .arg(port.to_string())
+        .arg("--base-url")
+        .arg("https://hello.example.test")
         .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("BEATER_BASE_URL")
         .env("BEATER_MCP_TOKEN", "test-secret")
         .env("BEATER_MCP_TRUSTED_ORIGINS", "https://ops.example.test")
         .stdout(Stdio::null())
@@ -105,6 +109,10 @@ fn dev_server_requires_mcp_bearer_token_when_configured() {
     let manifest =
         http_request(port, "GET", "/.well-known/beater.json", None).expect("GET manifest");
     assert!(manifest.starts_with("HTTP/1.1 200"), "{manifest}");
+    assert!(
+        manifest.contains("\"endpoint\":\"https://hello.example.test/mcp\""),
+        "{manifest}"
+    );
     assert!(manifest.contains("\"required\":true"), "{manifest}");
     assert!(
         manifest.contains("\"trustedOrigins\":[\"https://ops.example.test\"]"),
@@ -219,6 +227,7 @@ fn doctor_reports_python_v8_and_venv_diagnostics() {
     assert!(stdout.contains("beater doctor"), "{stdout}");
     assert!(stdout.contains("python:"), "{stdout}");
     assert!(stdout.contains("venv:"), "{stdout}");
+    assert!(stdout.contains("public:"), "{stdout}");
     assert!(stdout.contains("mcp:"), "{stdout}");
     assert!(stdout.contains("v8:"), "{stdout}");
 }

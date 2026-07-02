@@ -27,6 +27,9 @@ enum Command {
         /// Override the port from beater.toml
         #[arg(long)]
         port: Option<u16>,
+        /// Public base URL advertised in agent/crawl metadata
+        #[arg(long)]
+        base_url: Option<String>,
     },
     /// Run, resume, and inspect durable agent runs
     Agent {
@@ -75,7 +78,12 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Dev { app, host, port } => beater_runtime::dev(&app, port, host),
+        Command::Dev {
+            app,
+            host,
+            port,
+            base_url,
+        } => beater_runtime::dev(&app, port, host, base_url),
         Command::Agent { command } => match command {
             AgentCommand::Run { app, name, prompt } => {
                 let config = beater_runtime::load_agent_config(&app, &name)?;
@@ -101,6 +109,10 @@ fn doctor(app: &std::path::Path) -> Result<()> {
         Ok(config) => {
             println!("  app:     {}", config.name);
             println!("  bind:    {}:{}", config.host, config.port);
+            match config.public_base_url(config.host, config.port, None) {
+                Ok(base_url) => println!("  public:  {base_url}"),
+                Err(e) => println!("  public:  INVALID — {e}"),
+            }
             match &config.python_venv {
                 Some(venv) => {
                     println!("  venv:    {}", venv.display());

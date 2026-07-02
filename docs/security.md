@@ -22,10 +22,10 @@ Before exposing `/mcp` to a remote manager or another machine:
 ```sh
 export BEATER_MCP_TOKEN="$(openssl rand -hex 32)"
 export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # only needed for browser-based operators
-./target/debug/beater dev examples/hello --host 0.0.0.0
+./target/debug/beater dev examples/hello --host 0.0.0.0 --base-url https://hello.example.com
 ```
 
-Do not put MCP bearer tokens in `beater.toml`. Keep them in the process environment or the deployment secret manager. The dev smoke tests cover the remote-management path: missing tokens fail with 401, valid bearer tokens succeed, trusted browser-origin preflight and POST requests receive CORS headers, and untrusted browser origins fail with 403.
+Do not put MCP bearer tokens in `beater.toml`. Keep them in the process environment or the deployment secret manager. Set `--base-url`, `BEATER_BASE_URL`, or `[app] base_url` so generated manifests advertise the externally reachable URL instead of a bind address such as `0.0.0.0`. The dev smoke tests cover the remote-management path: missing tokens fail with 401, valid bearer tokens succeed, trusted browser-origin preflight and POST requests receive CORS headers, untrusted browser origins fail with 403, and the manifest uses the configured public URL.
 
 ## Python Tools
 

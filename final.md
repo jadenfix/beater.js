@@ -78,7 +78,7 @@ The work below is not just about matching Node/Next request handling. The end st
 | React 19 SSR | `curl /` returns server-rendered HTML from `index.tsx`; vendored ESM, no Node/npm anywhere |
 | MCP server (2025-11-25) | official MCP inspector completes initialize + tools/list + tools/call; bogus Origin → 403; GET → 405; bearer-token mode returns 401 without `Authorization`; trusted remote browser origins get preflight/CORS support |
 | Python-over-MCP | `summarize_numbers` (a `.py` file) executes in embedded CPython when called by an external MCP client |
-| Agent Access Layer | /robots.txt, /sitemap.xml, /llms.txt, /.well-known/beater.json generated from the route table; `export const agent = {crawl: false}` excludes a route from sitemap + llms.txt |
+| Agent Access Layer | /robots.txt, /sitemap.xml, /llms.txt, /.well-known/beater.json generated from the route table; `export const agent = {crawl: false}` excludes a route from sitemap + llms.txt; remote deployments can override the advertised public base URL |
 | Agent config pipeline | `agent.ts` (via `beater:agent` shim) evaluates in a one-shot isolate → JSON config → Rust registry; Python TOOL metadata loads through embedded CPython |
 | Durability machinery (code) | SQLite journal with started/completed/failed lifecycle + attempts; resume logic for dangling LLM calls and idempotent-only tool re-runs; `needs_review` parking |
 
@@ -166,7 +166,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 ### Agent-platform enablers
 - [x] Mockable outbound LLM networking: `ANTHROPIC_BASE_URL` lets resume and integration tests run against local servers instead of live vendor APIs.
 - [x] Network bind control: `--host` / `[app] host` makes container, VM, and remote-management smoke tests possible.
-- [x] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, browser preflight/CORS support, and a safe way to expose a dev/prod agent endpoint beyond localhost.
+- [x] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, browser preflight/CORS support, public base URL metadata, and a safe way to expose a dev/prod agent endpoint beyond localhost.
 - [ ] Networked integration contract: remote MCP tool sources, request timeouts/retries, secret handling, and egress policy tested against mock servers.
 - [ ] Agentic browsing foundation: CDP/Playwright provider contract, browser session lifecycle cleanup, and e2e tests proving an agent can complete a browser task through a tool declaration.
 - [ ] Integration registry docs: show how first-party Python/Rust tools, remote MCP servers, and browser providers coexist in one agent config without queues or sidecar services.

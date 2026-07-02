@@ -24,10 +24,12 @@ pub fn dev(
     app_dir: &Path,
     port_override: Option<u16>,
     host_override: Option<std::net::IpAddr>,
+    base_url_override: Option<String>,
 ) -> Result<()> {
     let config = AppConfig::load(app_dir)?;
     let port = port_override.unwrap_or(config.port);
     let host = host_override.unwrap_or(config.host);
+    let base_url = config.public_base_url(host, port, base_url_override.as_deref())?;
 
     // Agent surfaces are built before the runtime starts: config extraction
     // spins one-shot isolates (their own mini-runtimes), and the venv attach
@@ -42,7 +44,9 @@ pub fn dev(
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(server::serve(config, host, port, registry, agents))
+    rt.block_on(server::serve(
+        config, host, port, base_url, registry, agents,
+    ))
 }
 
 /// Merge every agent's tools into the registry served over /mcp.

@@ -39,6 +39,7 @@ pub async fn serve(
     config: AppConfig,
     host: std::net::IpAddr,
     port: u16,
+    base_url: String,
     registry: ToolRegistry,
     agents: Vec<String>,
 ) -> Result<()> {
@@ -80,11 +81,12 @@ pub async fn serve(
         registry: Arc::new(registry),
         app_name: config.name.clone(),
         agents: Arc::new(agents),
-        base_url: format!("http://{host}:{port}"),
+        base_url,
         mcp_access,
     };
 
     spawn_reloader(config.app_dir.clone(), state.clone());
+    let public_base_url = state.base_url.clone();
 
     let app = Router::new()
         .route(
@@ -104,8 +106,9 @@ pub async fn serve(
         .await
         .with_context(|| format!("bind {addr}"))?;
     tracing::info!(
-        "beater dev listening on http://{addr} (app: {})",
-        config.name
+        "beater dev listening on http://{addr} (app: {}, public: {})",
+        config.name,
+        public_base_url
     );
 
     axum::serve(listener, app)
