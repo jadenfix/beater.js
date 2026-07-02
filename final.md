@@ -12,6 +12,16 @@ This is the honest completion contract: what is verified today, the exact gap be
 
 This file is also the coordination contract for finishing `beater.js` in parallel. Each agent should work in small, reviewable PRs; run the relevant tests before publishing; request or perform an independent review; merge only after the slice is verified; then update this file if the completion evidence changed.
 
+### North star: the agentic web runtime
+
+The work below is not just about matching Node/Next request handling. The end state is a runtime for the next era of agentic software: browser-capable agents, remotely managed workers, networked tool sessions, and first-class integrations living beside the web app they operate. Every PR should preserve this direction:
+
+- **Agentic browsing:** agents can inspect, navigate, and act on web surfaces with durable browser sessions, not one-off scripts bolted onto the side.
+- **Remote management:** runs, tools, browser sessions, and deployments can be started, resumed, inspected, cancelled, and audited from remote operators and AI clients.
+- **Networking:** local and remote MCP/tool providers, browser/CDP endpoints, webhooks, and service-to-service calls are treated as durable capabilities with explicit auth and retry semantics.
+- **Integrations:** first-party app actions, external SaaS APIs, Python/ML tools, and browser automation share one registry, one permission model, and one journaled execution path.
+- **Operational trust:** every agent-visible capability has provenance, auth, observability, idempotency or review semantics, and evidence that it works under crash/restart conditions.
+
 ### Agent 1 — MVP e2e gate owner
 
 **Owner:** this Codex thread.
@@ -84,6 +94,8 @@ The only external input needed. Install once:
 ```sh
 echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshenv
 ```
+
+Once the key is present and `./target/debug/beater` is built, `scripts/m2-live-gate.sh` runs A3-A5 and writes transcripts under `examples/hello/.beater/m2-gate/<timestamp>/`.
 
 ### A2. Test fixture: a slow tool (needed to kill -9 deterministically mid-tool)
 
