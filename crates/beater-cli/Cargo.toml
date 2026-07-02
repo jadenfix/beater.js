@@ -1,0 +1,20 @@
+[package]
+name = "beater-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "beater"
+path = "src/main.rs"
+
+[dependencies]
+beater-runtime.workspace = true
+beater-agent.workspace = true
+beater-py.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

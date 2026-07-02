@@ -1,0 +1,16 @@
+// M2: the agent loop runs in Rust (journaled, crash-resumable);
+// this file declares config + tools. Python tools run in embedded CPython.
+import { defineAgent, pyTool, rustTool } from "beater:agent";
+
+export default defineAgent({
+  name: "support",
+  model: "claude-opus-4-8",
+  system:
+    "You are a concise support agent. Use tools whenever math or data is involved; do not compute by hand.",
+  tools: [
+    pyTool("summarize_numbers", "./tools/summarize_numbers.py", {
+      idempotent: true,
+    }),
+    rustTool("get_time"),
+  ],
+});

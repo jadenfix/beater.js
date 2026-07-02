@@ -1,0 +1,7 @@
+/target
+.beater/
+*.db
+.venv/
+__pycache__/
+.DS_Store
+node_modules/
