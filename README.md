@@ -45,6 +45,10 @@ export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # browser-based oper
 ./target/debug/beater dev examples/hello --host 0.0.0.0 --base-url https://hello.example.com
 ```
 
+## Current limits
+
+`beater dev` currently uses one JS route isolate, so TS routes and React SSR serialize through that worker. One dev server serves one app directory. See [Runtime limits](docs/runtime-limits.md) for the exact concurrency model and isolate-pool path.
+
 ## Build from source
 
 ```sh
@@ -69,6 +73,7 @@ More docs:
 
 - [Tool contract](docs/tools.md)
 - [Integration registry](docs/integrations.md)
+- [Runtime limits](docs/runtime-limits.md)
 - [Security and trust model](docs/security.md)
 - [Changelog and versioning policy](CHANGELOG.md)
 

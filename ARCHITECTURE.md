@@ -45,7 +45,7 @@ The agent loop deliberately lives in tier 3, not tier 1: it survives hot reloads
 | Web APIs in isolate | minimal shims: console, timers, TextEncoder | route contract is plain objects, not WHATWG fetch classes (that fidelity comes with the npm-compat era). Full streams needed only for SSR |
 | TS/TSX | `deno_ast` (SWC) transpile in the module loader, source maps wired into error stacks | useful errors are an acceptance criterion, not polish |
 | HTTP | axum 0.8; response bodies stream from the isolate over an mpsc channel | |
-| Threading | `JsRuntime` is `!Send` → one dedicated OS thread (current-thread tokio rt); host↔worker via mpsc | single isolate for now; the channel protocol is already pool-shaped |
+| Threading | `JsRuntime` is `!Send` → one dedicated OS thread (current-thread tokio rt); host↔worker via mpsc | single isolate for now, so JS route work serializes; the channel protocol is already pool-shaped. See `docs/runtime-limits.md` |
 | Hot reload | `notify` watcher → drop worker thread → fresh isolate (~50–200ms) | trivially correct; agent runs are unaffected (loop lives in Rust) |
 | Python | pyo3 0.29 `auto-initialize` (Py_InitializeEx(0) — no Python signal handlers); one interpreter; every call via `spawn_blocking` + semaphore | GIL never touches the async runtime. Venv: **build-time** linking is `PYO3_PYTHON`; **runtime** packages come from `site.addsitedir(<venv>/site-packages)` with a version-match check (`beater doctor`) |
 | LLM | reqwest → Anthropic Messages API (`claude-opus-4-8`, adaptive thinking); non-streaming per step; loop on `stop_reason == "tool_use"` | each request is one journaled step |
@@ -142,7 +142,7 @@ CLI: `beater dev` · `beater agent run <name> "<prompt>"` · `beater agent resum
 - **C++ tools** — via `cxx` on the Rust built-in path when a real use case appears.
 - **Agentic browsing** — reuse beater-agents' CDP/Playwright crates as a tool provider.
 - **Deploy** — the host is one binary + assets; `beater build` → container image with the venv baked in.
-- **Isolate pool / per-request isolation** — channel protocol already supports N workers.
+- **Isolate pool / per-request isolation** — channel protocol already supports N workers; current serialization is documented in `docs/runtime-limits.md`.
 - **LLM streaming (SSE to browser)** — journal needs partial-step records first.
 - **MCP sessions/SSE + the 2026-07-28 spec** — adopt when released.
 - **Observability/evals** — integrate beater-agents (OTLP out of the agent loop) rather than rebuilding.
