@@ -3,8 +3,10 @@
 //! Every tool declares `idempotent` — the resume-safety contract
 //! (ARCHITECTURE.md §5).
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -28,7 +30,7 @@ fn default_model() -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct ToolDecl {
-    pub kind: String, // "python" | "rust" | "remote_mcp"
+    pub kind: String, // "python" | "rust" | "remote_mcp" | "browser"
     pub name: String,
     #[serde(default)]
     pub path: Option<String>,
@@ -50,6 +52,14 @@ pub struct ToolDecl {
     pub retry: Option<RemoteMcpRetryDecl>,
     #[serde(default)]
     pub egress: Vec<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub session: Option<BrowserSessionDecl>,
+    #[serde(default, rename = "allowedOrigins", alias = "allowed_origins")]
+    pub allowed_origins: Vec<String>,
+    #[serde(default)]
+    pub secrets: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,10 +80,19 @@ pub struct RemoteMcpRetryDecl {
     idempotency_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BrowserSessionDecl {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    cleanup: Option<String>,
+}
+
 pub enum ToolImpl {
     Python { path: PathBuf },
     RustBuiltin,
     RemoteMcp { config: RemoteMcpTool },
+    Browser { config: BrowserTool },
 }
 
 pub struct ToolEntry {
@@ -154,6 +173,22 @@ impl ToolRegistry {
                         imp: ToolImpl::RemoteMcp { config },
                     });
                 }
+                "browser" => {
+                    let description = decl.description.clone().with_context(|| {
+                        format!("browser tool {} requires description", decl.name)
+                    })?;
+                    let input_schema = decl.input_schema.clone().with_context(|| {
+                        format!("browser tool {} requires inputSchema", decl.name)
+                    })?;
+                    let config = BrowserTool::from_decl(decl)?;
+                    tools.push(ToolEntry {
+                        name: decl.name.clone(),
+                        description,
+                        input_schema,
+                        idempotent: decl.idempotent,
+                        imp: ToolImpl::Browser { config },
+                    });
+                }
                 other => bail!("unknown tool kind {other:?} for tool {}", decl.name),
             }
         }
@@ -224,6 +259,7 @@ impl ToolRegistry {
             }
             ToolImpl::RustBuiltin => execute_builtin(name, input),
             ToolImpl::RemoteMcp { config } => config.execute(input, context).await,
+            ToolImpl::Browser { config } => config.execute(input, context).await,
         }
     }
 }
@@ -235,6 +271,30 @@ pub struct RemoteMcpTool {
     timeout: Duration,
     retry: RemoteMcpRetry,
     idempotent: bool,
+}
+
+pub struct BrowserTool {
+    provider: BrowserProvider,
+    timeout: Duration,
+    session: BrowserSessionPolicy,
+    allowed_origins: Vec<String>,
+}
+
+enum BrowserProvider {
+    MockCdp,
+}
+
+struct BrowserSessionPolicy {
+    scope: BrowserSessionScope,
+    cleanup: BrowserSessionCleanup,
+}
+
+enum BrowserSessionScope {
+    Run,
+}
+
+enum BrowserSessionCleanup {
+    Always,
 }
 
 enum RemoteMcpAuth {
@@ -256,6 +316,211 @@ enum RemoteAttempt {
     Retryable(anyhow::Error),
     ProviderFailure(anyhow::Error),
     Fatal(anyhow::Error),
+}
+
+static ACTIVE_BROWSER_SESSIONS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+fn active_browser_sessions() -> &'static Mutex<HashMap<String, usize>> {
+    ACTIVE_BROWSER_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+impl BrowserTool {
+    fn from_decl(decl: &ToolDecl) -> Result<Self> {
+        let provider = match decl
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+        {
+            Some("mock_cdp") => BrowserProvider::MockCdp,
+            Some(other) => bail!(
+                "browser tool {} unsupported provider {other:?}; supported providers: mock_cdp",
+                decl.name
+            ),
+            None => bail!("browser tool {} requires provider", decl.name),
+        };
+        let session = BrowserSessionPolicy::from_decl(decl)?;
+        let timeout_ms = decl.timeout_ms.unwrap_or(30_000);
+        ensure!(
+            timeout_ms > 0,
+            "browser tool {} timeoutMs must be greater than 0",
+            decl.name
+        );
+        let allowed_origins = decl
+            .allowed_origins
+            .iter()
+            .map(|origin| canonical_origin(origin))
+            .collect::<Result<Vec<_>>>()
+            .with_context(|| format!("browser tool {} has invalid allowedOrigins", decl.name))?;
+        ensure!(
+            browser_secrets_empty(&decl.secrets),
+            "browser tool {} provider mock_cdp does not support secrets",
+            decl.name
+        );
+        Ok(Self {
+            provider,
+            timeout: Duration::from_millis(timeout_ms),
+            session,
+            allowed_origins,
+        })
+    }
+
+    async fn execute(&self, input: &Value, context: &ToolCallContext) -> Result<String> {
+        let fut = async {
+            let session_id = context.tool_use_id.as_deref().unwrap_or("manual");
+            let session = BrowserSessionGuard::start(session_id);
+            let result = match self.provider {
+                BrowserProvider::MockCdp => self.execute_mock_cdp(input, session.id()).await,
+            };
+            drop(session);
+            result
+        };
+        tokio::time::timeout(self.timeout, fut)
+            .await
+            .with_context(|| {
+                format!(
+                    "browser tool timed out after {}ms",
+                    self.timeout.as_millis()
+                )
+            })?
+    }
+
+    async fn execute_mock_cdp(&self, input: &Value, session_id: &str) -> Result<String> {
+        if let Some(delay_ms) = input.get("delayMs").and_then(Value::as_u64) {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        let url = input.get("url").and_then(Value::as_str);
+        if let Some(url) = url {
+            self.ensure_url_allowed(url)?;
+        }
+        let task = input
+            .get("task")
+            .and_then(Value::as_str)
+            .unwrap_or("inspect page");
+        Ok(json!({
+            "provider": "mock_cdp",
+            "session": {
+                "id": session_id,
+                "scope": self.session.scope.as_str(),
+                "cleanup": self.session.cleanup.as_str(),
+            },
+            "url": url,
+            "title": "Mock Browser Page",
+            "text": format!("completed browser task: {task}"),
+        })
+        .to_string())
+    }
+
+    fn ensure_url_allowed(&self, raw_url: &str) -> Result<()> {
+        let origin = origin_from_url(raw_url)?;
+        ensure!(
+            self.allowed_origins
+                .iter()
+                .any(|allowed| allowed == &origin),
+            "browser navigation to {origin} is not allowed by allowedOrigins {:?}",
+            self.allowed_origins
+        );
+        Ok(())
+    }
+}
+
+impl BrowserSessionPolicy {
+    fn from_decl(decl: &ToolDecl) -> Result<Self> {
+        let scope = match decl
+            .session
+            .as_ref()
+            .and_then(|session| session.scope.as_deref())
+            .unwrap_or("run")
+        {
+            "run" => BrowserSessionScope::Run,
+            other => bail!(
+                "browser tool {} unsupported session.scope {other:?}; supported scopes: run",
+                decl.name
+            ),
+        };
+        let cleanup = match decl
+            .session
+            .as_ref()
+            .and_then(|session| session.cleanup.as_deref())
+            .unwrap_or("always")
+        {
+            "always" => BrowserSessionCleanup::Always,
+            other => bail!(
+                "browser tool {} unsupported session.cleanup {other:?}; supported cleanup: always",
+                decl.name
+            ),
+        };
+        Ok(Self { scope, cleanup })
+    }
+}
+
+impl BrowserSessionScope {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Run => "run",
+        }
+    }
+}
+
+impl BrowserSessionCleanup {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Always => "always",
+        }
+    }
+}
+
+struct BrowserSessionGuard {
+    id: String,
+}
+
+impl BrowserSessionGuard {
+    fn start(id: &str) -> Self {
+        active_browser_sessions()
+            .lock()
+            .expect("browser session set poisoned")
+            .entry(id.to_string())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        Self { id: id.to_string() }
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Drop for BrowserSessionGuard {
+    fn drop(&mut self) {
+        let mut sessions = active_browser_sessions()
+            .lock()
+            .expect("browser session set poisoned");
+        sessions
+            .entry(self.id.clone())
+            .and_modify(|count| *count = count.saturating_sub(1));
+        sessions.retain(|_, count| *count > 0);
+    }
+}
+
+#[cfg(test)]
+fn browser_session_active_for_tests(id: &str) -> bool {
+    active_browser_sessions()
+        .lock()
+        .expect("browser session set poisoned")
+        .get(id)
+        .copied()
+        .unwrap_or_default()
+        > 0
+}
+
+#[cfg(test)]
+fn browser_session_count_for_tests(id: &str) -> usize {
+    active_browser_sessions()
+        .lock()
+        .expect("browser session set poisoned")
+        .get(id)
+        .copied()
+        .unwrap_or_default()
 }
 
 impl RemoteMcpTool {
@@ -557,6 +822,56 @@ fn parse_remote_endpoint(raw: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
+fn canonical_origin(origin: &str) -> Result<String> {
+    let url = reqwest::Url::parse(origin.trim())
+        .with_context(|| format!("browser allowed origin is not a URL: {origin:?}"))?;
+    ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "browser allowed origin must use http or https: {origin}"
+    );
+    ensure!(
+        url.host_str().is_some(),
+        "browser allowed origin has no host: {origin}"
+    );
+    ensure!(
+        url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "browser allowed origin must be an origin without credentials, path, query, or fragment: {origin}"
+    );
+    origin_from_url(origin)
+}
+
+fn origin_from_url(raw_url: &str) -> Result<String> {
+    let url = reqwest::Url::parse(raw_url)
+        .with_context(|| format!("browser URL is not valid: {raw_url:?}"))?;
+    ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "browser URL must use http or https: {raw_url}"
+    );
+    let host = url
+        .host_str()
+        .with_context(|| format!("browser URL has no host: {raw_url}"))?;
+    Ok(format!(
+        "{}://{}{}",
+        url.scheme(),
+        host,
+        url.port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default()
+    ))
+}
+
+fn browser_secrets_empty(secrets: &Value) -> bool {
+    matches!(secrets, Value::Null)
+        || secrets
+            .as_object()
+            .map(serde_json::Map::is_empty)
+            .unwrap_or(false)
+}
+
 fn egress_allows(endpoint: &reqwest::Url, egress: &[String]) -> bool {
     let Some(host) = endpoint.host_str() else {
         return false;
@@ -635,7 +950,10 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{ToolCallContext, ToolDecl, ToolNeedsReview, ToolRegistry};
+    use super::{
+        BrowserSessionGuard, ToolCallContext, ToolDecl, ToolNeedsReview, ToolRegistry,
+        browser_session_active_for_tests, browser_session_count_for_tests,
+    };
 
     #[test]
     fn hello_slow_fixture_tools_preserve_resume_contract() {
@@ -791,6 +1109,108 @@ mod tests {
             Err(error) => error,
         };
         assert!(format!("{error:#}").contains("requires https"), "{error:#}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn browser_mock_cdp_executes_and_cleans_session() {
+        let registry = ToolRegistry::build(PathBuf::new().as_path(), &[browser_decl()])
+            .expect("browser registry should build");
+
+        let result = registry
+            .execute_with_context(
+                "browser.checkout",
+                &json!({"url": "https://shop.example/cart", "task": "verify checkout"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_browser".to_string()),
+                },
+            )
+            .await
+            .expect("browser tool should run");
+
+        assert!(!browser_session_active_for_tests("toolu_browser"));
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["provider"], "mock_cdp");
+        assert_eq!(result["session"]["id"], "toolu_browser");
+        assert_eq!(result["session"]["scope"], "run");
+        assert_eq!(result["session"]["cleanup"], "always");
+        assert_eq!(result["url"], "https://shop.example/cart");
+        assert!(result["text"].as_str().unwrap().contains("verify checkout"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn browser_mock_cdp_rejects_disallowed_origin_and_cleans_session() {
+        let registry = ToolRegistry::build(PathBuf::new().as_path(), &[browser_decl()])
+            .expect("browser registry should build");
+
+        let error = registry
+            .execute_with_context(
+                "browser.checkout",
+                &json!({"url": "https://evil.example/cart", "task": "verify checkout"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_browser_reject".to_string()),
+                },
+            )
+            .await
+            .expect_err("browser tool should reject disallowed origin");
+
+        assert!(!browser_session_active_for_tests("toolu_browser_reject"));
+        assert!(
+            format!("{error:#}").contains("not allowed by allowedOrigins"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn browser_mock_cdp_timeout_cleans_session() {
+        let mut decl = browser_decl();
+        decl.timeout_ms = Some(20);
+        let registry = ToolRegistry::build(PathBuf::new().as_path(), &[decl])
+            .expect("browser registry should build");
+
+        let error = registry
+            .execute_with_context(
+                "browser.checkout",
+                &json!({
+                    "url": "https://shop.example/cart",
+                    "task": "verify checkout",
+                    "delayMs": 200
+                }),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_browser_timeout".to_string()),
+                },
+            )
+            .await
+            .expect_err("browser tool should time out");
+
+        assert!(!browser_session_active_for_tests("toolu_browser_timeout"));
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    }
+
+    #[test]
+    fn browser_session_tracking_counts_duplicate_ids() {
+        assert_eq!(browser_session_count_for_tests("duplicate-session"), 0);
+        let first = BrowserSessionGuard::start("duplicate-session");
+        let second = BrowserSessionGuard::start("duplicate-session");
+        assert_eq!(browser_session_count_for_tests("duplicate-session"), 2);
+        drop(first);
+        assert_eq!(browser_session_count_for_tests("duplicate-session"), 1);
+        drop(second);
+        assert_eq!(browser_session_count_for_tests("duplicate-session"), 0);
+    }
+
+    #[test]
+    fn browser_mock_cdp_rejects_secrets() {
+        let mut decl = browser_decl();
+        decl.secrets = json!({"profile": {"env": "BROWSER_PROFILE_ID"}});
+
+        let error = match ToolRegistry::build(PathBuf::new().as_path(), &[decl]) {
+            Ok(_) => panic!("mock_cdp should reject secrets"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("does not support secrets"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1056,6 +1476,28 @@ mod tests {
             value["auth"] = json!({"type": "bearer", "env": env});
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    fn browser_decl() -> ToolDecl {
+        serde_json::from_value(json!({
+            "kind": "browser",
+            "name": "browser.checkout",
+            "provider": "mock_cdp",
+            "description": "Verify checkout in a browser.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "task": {"type": "string"}
+                },
+                "required": ["url", "task"]
+            },
+            "session": {"scope": "run", "cleanup": "always"},
+            "allowedOrigins": ["https://shop.example"],
+            "timeoutMs": 1000,
+            "idempotent": false
+        }))
+        .unwrap()
     }
 
     fn unique_env(prefix: &str) -> String {

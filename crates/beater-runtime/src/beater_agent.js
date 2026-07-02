@@ -53,3 +53,30 @@ export function remoteMcpTool(name, opts = {}) {
     egress: opts.egress ?? [],
   };
 }
+
+// Browser automation tool source. The Rust side currently ships a mock CDP
+// provider for deterministic lifecycle tests; real Playwright/CDP providers
+// use the same declaration shape.
+export function browserTool(name, opts = {}) {
+  if (!opts.provider) {
+    throw new Error("browserTool requires opts.provider");
+  }
+  if (!opts.description) {
+    throw new Error("browserTool requires opts.description");
+  }
+  if (!opts.inputSchema) {
+    throw new Error("browserTool requires opts.inputSchema");
+  }
+  return {
+    kind: "browser",
+    name,
+    idempotent: opts.idempotent ?? false,
+    provider: opts.provider,
+    description: opts.description,
+    inputSchema: opts.inputSchema,
+    session: opts.session ?? {scope: "run", cleanup: "always"},
+    allowedOrigins: opts.allowedOrigins ?? [],
+    timeoutMs: opts.timeoutMs ?? 30000,
+    secrets: opts.secrets ?? {},
+  };
+}

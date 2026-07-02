@@ -355,7 +355,7 @@ async fn execute_tool_step(
 
 #[cfg(test)]
 mod tests {
-    use super::resume;
+    use super::{resume, run};
     use crate::journal::Journal;
     use serde_json::{Value, json};
     use std::collections::VecDeque;
@@ -523,6 +523,32 @@ def run(input):
         })
     }
 
+    fn browser_config() -> Value {
+        json!({
+            "name": "support",
+            "model": "mock",
+            "system": "test",
+            "tools": [{
+                "kind": "browser",
+                "name": "browser.checkout",
+                "provider": "mock_cdp",
+                "description": "Verify checkout in a browser.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "task": {"type": "string"}
+                    },
+                    "required": ["url", "task"]
+                },
+                "session": {"scope": "run", "cleanup": "always"},
+                "allowedOrigins": ["https://shop.example"],
+                "timeoutMs": 1000,
+                "idempotent": false
+            }],
+        })
+    }
+
     fn seed_interrupted_tool_run(app: &TempApp) {
         let journal = Journal::open(app.path()).unwrap();
         journal.create_run("run-1", "support", "echo ok").unwrap();
@@ -591,6 +617,65 @@ def run(input):
         assert_eq!(tool_steps[0].attempt, 1);
         assert_eq!(tool_steps[1].status, "completed");
         assert_eq!(tool_steps[1].attempt, 2);
+    }
+
+    #[test]
+    fn run_completes_browser_tool_through_agent_loop() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("browser-tool");
+        let server = MockAnthropic::new(vec![
+            json!({
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_browser",
+                    "name": "browser.checkout",
+                    "input": {
+                        "url": "https://shop.example/cart",
+                        "task": "verify checkout"
+                    },
+                }],
+                "stop_reason": "tool_use",
+            }),
+            json!({
+                "content": [{"type": "text", "text": "checkout verified"}],
+                "stop_reason": "end_turn",
+            }),
+        ]);
+        let _env = EnvGuard::set(&server.base_url);
+
+        run(
+            app.path(),
+            "support",
+            browser_config(),
+            None,
+            "verify checkout",
+        )
+        .unwrap();
+        let requests = server.join();
+        assert_eq!(requests.len(), 2);
+
+        let body: Value = serde_json::from_str(&requests[1]).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let tool_result = &messages.last().unwrap()["content"][0];
+        assert_eq!(tool_result["tool_use_id"], "toolu_browser");
+        assert!(
+            tool_result["content"]
+                .as_str()
+                .unwrap()
+                .contains("Mock Browser Page")
+        );
+
+        let journal = Journal::open(app.path()).unwrap();
+        let (run, _) = journal.list_runs().unwrap().pop().unwrap();
+        assert_eq!(run.status, "completed");
+        let tool_step = journal
+            .steps(&run.id)
+            .unwrap()
+            .into_iter()
+            .find(|step| step.kind == "tool_call")
+            .expect("browser tool call step");
+        assert_eq!(tool_step.status, "completed");
+        assert_eq!(tool_step.tool_use_id.as_deref(), Some("toolu_browser"));
     }
 
     #[test]
