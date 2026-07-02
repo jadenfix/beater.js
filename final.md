@@ -169,7 +169,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 - [x] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, browser preflight/CORS support, public base URL metadata, and a safe way to expose a dev/prod agent endpoint beyond localhost.
 - [ ] Networked integration contract: remote MCP tool sources, request timeouts/retries, secret handling, and egress policy tested against mock servers.
 - [ ] Agentic browsing foundation: CDP/Playwright provider contract, browser session lifecycle cleanup, and e2e tests proving an agent can complete a browser task through a tool declaration.
-- [ ] Integration registry docs: show how first-party Python/Rust tools, remote MCP servers, and browser providers coexist in one agent config without queues or sidecar services.
+- [x] Integration registry docs: `docs/integrations.md` shows how first-party Python/Rust tools, remote MCP servers, and browser providers coexist in one agent config without queues or sidecar services.
 
 ### Security floor (currently: dev-mode assumptions everywhere)
 - [x] /mcp local-dev mode can remain unauthenticated; `BEATER_MCP_TOKEN` enables bearer auth, `BEATER_MCP_TRUSTED_ORIGINS` pins browser operators, and smoke tests prove unauthorized remote calls fail closed.
@@ -179,6 +179,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 ### Docs
 - [x] README quickstart actually runnable start-to-finish by a stranger (install Rust, install Python 3.11+, cargo build, beater dev)
 - [x] `docs/tools.md`: the pyTool/rustTool contract (TOOL dict, run(), idempotency rules)
+- [x] `docs/integrations.md`: one-registry contract for first-party tools, planned remote MCP sources, planned browser providers, secrets, retries, idempotency, egress, and journal audit rules
 - [x] CHANGELOG + versioning policy (deno_core pin-bump cadence)
 
 ---

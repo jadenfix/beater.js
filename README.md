@@ -68,6 +68,7 @@ Agent tests and local mock runs can point at a non-Anthropic endpoint with `ANTH
 More docs:
 
 - [Tool contract](docs/tools.md)
+- [Integration registry](docs/integrations.md)
 - [Security and trust model](docs/security.md)
 - [Changelog and versioning policy](CHANGELOG.md)
 

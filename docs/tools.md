@@ -72,3 +72,5 @@ Use `idempotent: false` for tools that send email, charge money, mutate external
 ## Integration roadmap
 
 Remote MCP servers and browser-control providers should enter through the same registry shape: name, description, input schema, implementation kind, timeout/retry policy, secret source, and idempotency. They should not bypass the journal. A remote MCP or browser tool is release-ready only when it has mock-server or browser e2e coverage proving failures are resumable and sessions are cleaned up.
+
+See [Integration Registry](integrations.md) for the full contract and target declaration shapes.
