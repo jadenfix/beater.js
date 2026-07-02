@@ -50,6 +50,7 @@ pub fn llms_txt(
     base_url: &str,
     routes: &[(String, Option<RouteMeta>)],
     agents: &[String],
+    mcp_access: &crate::mcp::AccessConfig,
 ) -> String {
     let mut out = format!("# {app_name}\n\n> Served by beater.js — agent-first web framework.\n\n");
     out.push_str("## Routes\n\n");
@@ -72,14 +73,29 @@ pub fn llms_txt(
             out.push_str(&format!("- {agent}\n"));
         }
     }
+    let auth_note = if mcp_access.auth_required() {
+        "requires Authorization: Bearer <token>"
+    } else {
+        "no bearer token configured"
+    };
     out.push_str(&format!(
-        "\n## For AI agents\n\n- MCP endpoint (tools): {base_url}/mcp (Streamable HTTP, spec {})\n- Manifest: {base_url}/.well-known/beater.json\n",
+        "\n## For AI agents\n\n- MCP endpoint (tools): {base_url}/mcp (Streamable HTTP, spec {}; {auth_note})\n- Manifest: {base_url}/.well-known/beater.json\n",
         crate::mcp::PROTOCOL_VERSION,
     ));
     out
 }
 
-pub fn well_known(app_name: &str, base_url: &str, agents: &[String]) -> serde_json::Value {
+pub fn well_known(
+    app_name: &str,
+    base_url: &str,
+    agents: &[String],
+    mcp_access: &crate::mcp::AccessConfig,
+) -> serde_json::Value {
+    let auth = if mcp_access.auth_required() {
+        json!({"required": true, "schemes": ["bearer"]})
+    } else {
+        json!({"required": false, "schemes": []})
+    };
     json!({
         "name": app_name,
         "framework": {"name": "beater.js", "version": env!("CARGO_PKG_VERSION")},
@@ -87,6 +103,12 @@ pub fn well_known(app_name: &str, base_url: &str, agents: &[String]) -> serde_js
             "endpoint": format!("{base_url}/mcp"),
             "transport": "streamable-http",
             "protocolVersion": crate::mcp::PROTOCOL_VERSION,
+            "auth": auth,
+            "originPolicy": {
+                "noOrigin": "allowed",
+                "loopbackOrigins": true,
+                "trustedOrigins": mcp_access.trusted_origins(),
+            },
         },
         "sitemap": format!("{base_url}/sitemap.xml"),
         "llms": format!("{base_url}/llms.txt"),

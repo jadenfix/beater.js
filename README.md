@@ -37,6 +37,14 @@ cargo build --workspace
 ./target/debug/beater doctor examples/hello              # verify Python/venv/V8 wiring
 ```
 
+When exposing `/mcp` beyond localhost, require a bearer token and add browser origins explicitly:
+
+```sh
+export BEATER_MCP_TOKEN="$(openssl rand -hex 32)"
+export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # browser-based operators only
+./target/debug/beater dev examples/hello --host 0.0.0.0
+```
+
 ## Build from source
 
 ```sh

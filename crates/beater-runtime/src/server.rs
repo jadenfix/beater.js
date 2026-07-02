@@ -32,6 +32,7 @@ struct DevState {
     app_name: String,
     agents: Arc<Vec<String>>,
     base_url: String,
+    mcp_access: mcp::AccessConfig,
 }
 
 pub async fn serve(
@@ -55,6 +56,23 @@ pub async fn serve(
         tracing::info!("tool  {} (mcp)", tool.name);
     }
 
+    let mcp_access = mcp::AccessConfig::from_env();
+    if !host.is_loopback() && !mcp_access.auth_required() {
+        tracing::warn!(
+            "MCP endpoint is bound beyond loopback without bearer auth; set {} before exposing remote management",
+            mcp::DEFAULT_TOKEN_ENV
+        );
+    }
+    if mcp_access.auth_required() {
+        tracing::info!("MCP bearer-token auth enabled");
+    }
+    if !mcp_access.trusted_origins().is_empty() {
+        tracing::info!(
+            "MCP trusted origins: {}",
+            mcp_access.trusted_origins().join(", ")
+        );
+    }
+
     let worker = worker::spawn()?;
     let state = DevState {
         routes: Arc::new(RwLock::new(table)),
@@ -63,12 +81,18 @@ pub async fn serve(
         app_name: config.name.clone(),
         agents: Arc::new(agents),
         base_url: format!("http://{host}:{port}"),
+        mcp_access,
     };
 
     spawn_reloader(config.app_dir.clone(), state.clone());
 
     let app = Router::new()
-        .route("/mcp", post(handle_mcp_post).get(handle_mcp_get))
+        .route(
+            "/mcp",
+            post(handle_mcp_post)
+                .get(handle_mcp_get)
+                .options(handle_mcp_options),
+        )
         .route("/robots.txt", get(handle_robots))
         .route("/sitemap.xml", get(handle_sitemap))
         .route("/llms.txt", get(handle_llms))
@@ -151,11 +175,15 @@ async fn handle_mcp_post(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response<Body> {
-    mcp::handle_post(&state.registry, &headers, &body).await
+    mcp::handle_post(&state.registry, &state.mcp_access, &headers, &body).await
 }
 
-async fn handle_mcp_get() -> Response<Body> {
-    mcp::handle_get()
+async fn handle_mcp_get(State(state): State<DevState>, headers: HeaderMap) -> Response<Body> {
+    mcp::handle_get(&state.mcp_access, &headers)
+}
+
+async fn handle_mcp_options(State(state): State<DevState>, headers: HeaderMap) -> Response<Body> {
+    mcp::handle_options(&state.mcp_access, &headers)
 }
 
 async fn handle_robots(State(state): State<DevState>) -> Response<Body> {
@@ -207,12 +235,23 @@ async fn handle_llms(State(state): State<DevState>) -> Response<Body> {
         .collect();
     text_response(
         StatusCode::OK,
-        crawl::llms_txt(&state.app_name, &state.base_url, &routes, &state.agents),
+        crawl::llms_txt(
+            &state.app_name,
+            &state.base_url,
+            &routes,
+            &state.agents,
+            &state.mcp_access,
+        ),
     )
 }
 
 async fn handle_well_known(State(state): State<DevState>) -> Response<Body> {
-    let manifest = crawl::well_known(&state.app_name, &state.base_url, &state.agents);
+    let manifest = crawl::well_known(
+        &state.app_name,
+        &state.base_url,
+        &state.agents,
+        &state.mcp_access,
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")

@@ -50,7 +50,7 @@ The work below is not just about matching Node/Next request handling. The end st
 - [x] Add `ANTHROPIC_BASE_URL` support plus mocked journal-resume tests.
 - [x] Add the no-key integration test that spawns `beater dev` and checks `/api/health`, `/`, and `/mcp`.
 - [x] Add CI for fmt, clippy, and tests on macOS/Linux with rusty_v8 caching.
-- [ ] Improve portability/docs: Python discovery guidance, host binding, quickstart, `docs/tools.md`, and security notes.
+- [x] Improve portability/docs: Python discovery guidance, host binding, quickstart, `docs/tools.md`, and security notes.
 - [x] Keep every release-hardening PR pointed at agent-platform foundations: deterministic network tests, explicit host binding, auth-ready remote surfaces, integration-friendly tool contracts, and browser/e2e hooks.
 
 **Likely touched files:** `crates/**`, `.github/workflows/**`, docs under `docs/**`, `README.md`, `ARCHITECTURE.md`, and `final.md`.
@@ -76,7 +76,7 @@ The work below is not just about matching Node/Next request handling. The end st
 | TS routes in embedded V8 | `curl /api/health` returns JSON from a `.ts` handler; live edit hot-reloads in ~1s (fresh isolate) |
 | Source-mapped errors | broken route returns a stack pointing at `boom.ts:8:9` (original TS line) |
 | React 19 SSR | `curl /` returns server-rendered HTML from `index.tsx`; vendored ESM, no Node/npm anywhere |
-| MCP server (2025-11-25) | official MCP inspector completes initialize + tools/list + tools/call; bogus Origin → 403; GET → 405 |
+| MCP server (2025-11-25) | official MCP inspector completes initialize + tools/list + tools/call; bogus Origin → 403; GET → 405; bearer-token mode returns 401 without `Authorization`; trusted remote browser origins get preflight/CORS support |
 | Python-over-MCP | `summarize_numbers` (a `.py` file) executes in embedded CPython when called by an external MCP client |
 | Agent Access Layer | /robots.txt, /sitemap.xml, /llms.txt, /.well-known/beater.json generated from the route table; `export const agent = {crawl: false}` excludes a route from sitemap + llms.txt |
 | Agent config pipeline | `agent.ts` (via `beater:agent` shim) evaluates in a one-shot isolate → JSON config → Rust registry; Python TOOL metadata loads through embedded CPython |
@@ -166,13 +166,13 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 ### Agent-platform enablers
 - [x] Mockable outbound LLM networking: `ANTHROPIC_BASE_URL` lets resume and integration tests run against local servers instead of live vendor APIs.
 - [x] Network bind control: `--host` / `[app] host` makes container, VM, and remote-management smoke tests possible.
-- [ ] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, and a safe way to expose a dev/prod agent endpoint beyond localhost.
+- [x] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, browser preflight/CORS support, and a safe way to expose a dev/prod agent endpoint beyond localhost.
 - [ ] Networked integration contract: remote MCP tool sources, request timeouts/retries, secret handling, and egress policy tested against mock servers.
 - [ ] Agentic browsing foundation: CDP/Playwright provider contract, browser session lifecycle cleanup, and e2e tests proving an agent can complete a browser task through a tool declaration.
 - [ ] Integration registry docs: show how first-party Python/Rust tools, remote MCP servers, and browser providers coexist in one agent config without queues or sidecar services.
 
 ### Security floor (currently: dev-mode assumptions everywhere)
-- [ ] /mcp has no auth — fine on localhost, must be stated loudly + bearer-token option before anyone binds 0.0.0.0
+- [x] /mcp local-dev mode can remain unauthenticated; `BEATER_MCP_TOKEN` enables bearer auth, `BEATER_MCP_TRUSTED_ORIGINS` pins browser operators, and smoke tests prove unauthorized remote calls fail closed.
 - [x] Python tools run with full process privileges — trust model documented in `docs/security.md` (tools are first-party code until the wasm sandbox tier lands)
 - [x] Journal stores full prompts/results in plaintext SQLite — documented in `docs/security.md`; redaction hooks remain later work
 
@@ -213,5 +213,5 @@ The through-line is not just parity with Node/Next; it is an agent-native runtim
 ## TL;DR
 
 - **To be e2e done (MVP):** install `ANTHROPIC_API_KEY`, add one slow-tool fixture, run the three A3–A5 gates, flip the docs. Everything else is already built and verified.
-- **To ship v0.1:** tests + CI, portable Python config, isolate-pool-or-documented-limits, `beater new`, honest security notes.
+- **To ship v0.1:** tests + CI, portable Python config, isolate-pool-or-documented-limits, `beater new`.
 - **To kill Node/Next:** pay off punts 1–5 and 11 first; the rest is compounding advantage.

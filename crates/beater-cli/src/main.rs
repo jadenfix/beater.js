@@ -126,6 +126,15 @@ fn doctor(app: &std::path::Path) -> Result<()> {
         Ok(path) => println!("  shell:   PYO3_PYTHON={path}"),
         Err(_) => println!("  shell:   PYO3_PYTHON not set"),
     }
+    let mcp_access = beater_runtime::McpAccessConfig::from_env();
+    if mcp_access.auth_required() {
+        println!("  mcp:     bearer auth enabled");
+    } else {
+        println!("  mcp:     no bearer token configured");
+    }
+    if !mcp_access.trusted_origins().is_empty() {
+        println!("  origins: {}", mcp_access.trusted_origins().join(", "));
+    }
     println!("  v8:      {}", beater_runtime::v8_version());
     Ok(())
 }

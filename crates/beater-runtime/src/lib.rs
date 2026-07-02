@@ -12,6 +12,7 @@ mod worker;
 
 pub use agent_config::load_agent_config;
 pub use config::AppConfig;
+pub use mcp::AccessConfig as McpAccessConfig;
 pub use router::{Route, RouteKind, RouteTable};
 
 use std::path::Path;

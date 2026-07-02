@@ -2,58 +2,170 @@
 //!
 //! Deliberately minimal and hand-rolled: a compliant server needs one
 //! endpoint that accepts POST JSON-RPC, validates Origin (DNS-rebinding
-//! defense), and MAY answer GET with 405 when it offers no server-initiated
-//! SSE stream. No sessions (`MCP-Session-Id` is a MAY), no SSE — every
-//! request gets a single JSON object back.
+//! defense), optionally requires bearer-token auth for remote management,
+//! and MAY answer GET with 405 when it offers no server-initiated SSE stream.
+//! No sessions (`MCP-Session-Id` is a MAY), no SSE — every request gets a
+//! single JSON object back.
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Response, StatusCode};
+use axum::http::header::{
+    ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+    ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE, AUTHORIZATION, ORIGIN, VARY,
+    WWW_AUTHENTICATE,
+};
+use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use serde_json::{Value, json};
 
 use beater_agent::ToolRegistry;
 
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
+pub const DEFAULT_TOKEN_ENV: &str = "BEATER_MCP_TOKEN";
+pub const DEFAULT_TRUSTED_ORIGINS_ENV: &str = "BEATER_MCP_TRUSTED_ORIGINS";
 
-/// Origin MUST be validated when present; local dev accepts localhost only.
-pub fn origin_allowed(headers: &HeaderMap) -> bool {
-    match headers.get("origin").and_then(|v| v.to_str().ok()) {
-        None => true, // non-browser clients (curl, inspector CLI) send no Origin
-        Some(origin) => {
-            origin.starts_with("http://localhost")
-                || origin.starts_with("https://localhost")
-                || origin.starts_with("http://127.0.0.1")
-                || origin.starts_with("https://127.0.0.1")
+/// MCP access policy. By default the endpoint remains local-dev friendly:
+/// non-browser clients may omit Origin and no token is required. Set
+/// BEATER_MCP_TOKEN before binding beyond loopback.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AccessConfig {
+    bearer_token: Option<String>,
+    trusted_origins: Vec<String>,
+}
+
+impl AccessConfig {
+    pub fn from_env() -> Self {
+        let bearer_token = std::env::var(DEFAULT_TOKEN_ENV).ok();
+        let trusted_origins = std::env::var(DEFAULT_TRUSTED_ORIGINS_ENV)
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|origin| !origin.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::new(bearer_token, trusted_origins)
+    }
+
+    pub fn new(bearer_token: Option<String>, trusted_origins: Vec<String>) -> Self {
+        Self {
+            bearer_token: bearer_token.and_then(non_empty),
+            trusted_origins: trusted_origins
+                .into_iter()
+                .filter_map(non_empty)
+                .map(normalize_origin)
+                .collect(),
         }
     }
+
+    pub fn auth_required(&self) -> bool {
+        self.bearer_token.is_some()
+    }
+
+    pub fn trusted_origins(&self) -> &[String] {
+        &self.trusted_origins
+    }
+
+    /// Origin MUST be validated when present. Browser callers are limited to
+    /// loopback origins plus explicitly trusted remote operator origins.
+    pub fn origin_allowed(&self, headers: &HeaderMap) -> bool {
+        let Some(origin) = headers.get(ORIGIN).and_then(|v| v.to_str().ok()) else {
+            return true; // non-browser clients (curl, inspector CLI) send no Origin
+        };
+        let origin = normalize_origin(origin);
+        is_loopback_origin(&origin)
+            || self
+                .trusted_origins
+                .iter()
+                .any(|allowed| allowed == &origin)
+    }
+
+    fn authorized(&self, headers: &HeaderMap) -> bool {
+        let Some(expected) = self.bearer_token.as_deref() else {
+            return true;
+        };
+        let Some(value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
+            return false;
+        };
+        let Some((scheme, token)) = value.split_once(' ') else {
+            return false;
+        };
+        scheme.eq_ignore_ascii_case("bearer") && token.trim() == expected
+    }
+
+    fn cors_origin(&self, headers: &HeaderMap) -> Option<HeaderValue> {
+        let origin = headers.get(ORIGIN)?.to_str().ok()?;
+        self.origin_allowed(headers)
+            .then(|| HeaderValue::from_str(origin).ok())
+            .flatten()
+    }
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn normalize_origin(origin: impl AsRef<str>) -> String {
+    origin.as_ref().trim().trim_end_matches('/').to_string()
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    let Ok(url) = deno_core::url::Url::parse(origin) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 pub async fn handle_post(
     registry: &ToolRegistry,
+    access: &AccessConfig,
     headers: &HeaderMap,
     body: &[u8],
 ) -> Response<Body> {
-    if !origin_allowed(headers) {
+    if !access.origin_allowed(headers) {
         return http_response(
             StatusCode::FORBIDDEN,
             json!({"jsonrpc": "2.0", "error": {"code": -32600, "message": "origin not allowed"}}),
         );
     }
+    if !access.authorized(headers) {
+        return with_cors(unauthorized_response(), access, headers);
+    }
     let message: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => {
-            return http_response(
-                StatusCode::BAD_REQUEST,
-                json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}}),
+            return with_cors(
+                http_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}}),
+                ),
+                access,
+                headers,
             );
         }
     };
 
     // Notifications and client responses carry no `id` → 202 Accepted, no body.
     let Some(id) = message.get("id").filter(|id| !id.is_null()).cloned() else {
-        return Response::builder()
-            .status(StatusCode::ACCEPTED)
-            .body(Body::empty())
-            .expect("static response");
+        return with_cors(
+            Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .body(Body::empty())
+                .expect("static response"),
+            access,
+            headers,
+        );
     };
 
     let method = message["method"].as_str().unwrap_or_default();
@@ -76,18 +188,56 @@ pub async fn handle_post(
             json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
         }
     };
-    http_response(StatusCode::OK, body)
+    with_cors(http_response(StatusCode::OK, body), access, headers)
 }
 
 /// GET without a server-initiated SSE stream → 405, per spec.
-pub fn handle_get() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::METHOD_NOT_ALLOWED)
-        .header("allow", "POST")
-        .body(Body::from(
-            "this MCP endpoint does not offer a server-initiated stream",
-        ))
-        .expect("static response")
+pub fn handle_get(access: &AccessConfig, headers: &HeaderMap) -> Response<Body> {
+    if !access.origin_allowed(headers) {
+        return http_response(
+            StatusCode::FORBIDDEN,
+            json!({"jsonrpc": "2.0", "error": {"code": -32600, "message": "origin not allowed"}}),
+        );
+    }
+    if !access.authorized(headers) {
+        return with_cors(unauthorized_response(), access, headers);
+    }
+    with_cors(
+        Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header("allow", "POST")
+            .body(Body::from(
+                "this MCP endpoint does not offer a server-initiated stream",
+            ))
+            .expect("static response"),
+        access,
+        headers,
+    )
+}
+
+/// Browser MCP clients preflight Authorization + JSON requests.
+pub fn handle_options(access: &AccessConfig, headers: &HeaderMap) -> Response<Body> {
+    if !access.origin_allowed(headers) {
+        return http_response(
+            StatusCode::FORBIDDEN,
+            json!({"jsonrpc": "2.0", "error": {"code": -32600, "message": "origin not allowed"}}),
+        );
+    }
+    with_cors(
+        Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header("allow", "POST, GET, OPTIONS")
+            .header(ACCESS_CONTROL_ALLOW_METHODS, "POST, GET, OPTIONS")
+            .header(
+                ACCESS_CONTROL_ALLOW_HEADERS,
+                "authorization, content-type, accept, mcp-protocol-version, mcp-session-id",
+            )
+            .header(ACCESS_CONTROL_MAX_AGE, "600")
+            .body(Body::empty())
+            .expect("static response"),
+        access,
+        headers,
+    )
 }
 
 fn tools_json(registry: &ToolRegistry) -> Value {
@@ -133,4 +283,171 @@ fn http_response(status: StatusCode, body: Value) -> Response<Body> {
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .expect("static response")
+}
+
+fn unauthorized_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("content-type", "application/json")
+        .header(WWW_AUTHENTICATE, "Bearer")
+        .body(Body::from(
+            json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32001, "message": "unauthorized"}})
+                .to_string(),
+        ))
+        .expect("static response")
+}
+
+fn with_cors(
+    mut response: Response<Body>,
+    access: &AccessConfig,
+    request_headers: &HeaderMap,
+) -> Response<Body> {
+    let Some(origin) = access.cors_origin(request_headers) else {
+        return response;
+    };
+    let headers = response.headers_mut();
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    headers.insert(VARY, HeaderValue::from_static("origin"));
+    headers.insert(
+        ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("www-authenticate"),
+    );
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::header::{AUTHORIZATION, ORIGIN};
+    use axum::http::{HeaderMap, StatusCode};
+
+    use beater_agent::ToolRegistry;
+
+    use super::{AccessConfig, handle_get, handle_options, handle_post};
+
+    #[test]
+    fn origin_policy_accepts_loopback_and_rejects_prefix_spoofing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert!(AccessConfig::default().origin_allowed(&headers));
+
+        headers.insert(ORIGIN, "http://localhost.evil.test".parse().unwrap());
+        assert!(!AccessConfig::default().origin_allowed(&headers));
+    }
+
+    #[test]
+    fn origin_policy_accepts_explicit_trusted_remote_origins() {
+        let access = AccessConfig::new(None, vec!["https://ops.example.com/".to_string()]);
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "https://ops.example.com".parse().unwrap());
+        assert!(access.origin_allowed(&headers));
+
+        headers.insert(ORIGIN, "https://evil.example.com".parse().unwrap());
+        assert!(!access.origin_allowed(&headers));
+    }
+
+    #[tokio::test]
+    async fn bearer_token_is_required_when_configured() {
+        let registry = ToolRegistry::empty();
+        let access = AccessConfig::new(Some("secret".to_string()), Vec::new());
+        let headers = HeaderMap::new();
+
+        let response = handle_post(
+            &registry,
+            &access,
+            &headers,
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("www-authenticate").unwrap(),
+            "Bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_token_allows_mcp_requests() {
+        let registry = ToolRegistry::empty();
+        let access = AccessConfig::new(Some("secret".to_string()), Vec::new());
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer secret".parse().unwrap());
+
+        let response = handle_post(
+            &registry,
+            &access,
+            &headers,
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn get_requires_auth_before_reporting_no_stream() {
+        let access = AccessConfig::new(Some("secret".to_string()), Vec::new());
+        let headers = HeaderMap::new();
+        assert_eq!(
+            handle_get(&access, &headers).status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer secret".parse().unwrap());
+        assert_eq!(
+            handle_get(&access, &headers).status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
+
+    #[test]
+    fn options_allows_trusted_browser_preflight_without_bearer_token() {
+        let access = AccessConfig::new(
+            Some("secret".to_string()),
+            vec!["https://ops.example.com".to_string()],
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "https://ops.example.com".parse().unwrap());
+
+        let response = handle_options(&access, &headers);
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "https://ops.example.com"
+        );
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-headers")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("authorization")
+        );
+    }
+
+    #[test]
+    fn options_rejects_untrusted_browser_origins() {
+        let access = AccessConfig::new(
+            Some("secret".to_string()),
+            vec!["https://ops.example.com".to_string()],
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "https://evil.example.com".parse().unwrap());
+
+        let response = handle_options(&access, &headers);
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+    }
 }

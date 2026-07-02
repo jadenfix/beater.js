@@ -77,7 +77,9 @@ Rules:
 
 The tool registry is served at `POST /mcp` per spec 2025-11-25 (Streamable HTTP):
 - single endpoint; JSON-RPC over POST (`initialize`, `tools/list`, `tools/call`)
-- `Origin` header validated → 403 on mismatch (MUST, DNS-rebinding defense)
+- optional bearer-token auth via `BEATER_MCP_TOKEN`; missing or bad tokens fail with 401
+- `Origin` header parsed and validated → 403 on mismatch (MUST, DNS-rebinding defense); loopback origins are allowed by default, remote browser origins must be listed in `BEATER_MCP_TRUSTED_ORIGINS`
+- `OPTIONS /mcp` handles browser preflight for allowed origins and advertises `Authorization` + JSON headers
 - `GET /mcp` → 405 (we offer no server-initiated SSE stream — explicitly allowed by spec)
 - stateless: no `MCP-Session-Id` issued
 
