@@ -105,6 +105,7 @@ The work below is not just about matching Node/Next request handling. The end st
 | Client hydration | `/_beater/client/index.js` serves `app/routes/index.client.ts`; the hello page loads it as a module and `scripts/client-hydration-gate.cjs` verifies the counter increments in a browser |
 | RSC transport foundation | `/_beater/rsc/index.flight` serves `app/routes/index.server.tsx` as `text/x-component` frames over the worker stream channel; `scripts/rsc-flight-gate.cjs` verifies the browser renders the server island and the client counter still hydrates |
 | npm/node-compat wedge | `scripts/npm-compat-gate.sh` scaffolds a temp app, installs `zod@4.4.3`, adds a route importing `import { z } from "zod"`, and verifies `/api/zod` returns the parsed payload |
+| OpenAPI path grouping | `beater-connect` tests parse generated OpenAPI and prove resources plus multiple actions sharing one path emit a single `paths` key with all methods preserved |
 
 ---
 
