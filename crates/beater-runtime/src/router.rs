@@ -178,6 +178,7 @@ mod tests {
             "app/routes/users/[id].tsx",
             "export default function User() {}",
         );
+        app.write("app/routes/users/[id].client.ts", "console.log('client')");
         app.write("app/routes/ignored.css", "body {}");
 
         let table = RouteTable::scan(app.path()).unwrap();
@@ -186,6 +187,8 @@ mod tests {
         assert!(patterns.contains(&"/"));
         assert!(patterns.contains(&"/api/health"));
         assert!(patterns.contains(&"/users/[id]"));
+        assert!(!patterns.contains(&"/index.client"));
+        assert!(!patterns.contains(&"/users/[id].client"));
         assert_eq!(patterns.len(), 3);
 
         let (route, _) = table.match_path("/").unwrap();

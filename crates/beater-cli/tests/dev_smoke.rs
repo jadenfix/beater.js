@@ -181,6 +181,7 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
     assert!(config.contains("name = \"my-app\""), "{config}");
     for relative_path in [
         "app/routes/index.tsx",
+        "app/routes/index.client.ts",
         "app/routes/api/health.ts",
         "app/routes/api/boom.ts",
         "agents/support/agent.ts",
@@ -222,6 +223,23 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
         home.contains("<h1 class=\"brand-title\">beater.js</h1>"),
         "{home}"
     );
+    assert!(
+        home.contains(r#"<script type="module" src="/_beater/client/index.js"></script>"#),
+        "{home}"
+    );
+
+    let client =
+        http_request(port, "GET", "/_beater/client/index.js", None).expect("GET client module");
+    assert!(client.starts_with("HTTP/1.1 200"), "{client}");
+    assert!(
+        client.contains("content-type: application/javascript"),
+        "{client}"
+    );
+    assert!(
+        client.contains("root.dataset.state = \"hydrated\""),
+        "{client}"
+    );
+    assert!(!client.contains(": number"), "{client}");
 
     let doctor = Command::new(&beater)
         .arg("doctor")

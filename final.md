@@ -61,11 +61,11 @@ The work below is not just about matching Node/Next request handling. The end st
 
 **Owner:** this Codex thread when working in `codex/agent3-*` branches.
 
-**Goal:** pay down [C] in dependency order with one reviewable PR per vertical slice, starting with the minimum Node/Next replacement path: streaming SSR, hydration, RSC, npm/node-compat, isolate pool, and deploy.
+**Goal:** pay down [C] in dependency order with one reviewable PR per vertical slice, starting with the minimum Node/Next replacement path: streaming SSR, hydration, RSC, npm/node-compat, isolate pool, and deploy. Each slice should also strengthen the next-era agent platform: agentic browsing, remote management, networked tool sessions, integrations, auditability, and deployable operations.
 
 **Primary PR sequence:**
 - [x] Add streaming React SSR over the worker chunk channel and prove shell-before-delayed-subtree delivery.
-- [ ] Add client hydration with a per-route client bundle.
+- [x] Add client hydration with a per-route client bundle.
 - [ ] Add RSC flight protocol over the same chunk channel.
 - [ ] Add npm/node-compat adoption wedge.
 - [ ] Add isolate pool behind the existing worker protocol.
@@ -101,6 +101,7 @@ The work below is not just about matching Node/Next request handling. The end st
 | Durability machinery (code) | SQLite journal with started/completed/failed lifecycle + attempts; resume logic for dangling LLM calls and idempotent-only tool re-runs; `needs_review` parking |
 | M2 crash/resume fixtures | `slow_summarize.py` and `slow_summarize_once.py` are declared from `examples/hello/agents/support/agent.ts`; `scripts/m2-live-gate.sh` drives A3-A5 once `ANTHROPIC_API_KEY` is present |
 | Streaming SSR | `scripts/streaming-ssr-gate.sh` starts `beater dev`, reads the raw HTTP socket, and proved shell marker at 0.026s before Suspense-delayed marker at 0.489s while `/api/health` returned in 0.002s |
+| Client hydration | `/_beater/client/index.js` serves `app/routes/index.client.ts`; the hello page loads it as a module and `scripts/client-hydration-gate.cjs` verifies the counter increments in a browser |
 
 ---
 
@@ -221,7 +222,7 @@ Phase C progress so far:
 | # | Item | Done when |
 |---|---|---|
 | 1 | **Streaming SSR** — renderToReadableStream over the chunked worker channel | **done:** `scripts/streaming-ssr-gate.sh` proved the shell chunk arrived before the Suspense-delayed subtree chunk |
-| 2 | **Client hydration** — route-scoped client bundles (`/_beater/client/<route>.js`) | a counter button on index.tsx works in a browser |
+| 2 | **Client hydration** — route-scoped client bundles (`/_beater/client/<route>.js`) | **done:** `/_beater/client/index.js` serves the route companion client module; the hello counter increments in the browser gate |
 | 3 | **RSC** — flight protocol over the same chunked channel | server components with client islands render + hydrate |
 | 4 | **npm/node-compat** — the adoption wedge (Deno-style compat layer, not a reimplementation) | `import { z } from "zod"` works in a route |
 | 5 | **Isolate pool** — N workers behind the existing channel protocol | wrk shows near-linear scaling to core count |
@@ -243,4 +244,4 @@ Phase C progress so far:
 
 - **To be e2e done (MVP):** install `ANTHROPIC_API_KEY`, add one slow-tool fixture, run the three A3–A5 gates, flip the docs. Everything else is already built and verified.
 - **To ship v0.1:** tests + CI, portable Python config, isolate-pool-or-documented-limits, `beater new`.
-- **To kill Node/Next:** pay off punts 1–5 and 11 first; the rest is compounding advantage.
+- **To kill Node/Next:** pay off punts 1–5 and 11 first, while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.
