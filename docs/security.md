@@ -46,8 +46,8 @@ Operational implications:
 
 ## Remote Integrations
 
-Networked tools should have explicit timeouts, retry policy, idempotency keys, and secret handling. Remote MCP tools, SaaS API integrations, and browser automation sessions should all be declared through the registry so calls are journaled before side effects happen.
+Networked tools have explicit timeouts, retry policy, idempotency keys, secret handling, and egress allowlists. Remote MCP tools read bearer tokens from environment variables, require HTTPS for bearer auth except loopback test servers, fail before connecting when a required secret is missing, and never follow redirects. Transient failures retry only when the tool is idempotent or a configured `tool_use_id` idempotency key is available; ambiguous non-idempotent failures park the run as `needs_review`. SaaS API integrations and browser automation sessions should follow the same registry path so calls are journaled before side effects happen.
 
 ## Agentic Browsing
 
-Browser automation is powerful enough to read authenticated pages and perform destructive actions. Browser-provider work must include session lifecycle cleanup, scoped credentials, and e2e tests for crash handling before it is considered production-ready.
+Browser automation is powerful enough to read authenticated pages and perform destructive actions. The current `mock_cdp` provider is only a deterministic contract and lifecycle test provider. Production Playwright/CDP providers must include real session cleanup across crashes, scoped credentials, and browser e2e tests before they are considered production-ready.

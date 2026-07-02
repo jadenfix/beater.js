@@ -23,6 +23,7 @@ deno_error = "0.7"
 
 # async + http
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tokio-stream = "0.1"
 axum = "0.8"
 bytes = "1"
 futures-util = "0.3"

@@ -55,8 +55,8 @@
 
   globalThis.performance ??= { now: () => Date.now() };
 
-  // Minimal UTF-8 TextEncoder — enough for react-dom/server's renderToString
-  // path. Full web-streams support arrives with streaming SSR.
+  // Minimal UTF-8 TextEncoder — enough for React SSR and stream chunk
+  // encoding. Full web API fidelity comes with the npm-compat era.
   if (!globalThis.TextEncoder) {
     globalThis.TextEncoder = class TextEncoder {
       get encoding() {
@@ -90,8 +90,151 @@
     };
   }
 
-  // Page SSR: render the default-export component to HTML (M4).
-  globalThis.__beaterRenderPage = async (specifier, request) => {
+  if (!globalThis.ReadableStream) {
+    globalThis.ReadableStream = class ReadableStream {
+      constructor(source = {}) {
+        this._source = source;
+        this._queue = [];
+        this._pending = [];
+        this._closed = false;
+        this._error = null;
+        this._locked = false;
+        this._pulling = false;
+        this._controller = {
+          get desiredSize() {
+            return 1;
+          },
+          enqueue: (chunk) => {
+            if (this._closed || this._error) return;
+            const pending = this._pending.shift();
+            if (pending) pending.resolve({ done: false, value: chunk });
+            else this._queue.push(chunk);
+          },
+          close: () => {
+            if (this._closed) return;
+            this._closed = true;
+            for (const pending of this._pending.splice(0)) {
+              pending.resolve({ done: true, value: undefined });
+            }
+          },
+          error: (error) => {
+            if (this._error) return;
+            this._error = error ?? new Error("ReadableStream errored");
+            for (const pending of this._pending.splice(0)) {
+              pending.reject(this._error);
+            }
+          },
+        };
+        Promise.resolve()
+          .then(() => this._source.start?.(this._controller))
+          .catch((error) => this._controller.error(error));
+      }
+
+      getReader() {
+        if (this._locked) throw new TypeError("ReadableStream is locked");
+        this._locked = true;
+        return {
+          read: () => this._read(),
+          cancel: (reason) => this.cancel(reason),
+          releaseLock: () => {
+            this._locked = false;
+          },
+        };
+      }
+
+      cancel(reason) {
+        this._queue.length = 0;
+        this._controller.close();
+        return Promise.resolve(this._source.cancel?.(reason));
+      }
+
+      _read() {
+        if (this._queue.length) {
+          return Promise.resolve({ done: false, value: this._queue.shift() });
+        }
+        if (this._error) return Promise.reject(this._error);
+        if (this._closed) {
+          return Promise.resolve({ done: true, value: undefined });
+        }
+        const promise = new Promise((resolve, reject) => {
+          this._pending.push({ resolve, reject });
+        });
+        this._pull();
+        return promise;
+      }
+
+      _pull() {
+        if (this._pulling || typeof this._source.pull !== "function") return;
+        this._pulling = true;
+        Promise.resolve()
+          .then(() => this._source.pull(this._controller))
+          .catch((error) => this._controller.error(error))
+          .finally(() => {
+            this._pulling = false;
+          });
+      }
+    };
+  }
+
+  const pageStreams = new Map();
+
+  function streamChunkBytes(value) {
+    if (value == null) return new Uint8Array();
+    if (value instanceof Uint8Array) return value;
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    return new TextEncoder().encode(String(value));
+  }
+
+  async function cancelReader(reader) {
+    try {
+      await reader?.cancel?.();
+    } catch {
+      // Expected when the stream is already closing because the HTTP side went away.
+    }
+  }
+
+  function releaseReader(reader) {
+    try {
+      reader?.releaseLock?.();
+    } catch {
+      // A canceled React stream may already have released or rejected pending reads.
+    }
+  }
+
+  function isExpectedRenderAbort(error) {
+    return fmt(error).includes("The render was aborted by the server");
+  }
+
+  async function pumpPageStream(stream_id, reader) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!ops.op_beater_stream_chunk(stream_id, streamChunkBytes(value))) {
+          await cancelReader(reader);
+          return;
+        }
+      }
+      ops.op_beater_stream_end(stream_id);
+    } catch (error) {
+      if (pageStreams.get(stream_id) === reader) {
+        ops.op_beater_stream_error(stream_id, fmt(error));
+      }
+    } finally {
+      if (pageStreams.get(stream_id) === reader) {
+        pageStreams.delete(stream_id);
+      }
+      releaseReader(reader);
+    }
+  }
+
+  // Page SSR: render the default-export component as a React stream. Rust gets
+  // headers when the shell is ready; the isolate keeps pumping chunks without
+  // monopolizing the worker request loop.
+  globalThis.__beaterPreparePageStream = async (specifier, request, stream_id) => {
     const [mod, React, ReactDOMServer] = await Promise.all([
       import(specifier),
       import("react"),
@@ -101,16 +244,33 @@
     if (typeof Component !== "function") {
       throw new Error(`page route must export a default component: ${specifier}`);
     }
-    const html = ReactDOMServer.renderToString(
+    if (typeof ReactDOMServer.renderToReadableStream !== "function") {
+      throw new Error("react-dom/server renderToReadableStream is unavailable");
+    }
+    const stream = await ReactDOMServer.renderToReadableStream(
       React.createElement(Component, { request }),
+      {
+        onError(error) {
+          if (!isExpectedRenderAbort(error)) console.error(error);
+        },
+      },
     );
-    const bodyChunks = ["<!DOCTYPE html>", html];
+    const reader = stream.getReader();
+    pageStreams.set(stream_id, reader);
+    pumpPageStream(stream_id, reader);
     return {
       status: 200,
       headers: { "content-type": "text/html; charset=utf-8" },
-      body: bodyChunks.join(""),
-      body_chunks: bodyChunks,
     };
+  };
+
+  globalThis.__beaterCancelPageStream = async (stream_id) => {
+    const reader = pageStreams.get(stream_id);
+    pageStreams.delete(stream_id);
+    await cancelReader(reader);
+    releaseReader(reader);
+    ops.op_beater_stream_end(stream_id);
+    return null;
   };
 
   // Agent Access Layer: read a route module's optional `agent` metadata

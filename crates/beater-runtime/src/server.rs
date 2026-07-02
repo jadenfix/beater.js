@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -18,14 +19,16 @@ use bytes::Bytes;
 use futures_util::stream;
 use serde_json::json;
 use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::config::AppConfig;
 use crate::router::{RouteKind, RouteTable, Segment};
-use crate::worker::{self, RouteMeta, WorkerMsg};
+use crate::worker::{self, RouteBody, RouteMeta, WorkerMsg};
 use crate::{crawl, mcp};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 struct DevState {
@@ -310,6 +313,7 @@ async fn handle(State(state): State<DevState>, req: Request<Body>) -> Response<B
 
 async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Body>> {
     let method = req.method().as_str().to_uppercase();
+    let head = method == "HEAD";
     let path = req.uri().path().to_string();
     let query: HashMap<String, String> = req
         .uri()
@@ -345,7 +349,6 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
             "page routes are GET-only".to_string(),
         ));
     }
-
     let headers: HashMap<String, String> = req
         .headers()
         .iter()
@@ -364,6 +367,7 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
     };
 
     let request_json = json!({
+        "id": NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed).to_string(),
         "method": method,
         "path": path,
         "params": params,
@@ -395,34 +399,92 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
         .map_err(|_| anyhow::anyhow!("js worker dropped the request (reloading?)"))?;
 
     match result {
-        Ok(route_resp) => Ok(route_response(route_resp)?),
+        Ok(route_resp) => {
+            let uses_chunked_body = matches!(
+                &route_resp.body,
+                RouteBody::Chunks(_) | RouteBody::Stream { .. }
+            );
+            let mut builder = Response::builder().status(route_resp.status);
+            for (k, v) in &route_resp.headers {
+                if uses_chunked_body && k.eq_ignore_ascii_case("content-length") {
+                    continue;
+                }
+                builder = builder.header(k, v);
+            }
+            let body = match route_resp.body {
+                RouteBody::Full(body) => {
+                    if head {
+                        empty_unknown_len_body()
+                    } else {
+                        Body::from(body)
+                    }
+                }
+                RouteBody::Chunks(chunks) => {
+                    if head {
+                        empty_unknown_len_body()
+                    } else {
+                        chunks_body(chunks)
+                    }
+                }
+                RouteBody::Stream { stream_id, rx } => {
+                    if head {
+                        let _ = state
+                            .worker_tx
+                            .read()
+                            .await
+                            .send(WorkerMsg::CancelStream { stream_id })
+                            .await;
+                        drop(rx);
+                        empty_unknown_len_body()
+                    } else {
+                        Body::from_stream(UnboundedReceiverStream::new(rx))
+                    }
+                }
+            };
+            Ok(builder.body(body)?)
+        }
         // JS error: readable, source-mapped stack in the dev response
         Err(stack) => Ok(text_response(StatusCode::INTERNAL_SERVER_ERROR, stack)),
     }
 }
 
+#[cfg(test)]
 fn route_response(route_resp: worker::RouteResponse) -> Result<Response<Body>, axum::http::Error> {
-    let uses_body_chunks = !route_resp.body_chunks.is_empty();
-    let mut builder = Response::builder().status(route_resp.status);
-    for (k, v) in &route_resp.headers {
-        if uses_body_chunks && k.eq_ignore_ascii_case("content-length") {
+    let worker::RouteResponse {
+        status,
+        headers,
+        body,
+    } = route_resp;
+    let uses_chunked_body = matches!(&body, RouteBody::Chunks(_) | RouteBody::Stream { .. });
+    let mut builder = Response::builder().status(status);
+    for (k, v) in &headers {
+        if uses_chunked_body && k.eq_ignore_ascii_case("content-length") {
             continue;
         }
         builder = builder.header(k, v);
     }
-    builder.body(route_response_body(route_resp))
+    builder.body(route_body(body))
 }
 
+#[cfg(test)]
 fn route_response_body(route_resp: worker::RouteResponse) -> Body {
-    if route_resp.body_chunks.is_empty() {
-        Body::from(route_resp.body)
-    } else {
-        let chunks = route_resp
-            .body_chunks
-            .into_iter()
-            .map(|chunk| Ok::<Bytes, Infallible>(Bytes::from(chunk)));
-        Body::from_stream(stream::iter(chunks))
+    route_body(route_resp.body)
+}
+
+#[cfg(test)]
+fn route_body(body: RouteBody) -> Body {
+    match body {
+        RouteBody::Full(body) => Body::from(body),
+        RouteBody::Chunks(chunks) => chunks_body(chunks),
+        RouteBody::Stream { rx, .. } => Body::from_stream(UnboundedReceiverStream::new(rx)),
     }
+}
+
+fn chunks_body(chunks: Vec<String>) -> Body {
+    let chunks = chunks
+        .into_iter()
+        .map(|chunk| Ok::<Bytes, Infallible>(Bytes::from(chunk)));
+    Body::from_stream(stream::iter(chunks))
 }
 
 fn apply_route_security_headers(response: &mut Response<Body>) {
@@ -452,6 +514,10 @@ fn apply_route_security_headers(response: &mut Response<Body>) {
         .or_insert(HeaderValue::from_static(
             "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()",
         ));
+}
+
+fn empty_unknown_len_body() -> Body {
+    Body::from_stream(stream::empty::<Result<Bytes, Infallible>>())
 }
 
 fn text_response(status: StatusCode, body: String) -> Response<Body> {
@@ -550,8 +616,7 @@ mod tests {
         let body = route_response_body(worker::RouteResponse {
             status: 200,
             headers: HashMap::new(),
-            body: "fallback".to_string(),
-            body_chunks: vec!["hello ".to_string(), "stream".to_string()],
+            body: worker::RouteBody::Chunks(vec!["hello ".to_string(), "stream".to_string()]),
         });
 
         let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
@@ -563,8 +628,7 @@ mod tests {
         let body = route_response_body(worker::RouteResponse {
             status: 200,
             headers: HashMap::new(),
-            body: "plain body".to_string(),
-            body_chunks: Vec::new(),
+            body: worker::RouteBody::Full("plain body".to_string()),
         });
 
         let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
@@ -583,8 +647,7 @@ mod tests {
         let response = route_response(worker::RouteResponse {
             status: 200,
             headers,
-            body: "fallback".to_string(),
-            body_chunks: vec!["hello ".to_string(), "stream".to_string()],
+            body: worker::RouteBody::Chunks(vec!["hello ".to_string(), "stream".to_string()]),
         })
         .unwrap();
 
@@ -608,8 +671,7 @@ mod tests {
         let response = route_response(worker::RouteResponse {
             status: 200,
             headers,
-            body: "plain body".to_string(),
-            body_chunks: Vec::new(),
+            body: worker::RouteBody::Full("plain body".to_string()),
         })
         .unwrap();
 

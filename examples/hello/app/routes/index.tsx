@@ -1,4 +1,6 @@
-// M4: server-rendered React from the embedded isolate — no Node anywhere.
+// Phase C item 1: streamed React SSR from the embedded isolate — no Node anywhere.
+
+import { Suspense } from "react";
 
 export const agent = {
   title: "beater.js Runtime Console",
@@ -541,7 +543,47 @@ function Lane({ title, body, meta }: { title: string; body: string; meta: string
   );
 }
 
-export default function Home({ request }: { request: { path: string } }) {
+type PageRequest = {
+  id: string;
+  path: string;
+};
+
+type DelayRecord = {
+  ready: boolean;
+  promise: Promise<void>;
+};
+
+const delayedByRequest = new Map<string, DelayRecord>();
+
+function waitForDelayedSubtree(requestId: string) {
+  let record = delayedByRequest.get(requestId);
+  if (!record) {
+    record = {
+      ready: false,
+      promise: Promise.resolve(),
+    };
+    record.promise = new Promise((resolve) => {
+      setTimeout(() => {
+        record!.ready = true;
+        resolve();
+      }, 450);
+    });
+    delayedByRequest.set(requestId, record);
+  }
+  if (!record.ready) throw record.promise;
+}
+
+function DelayedStreamingSubtree({ requestId }: { requestId: string }) {
+  waitForDelayedSubtree(requestId);
+  delayedByRequest.delete(requestId);
+  return (
+    <p id="stream-delayed" data-stream-marker="delayed">
+      Suspense-delayed subtree flushed after the shell.
+    </p>
+  );
+}
+
+export default function Home({ request }: { request: PageRequest }) {
   return (
     <html lang="en">
       <head>
@@ -577,6 +619,15 @@ export default function Home({ request }: { request: { path: string } }) {
                   TypeScript routes, React SSR, durable Rust agent runs, Python tools,
                   and MCP discovery are served from the same local runtime.
                 </p>
+                <Suspense
+                  fallback={
+                    <p id="stream-shell" data-stream-marker="shell">
+                      Streaming shell flushed before the delayed subtree.
+                    </p>
+                  }
+                >
+                  <DelayedStreamingSubtree requestId={request.id} />
+                </Suspense>
               </div>
 
               <div className="signal-row">

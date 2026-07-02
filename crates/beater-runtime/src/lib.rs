@@ -77,7 +77,7 @@ fn build_registry(
             let value = load_agent_config(app_dir, &name)?;
             let config: beater_agent::AgentConfig = serde_json::from_value(value)
                 .with_context(|| format!("agents/{name}/agent.ts config shape"))?;
-            registry.extend(beater_agent::ToolRegistry::build(
+            registry.extend(beater_agent::ToolRegistry::build_with_beatbox(
                 &dir,
                 &config.tools,
                 beatbox,

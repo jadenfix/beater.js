@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::anthropic::Anthropic;
 use crate::journal::Journal;
-use crate::registry::{AgentConfig, BeatboxConfig, ToolRegistry};
+use crate::registry::{AgentConfig, BeatboxConfig, ToolCallContext, ToolNeedsReview, ToolRegistry};
 
 const MAX_TOKENS: u64 = 16000;
 const MAX_LOOP_STEPS: usize = 50;
@@ -43,7 +43,7 @@ fn setup(
     let config: AgentConfig = serde_json::from_value(config_value)
         .context("agent.ts default export did not match defineAgent shape")?;
     let agent_dir = app_dir.join("agents").join(&config.name);
-    let registry = ToolRegistry::build(&agent_dir, &config.tools, beatbox)?;
+    let registry = ToolRegistry::build_with_beatbox(&agent_dir, &config.tools, beatbox)?;
     Ok((config, registry))
 }
 
@@ -283,6 +283,11 @@ async fn agent_loop(ctx: &Ctx, mut messages: Vec<Value>) -> Result<()> {
                                 "type": "tool_result", "tool_use_id": id, "content": content,
                             }));
                         }
+                        Err(e) if e.downcast_ref::<ToolNeedsReview>().is_some() => {
+                            println!("← needs review: {e:#}");
+                            ctx.journal.set_run_status(&ctx.run_id, "needs_review")?;
+                            return Ok(());
+                        }
                         Err(e) => {
                             println!("← tool error: {e:#}");
                             tool_results.push(json!({
@@ -322,7 +327,6 @@ async fn execute_tool_step(
     input: &Value,
     attempt: i64,
 ) -> Result<String> {
-    let request = json!({"name": name, "input": input, "tool_use_id": tool_use_id});
     let idempotency_key = tool_idempotency_key(&ctx.run_id, tool_use_id);
     let request = match &idempotency_key {
         Some(key) => json!({
@@ -331,7 +335,7 @@ async fn execute_tool_step(
             "tool_use_id": tool_use_id,
             "idempotency_key": key,
         }),
-        None => request,
+        None => json!({"name": name, "input": input, "tool_use_id": tool_use_id}),
     };
     let seq = ctx.journal.start_step(
         &ctx.run_id,
@@ -341,7 +345,15 @@ async fn execute_tool_step(
         Some(tool_use_id),
         attempt,
     )?;
-    match ctx.registry.execute(name, input, idempotency_key).await {
+    let tool_context = ToolCallContext {
+        tool_use_id: Some(tool_use_id.to_string()),
+        idempotency_key,
+    };
+    match ctx
+        .registry
+        .execute_with_context(name, input, &tool_context)
+        .await
+    {
         Ok(result) => {
             ctx.journal
                 .complete_step(&ctx.run_id, seq, &json!({"content": result}))?;
@@ -360,7 +372,7 @@ fn tool_idempotency_key(run_id: &str, tool_use_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resume, tool_idempotency_key};
+    use super::{resume, run, tool_idempotency_key};
     use crate::journal::Journal;
     use crate::registry::BeatboxConfig;
     use serde_json::{Value, json};
@@ -630,6 +642,32 @@ def run(input):
         })
     }
 
+    fn browser_config() -> Value {
+        json!({
+            "name": "support",
+            "model": "mock",
+            "system": "test",
+            "tools": [{
+                "kind": "browser",
+                "name": "browser.checkout",
+                "provider": "mock_cdp",
+                "description": "Verify checkout in a browser.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "task": {"type": "string"}
+                    },
+                    "required": ["url", "task"]
+                },
+                "session": {"scope": "run", "cleanup": "always"},
+                "allowedOrigins": ["https://shop.example"],
+                "timeoutMs": 1000,
+                "idempotent": false
+            }],
+        })
+    }
+
     fn sandbox_config(idempotent: bool) -> Value {
         json!({
             "name": "support",
@@ -785,6 +823,91 @@ def run(input):
     }
 
     #[test]
+    fn run_completes_browser_tool_through_agent_loop() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("browser-tool");
+        let server = MockAnthropic::new(vec![
+            json!({
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_browser",
+                    "name": "browser.checkout",
+                    "input": {
+                        "url": "https://shop.example/cart",
+                        "task": "verify checkout"
+                    },
+                }],
+                "stop_reason": "tool_use",
+            }),
+            json!({
+                "content": [{"type": "text", "text": "checkout verified"}],
+                "stop_reason": "end_turn",
+            }),
+        ]);
+        let _env = EnvGuard::set(&server.base_url);
+
+        run(
+            app.path(),
+            "support",
+            browser_config(),
+            None,
+            BeatboxConfig::default(),
+            "verify checkout",
+        )
+        .unwrap();
+        let requests = server.join();
+        assert_eq!(requests.len(), 2);
+
+        let body: Value = serde_json::from_str(&requests[1]).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let tool_result = &messages.last().unwrap()["content"][0];
+        assert_eq!(tool_result["tool_use_id"], "toolu_browser");
+        assert!(
+            tool_result["content"]
+                .as_str()
+                .unwrap()
+                .contains("Mock Browser Page")
+        );
+
+        let journal = Journal::open(app.path()).unwrap();
+        let (run, _) = journal.list_runs().unwrap().pop().unwrap();
+        assert_eq!(run.status, "completed");
+        let tool_step = journal
+            .steps(&run.id)
+            .unwrap()
+            .into_iter()
+            .find(|step| step.kind == "tool_call")
+            .expect("browser tool call step");
+        assert_eq!(tool_step.status, "completed");
+        assert_eq!(tool_step.tool_use_id.as_deref(), Some("toolu_browser"));
+    }
+
+    #[test]
+    fn resume_parks_interrupted_non_idempotent_tool_for_review() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("non-idempotent");
+        seed_interrupted_tool_run(&app);
+        let _env = EnvGuard::set("http://127.0.0.1:9");
+
+        resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(config(false))
+        })
+        .unwrap();
+
+        let journal = Journal::open(app.path()).unwrap();
+        assert_eq!(journal.run("run-1").unwrap().status, "needs_review");
+        let tool_steps: Vec<_> = journal
+            .steps("run-1")
+            .unwrap()
+            .into_iter()
+            .filter(|step| step.kind == "tool_call")
+            .collect();
+        assert_eq!(tool_steps.len(), 1);
+        assert_eq!(tool_steps[0].status, "started");
+        assert_eq!(tool_steps[0].attempt, 1);
+    }
+
+    #[test]
     fn resume_reruns_interrupted_idempotent_sandbox_tool_through_beatbox_job() {
         let _env_lock = ENV_LOCK.lock().unwrap();
         let app = TempApp::new("sandbox-idempotent");
@@ -860,31 +983,6 @@ def run(input):
             .collect();
         assert_eq!(tool_steps.len(), 1);
         assert_eq!(tool_steps[0].status, "started");
-    }
-
-    #[test]
-    fn resume_parks_interrupted_non_idempotent_tool_for_review() {
-        let _env_lock = ENV_LOCK.lock().unwrap();
-        let app = TempApp::new("non-idempotent");
-        seed_interrupted_tool_run(&app);
-        let _env = EnvGuard::set("http://127.0.0.1:9");
-
-        resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
-            Ok(config(false))
-        })
-        .unwrap();
-
-        let journal = Journal::open(app.path()).unwrap();
-        assert_eq!(journal.run("run-1").unwrap().status, "needs_review");
-        let tool_steps: Vec<_> = journal
-            .steps("run-1")
-            .unwrap()
-            .into_iter()
-            .filter(|step| step.kind == "tool_call")
-            .collect();
-        assert_eq!(tool_steps.len(), 1);
-        assert_eq!(tool_steps[0].status, "started");
-        assert_eq!(tool_steps[0].attempt, 1);
     }
 
     #[test]

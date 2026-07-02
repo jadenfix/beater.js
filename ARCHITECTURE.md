@@ -42,7 +42,7 @@ The agent loop deliberately lives in tier 3, not tier 1: it survives hot reloads
 | Decision | Pick | Why |
 |---|---|---|
 | JS engine | `deno_core` =0.406.0 (pinned exact) | ops, ESM loading, snapshots, tokio integration; raw rusty_v8 would mean rebuilding all of that. deno_core is **not Deno**: no web APIs are included, we add only what we need |
-| Web APIs in isolate | minimal shims: console, timers, TextEncoder | route contract is plain objects, not WHATWG fetch classes (that fidelity comes with the npm-compat era). Full streams needed only for SSR |
+| Web APIs in isolate | minimal shims: console, timers, TextEncoder, ReadableStream | route contract is plain objects, not WHATWG fetch classes (that fidelity comes with the npm-compat era). The stream shim is scoped to React SSR |
 | TS/TSX | `deno_ast` (SWC) transpile in the module loader, source maps wired into error stacks | useful errors are an acceptance criterion, not polish |
 | HTTP | axum 0.8; response bodies stream from the isolate over an mpsc channel | |
 | Threading | `JsRuntime` is `!Send` → one dedicated OS thread (current-thread tokio rt); host↔worker via mpsc | single isolate for now, so JS route work serializes; the channel protocol is already pool-shaped. See `docs/runtime-limits.md` |
@@ -137,10 +137,10 @@ CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` 
 
 - **npm ecosystem / node-compat** — the adoption wedge; adopt a Deno-style compat layer rather than reimplementing.
 - **WHATWG fetch classes in routes** — comes with npm-compat.
-- **RSC + client hydration** — the chunked isolate→host streaming plumbing is the substrate; add the flight protocol + client bundle step after SSR lands.
+- **RSC + client hydration** — the chunked isolate→host streaming plumbing is the substrate; add the flight protocol + client bundle step next.
 - **Wasmtime sandbox** — fourth `impl` kind in the tool registry, for untrusted/agent-generated code.
 - **C++ tools** — via `cxx` on the Rust built-in path when a real use case appears.
-- **Agentic browsing** — reuse beater-agents' CDP/Playwright crates as a tool provider.
+- **Production agentic browsing** — the registry has a mock CDP browser provider for contract tests; reuse beater-agents' real CDP/Playwright crates as the production provider.
 - **Deploy** — the host is one binary + assets; `beater build` → container image with the venv baked in.
 - **Isolate pool / per-request isolation** — channel protocol already supports N workers; current serialization is documented in `docs/runtime-limits.md`.
 - **LLM streaming (SSE to browser)** — journal needs partial-step records first.
@@ -155,4 +155,4 @@ CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` 
 | M1 | `beater dev`: TS route in embedded V8, source-mapped errors, hot reload | the runtime | **done** |
 | M2 | durable agent loop + Python tool + kill-9 resume | **the thesis** | code done; live-API gate pending |
 | M3 | `/mcp` endpoint (inspector-verified) + crawl layer (robots/sitemap/llms.txt/.well-known) | ecosystem | **done** |
-| M4 | React SSR (renderToString; streaming is the upgrade path) | the web half | **done** |
+| M4 | React streaming SSR (`renderToReadableStream`) | the web half | **done** |

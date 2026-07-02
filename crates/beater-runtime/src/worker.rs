@@ -2,11 +2,16 @@
 //! driven by a current-thread tokio runtime. The host talks to it over an
 //! mpsc channel — the protocol is already pool-shaped for N workers later.
 
+use std::collections::HashMap;
+use std::io;
 use std::rc::Rc;
+use std::task::{Context as TaskContext, Poll, Waker};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use deno_core::error::{CoreError, CoreErrorKind, JsError};
-use deno_core::{JsRuntime, PollEventLoopOptions, RuntimeOptions, extension, op2, v8};
+use deno_core::{JsRuntime, OpState, PollEventLoopOptions, RuntimeOptions, extension, op2, v8};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
@@ -30,6 +35,9 @@ pub enum WorkerMsg {
         specifier: String,
         reply: oneshot::Sender<Result<Option<RouteMeta>, String>>,
     },
+    CancelStream {
+        stream_id: u32,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,15 +47,44 @@ pub struct RouteMeta {
     pub crawl: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct RouteResponse {
     pub status: u16,
+    pub headers: HashMap<String, String>,
+    pub body: RouteBody,
+}
+
+#[derive(Debug)]
+pub enum RouteBody {
+    Full(String),
+    Chunks(Vec<String>),
+    Stream {
+        stream_id: u32,
+        rx: mpsc::UnboundedReceiver<Result<Bytes, io::Error>>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct JsRouteResponse {
+    status: u16,
     #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
+    headers: HashMap<String, String>,
     #[serde(default)]
-    pub body: String,
+    body: String,
     #[serde(default)]
-    pub body_chunks: Vec<String>,
+    body_chunks: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsPageStream {
+    status: u16,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+}
+
+#[derive(Default)]
+struct WorkerState {
+    streams: HashMap<u32, mpsc::UnboundedSender<Result<Bytes, io::Error>>>,
 }
 
 #[op2(async(lazy), fast)]
@@ -55,8 +92,44 @@ async fn op_beater_sleep(ms: f64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms.max(0.0) as u64)).await;
 }
 
+#[op2(fast)]
+fn op_beater_stream_chunk(state: &mut OpState, stream_id: u32, #[buffer] chunk: &[u8]) -> bool {
+    let worker_state = state.borrow_mut::<WorkerState>();
+    let Some(tx) = worker_state.streams.get(&stream_id).cloned() else {
+        return false;
+    };
+    if tx.send(Ok(Bytes::copy_from_slice(chunk))).is_err() {
+        worker_state.streams.remove(&stream_id);
+        return false;
+    }
+    true
+}
+
+#[op2(fast)]
+fn op_beater_stream_end(state: &mut OpState, stream_id: u32) {
+    state.borrow_mut::<WorkerState>().streams.remove(&stream_id);
+}
+
+#[op2(fast)]
+fn op_beater_stream_error(state: &mut OpState, stream_id: u32, #[string] error: String) {
+    if let Some(tx) = state.borrow_mut::<WorkerState>().streams.remove(&stream_id) {
+        let _ = tx.send(Err(io::Error::other(error)));
+    }
+}
+
 // generated struct is pub; used by worker + agent_config isolates
-extension!(beater_ext, ops = [op_beater_sleep]);
+extension!(
+    beater_ext,
+    ops = [
+        op_beater_sleep,
+        op_beater_stream_chunk,
+        op_beater_stream_end,
+        op_beater_stream_error
+    ],
+    state = |state| {
+        state.put(WorkerState::default());
+    },
+);
 
 pub struct WorkerHandle {
     pub tx: mpsc::Sender<WorkerMsg>,
@@ -91,48 +164,98 @@ async fn worker_main(mut rx: mpsc::Receiver<WorkerMsg>) {
         .expect("bootstrap.js must evaluate");
     tracing::debug!("js worker ready (V8 {})", v8::VERSION_STRING);
 
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            WorkerMsg::Route {
-                specifier,
-                method,
-                request_json,
-                page,
-                reply,
-            } => {
-                let result = dispatch(&mut runtime, &specifier, &method, &request_json, page).await;
-                let _ = reply.send(result);
+    let mut next_stream_id = 1_u32;
+    loop {
+        if active_streams(&runtime) {
+            if let Err(e) = poll_event_loop_once(&mut runtime) {
+                fail_active_streams(&mut runtime, e);
             }
-            WorkerMsg::RouteMeta { specifier, reply } => {
-                let result = route_meta(&mut runtime, &specifier).await;
-                let _ = reply.send(result);
+
+            tokio::select! {
+                maybe_msg = rx.recv() => {
+                    let Some(msg) = maybe_msg else { break };
+                    handle_worker_msg(&mut runtime, &mut next_stream_id, msg).await;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {}
             }
+        } else {
+            let Some(msg) = rx.recv().await else { break };
+            handle_worker_msg(&mut runtime, &mut next_stream_id, msg).await;
         }
     }
     tracing::debug!("js worker shutting down");
 }
 
-async fn dispatch(
+async fn handle_worker_msg(runtime: &mut JsRuntime, next_stream_id: &mut u32, msg: WorkerMsg) {
+    match msg {
+        WorkerMsg::Route {
+            specifier,
+            method,
+            request_json,
+            page,
+            reply,
+        } => {
+            if page {
+                let stream_id = *next_stream_id;
+                *next_stream_id = next_stream_id.saturating_add(1).max(1);
+                dispatch_page_stream(runtime, &specifier, &request_json, stream_id, reply).await;
+            } else {
+                let result = dispatch_api(runtime, &specifier, &method, &request_json).await;
+                let _ = reply.send(result);
+            }
+        }
+        WorkerMsg::RouteMeta { specifier, reply } => {
+            let result = route_meta(runtime, &specifier).await;
+            let _ = reply.send(result);
+        }
+        WorkerMsg::CancelStream { stream_id } => {
+            if cancel_page_stream(runtime, stream_id).await.is_err() {
+                remove_page_stream(runtime, stream_id);
+            }
+        }
+    }
+}
+
+fn active_streams(runtime: &JsRuntime) -> bool {
+    !runtime
+        .op_state()
+        .borrow()
+        .borrow::<WorkerState>()
+        .streams
+        .is_empty()
+}
+
+fn poll_event_loop_once(runtime: &mut JsRuntime) -> Result<(), String> {
+    let mut cx = TaskContext::from_waker(Waker::noop());
+    match runtime.poll_event_loop(&mut cx, PollEventLoopOptions::default()) {
+        Poll::Ready(Ok(())) | Poll::Pending => Ok(()),
+        Poll::Ready(Err(e)) => Err(format_core_error(e)),
+    }
+}
+
+fn fail_active_streams(runtime: &mut JsRuntime, error: String) {
+    let streams = {
+        let op_state = runtime.op_state();
+        let mut op_state = op_state.borrow_mut();
+        std::mem::take(&mut op_state.borrow_mut::<WorkerState>().streams)
+    };
+    for (_, tx) in streams {
+        let _ = tx.send(Err(io::Error::other(error.clone())));
+    }
+}
+
+async fn dispatch_api(
     runtime: &mut JsRuntime,
     specifier: &str,
     method: &str,
     request_json: &str,
-    page: bool,
 ) -> Result<RouteResponse, String> {
-    let code = if page {
-        format!(
-            "globalThis.__beaterRenderPage({}, {})",
-            serde_json::Value::String(specifier.to_string()),
-            request_json,
-        )
-    } else {
-        format!(
-            "globalThis.__beaterDispatch({}, {}, {})",
-            serde_json::Value::String(specifier.to_string()),
-            serde_json::Value::String(method.to_string()),
-            request_json,
-        )
-    };
+    let code = format!(
+        "globalThis.__beaterDispatch({}, {}, {})",
+        serde_json::Value::String(specifier.to_string()),
+        serde_json::Value::String(method.to_string()),
+        request_json,
+    );
     let promise = runtime
         .execute_script("beater:dispatch", code)
         .map_err(|e| format_js_error(&e))?;
@@ -144,9 +267,110 @@ async fn dispatch(
 
     deno_core::scope!(scope, runtime);
     let local = v8::Local::new(scope, global);
-    let response: RouteResponse = deno_core::serde_v8::from_v8(scope, local)
+    let response: JsRouteResponse = deno_core::serde_v8::from_v8(scope, local)
         .map_err(|e| format!("route response did not match {{ status, headers, body }}: {e}"))?;
-    Ok(response)
+    Ok(RouteResponse {
+        status: response.status,
+        headers: response.headers,
+        body: if response.body_chunks.is_empty() {
+            RouteBody::Full(response.body)
+        } else {
+            RouteBody::Chunks(response.body_chunks)
+        },
+    })
+}
+
+async fn dispatch_page_stream(
+    runtime: &mut JsRuntime,
+    specifier: &str,
+    request_json: &str,
+    stream_id: u32,
+    reply: oneshot::Sender<Result<RouteResponse, String>>,
+) {
+    let (body_tx, body_rx) = mpsc::unbounded_channel();
+    register_page_stream(runtime, stream_id, body_tx);
+
+    let page_stream = match prepare_page_stream(runtime, specifier, request_json, stream_id).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            remove_page_stream(runtime, stream_id);
+            let _ = reply.send(Err(e));
+            return;
+        }
+    };
+
+    let response = RouteResponse {
+        status: page_stream.status,
+        headers: page_stream.headers,
+        body: RouteBody::Stream {
+            stream_id,
+            rx: body_rx,
+        },
+    };
+    if reply.send(Ok(response)).is_err() {
+        let _ = cancel_page_stream(runtime, stream_id).await;
+    }
+}
+
+fn register_page_stream(
+    runtime: &mut JsRuntime,
+    stream_id: u32,
+    tx: mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+) {
+    runtime
+        .op_state()
+        .borrow_mut()
+        .borrow_mut::<WorkerState>()
+        .streams
+        .insert(stream_id, tx);
+}
+
+fn remove_page_stream(runtime: &mut JsRuntime, stream_id: u32) {
+    runtime
+        .op_state()
+        .borrow_mut()
+        .borrow_mut::<WorkerState>()
+        .streams
+        .remove(&stream_id);
+}
+
+async fn prepare_page_stream(
+    runtime: &mut JsRuntime,
+    specifier: &str,
+    request_json: &str,
+    stream_id: u32,
+) -> Result<JsPageStream, String> {
+    let code = format!(
+        "globalThis.__beaterPreparePageStream({}, {}, {stream_id})",
+        serde_json::Value::String(specifier.to_string()),
+        request_json,
+    );
+    let promise = runtime
+        .execute_script("beater:prepare-page-stream", code)
+        .map_err(|e| format_js_error(&e))?;
+    let resolved = runtime.resolve(promise);
+    let global = runtime
+        .with_event_loop_promise(resolved, PollEventLoopOptions::default())
+        .await
+        .map_err(format_core_error)?;
+
+    deno_core::scope!(scope, runtime);
+    let local = v8::Local::new(scope, global);
+    deno_core::serde_v8::from_v8(scope, local)
+        .map_err(|e| format!("page stream response did not match {{ status, headers }}: {e}"))
+}
+
+async fn cancel_page_stream(runtime: &mut JsRuntime, stream_id: u32) -> Result<(), String> {
+    let code = format!("globalThis.__beaterCancelPageStream({stream_id})");
+    let promise = runtime
+        .execute_script("beater:cancel-page-stream", code)
+        .map_err(|e| format_js_error(&e))?;
+    let resolved = runtime.resolve(promise);
+    runtime
+        .with_event_loop_promise(resolved, PollEventLoopOptions::default())
+        .await
+        .map(|_| ())
+        .map_err(format_core_error)
 }
 
 async fn route_meta(runtime: &mut JsRuntime, specifier: &str) -> Result<Option<RouteMeta>, String> {

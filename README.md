@@ -21,7 +21,7 @@ Pre-alpha, built in the open. Current milestone progress:
 - [x] **M1** — `beater dev`: TS routes in embedded V8, source-mapped errors, hot reload
 - [x] **M2** — durable agent loop + embedded-Python tools + step-lifecycle journal (code complete; live-API kill-9/resume gate pending an `ANTHROPIC_API_KEY`)
 - [x] **M3** — MCP server endpoint (spec 2025-11-25, verified with the official MCP inspector) + agent-ready crawl layer (robots.txt, sitemap.xml, llms.txt, .well-known manifest — auto-generated from the route table)
-- [x] **M4** — server-rendered React 19 (renderToString; streaming SSR is the upgrade path)
+- [x] **M4** — streamed React 19 SSR (`renderToReadableStream`; shell chunks flush before Suspense-delayed subtrees)
 
 ## Quickstart (target DX)
 

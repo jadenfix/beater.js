@@ -51,3 +51,60 @@ export function sandboxTool(name, opts = {}) {
   if (opts.inputSchema) tool.inputSchema = opts.inputSchema;
   return tool;
 }
+
+// Remote MCP tool source. Metadata is declared locally so the agent can expose
+// stable tool schemas before it calls the networked provider.
+export function remoteMcpTool(name, opts = {}) {
+  if (!opts.endpoint) {
+    throw new Error("remoteMcpTool requires opts.endpoint");
+  }
+  if (!opts.tool) {
+    throw new Error("remoteMcpTool requires opts.tool");
+  }
+  if (!opts.description) {
+    throw new Error("remoteMcpTool requires opts.description");
+  }
+  if (!opts.inputSchema) {
+    throw new Error("remoteMcpTool requires opts.inputSchema");
+  }
+  return {
+    kind: "remote_mcp",
+    name,
+    idempotent: opts.idempotent ?? false,
+    description: opts.description,
+    inputSchema: opts.inputSchema,
+    endpoint: opts.endpoint,
+    tool: opts.tool,
+    auth: opts.auth ?? null,
+    timeoutMs: opts.timeoutMs ?? 10000,
+    retry: opts.retry ?? null,
+    egress: opts.egress ?? [],
+  };
+}
+
+// Browser automation tool source. The Rust side currently ships a mock CDP
+// provider for deterministic lifecycle tests; real Playwright/CDP providers
+// use the same declaration shape.
+export function browserTool(name, opts = {}) {
+  if (!opts.provider) {
+    throw new Error("browserTool requires opts.provider");
+  }
+  if (!opts.description) {
+    throw new Error("browserTool requires opts.description");
+  }
+  if (!opts.inputSchema) {
+    throw new Error("browserTool requires opts.inputSchema");
+  }
+  return {
+    kind: "browser",
+    name,
+    idempotent: opts.idempotent ?? false,
+    provider: opts.provider,
+    description: opts.description,
+    inputSchema: opts.inputSchema,
+    session: opts.session ?? {scope: "run", cleanup: "always"},
+    allowedOrigins: opts.allowedOrigins ?? [],
+    timeoutMs: opts.timeoutMs ?? 30000,
+    secrets: opts.secrets ?? {},
+  };
+}
