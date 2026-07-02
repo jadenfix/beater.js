@@ -19,7 +19,7 @@ use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use deno_core::url::{Host, Url};
 use serde_json::{Value, json};
 
-use beater_agent::ToolRegistry;
+use beater_agent::{ToolCallContext, ToolRegistry};
 
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 pub const DEFAULT_TOKEN_ENV: &str = "BEATER_MCP_TOKEN";
@@ -224,7 +224,7 @@ pub async fn handle_post(
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools_json(registry)})),
-        "tools/call" => tools_call(registry, &params).await,
+        "tools/call" => tools_call(registry, &params, &id).await,
         other => Err((-32601, format!("method not found: {other}"))),
     };
 
@@ -302,7 +302,11 @@ fn tools_json(registry: &ToolRegistry) -> Value {
     )
 }
 
-async fn tools_call(registry: &ToolRegistry, params: &Value) -> Result<Value, (i64, String)> {
+async fn tools_call(
+    registry: &ToolRegistry,
+    params: &Value,
+    id: &Value,
+) -> Result<Value, (i64, String)> {
     let name = params["name"]
         .as_str()
         .ok_or((-32602, "tools/call requires params.name".to_string()))?;
@@ -311,7 +315,13 @@ async fn tools_call(registry: &ToolRegistry, params: &Value) -> Result<Value, (i
         return Err((-32602, format!("unknown tool: {name}")));
     }
     // Tool failures are results with isError, not protocol errors.
-    match registry.execute(name, &arguments).await {
+    let context = ToolCallContext {
+        tool_use_id: json_rpc_id_to_tool_use_id(id),
+    };
+    match registry
+        .execute_with_context(name, &arguments, &context)
+        .await
+    {
         Ok(result) => Ok(json!({
             "content": [{"type": "text", "text": result}],
             "isError": false,
@@ -320,6 +330,14 @@ async fn tools_call(registry: &ToolRegistry, params: &Value) -> Result<Value, (i
             "content": [{"type": "text", "text": format!("Error: {e:#}")}],
             "isError": true,
         })),
+    }
+}
+
+fn json_rpc_id_to_tool_use_id(id: &Value) -> Option<String> {
+    match id {
+        Value::String(id) => Some(id.clone()),
+        Value::Number(id) => Some(id.to_string()),
+        _ => None,
     }
 }
 
@@ -363,12 +381,22 @@ fn with_cors(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
     use axum::http::header::{AUTHORIZATION, ORIGIN};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
 
-    use beater_agent::ToolRegistry;
+    use beater_agent::{ToolDecl, ToolRegistry};
+    use serde_json::{Value, json};
 
-    use super::{AccessConfig, handle_get, handle_options, handle_post};
+    use super::{
+        AccessConfig, handle_get, handle_options, handle_post, json_rpc_id_to_tool_use_id,
+    };
 
     #[test]
     fn origin_policy_accepts_loopback_and_rejects_prefix_spoofing() {
@@ -476,6 +504,60 @@ mod tests {
     }
 
     #[test]
+    fn json_rpc_id_becomes_tool_context_id() {
+        assert_eq!(
+            json_rpc_id_to_tool_use_id(&json!("toolu_123")),
+            Some("toolu_123".to_string())
+        );
+        assert_eq!(
+            json_rpc_id_to_tool_use_id(&json!(42)),
+            Some("42".to_string())
+        );
+        assert_eq!(json_rpc_id_to_tool_use_id(&json!({})), None);
+    }
+
+    #[tokio::test]
+    async fn tools_call_forwards_json_rpc_id_to_remote_mcp_context() {
+        let remote = MockRemoteMcp::new(json!({
+            "jsonrpc": "2.0",
+            "id": "mcp-call-1",
+            "result": {
+                "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                "isError": false
+            }
+        }));
+        let registry = ToolRegistry::build(
+            Path::new(""),
+            &[remote_decl("crm.lookup", &remote.endpoint)],
+        )
+        .expect("remote MCP registry should build");
+
+        let response = handle_post(
+            &registry,
+            &AccessConfig::default(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"mcp-call-1","method":"tools/call","params":{"name":"crm.lookup","arguments":{"email":"a@example.com"}}}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let requests = remote.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .headers
+                .to_ascii_lowercase()
+                .contains("idempotency-key: mcp-call-1"),
+            "{}",
+            requests[0].headers
+        );
+        let body: Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["id"], "mcp-call-1");
+        assert_eq!(body["params"]["name"], "lookup_contact");
+        assert_eq!(body["params"]["arguments"]["email"], "a@example.com");
+    }
+
+    #[test]
     fn get_requires_auth_before_reporting_no_stream() {
         let access = AccessConfig::new(Some("secret".to_string()), Vec::new());
         let headers = HeaderMap::new();
@@ -540,5 +622,150 @@ mod tests {
                 .get("access-control-allow-origin")
                 .is_none()
         );
+    }
+
+    fn remote_decl(name: &str, endpoint: &str) -> ToolDecl {
+        let egress = endpoint
+            .strip_prefix("http://")
+            .expect("test endpoint should be http")
+            .split('/')
+            .next()
+            .unwrap();
+        serde_json::from_value(json!({
+            "kind": "remote_mcp",
+            "name": name,
+            "description": "Look up a CRM contact.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"email": {"type": "string"}},
+                "required": ["email"]
+            },
+            "endpoint": endpoint,
+            "tool": "lookup_contact",
+            "timeoutMs": 1000,
+            "idempotent": false,
+            "retry": {"attempts": 2, "backoffMs": 1, "idempotencyKey": "tool_use_id"},
+            "egress": [egress]
+        }))
+        .unwrap()
+    }
+
+    #[derive(Clone)]
+    struct MockRequest {
+        headers: String,
+        body: String,
+    }
+
+    struct MockRemoteMcp {
+        endpoint: String,
+        requests: Arc<Mutex<Vec<MockRequest>>>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockRemoteMcp {
+        fn new(response: Value) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = format!(
+                "http://127.0.0.1:{}/mcp",
+                listener.local_addr().unwrap().port()
+            );
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let thread_requests = requests.clone();
+            let body = response.to_string();
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = accept_with_deadline(&listener);
+                let request = read_request(&mut stream);
+                thread_requests.lock().unwrap().push(request);
+                let _ = write_response(&mut stream, &body);
+            });
+            Self {
+                endpoint,
+                requests,
+                handle: Some(handle),
+            }
+        }
+
+        fn requests(&self) -> Vec<MockRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for MockRemoteMcp {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn accept_with_deadline(listener: &TcpListener) -> (TcpStream, std::net::SocketAddr) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok((stream, addr)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return (stream, addr);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "timed out waiting for request");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept request: {error}"),
+            }
+        }
+    }
+
+    fn read_request(stream: &mut TcpStream) -> MockRequest {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut chunk).unwrap();
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if let Some(header_end) = header_end(&bytes) {
+                let header_text = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+                let content_length = content_length(&header_text);
+                if bytes.len() >= header_end + 4 + content_length {
+                    let body = String::from_utf8_lossy(
+                        &bytes[(header_end + 4)..(header_end + 4 + content_length)],
+                    )
+                    .to_string();
+                    return MockRequest {
+                        headers: header_text,
+                        body,
+                    };
+                }
+            }
+        }
+        panic!("incomplete HTTP request")
+    }
+
+    fn header_end(bytes: &[u8]) -> Option<usize> {
+        bytes.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &str) -> usize {
+        headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().unwrap())
+            })
+            .unwrap_or(0)
+    }
+
+    fn write_response(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
     }
 }

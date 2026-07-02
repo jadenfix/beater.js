@@ -8,6 +8,7 @@ beater.js is pre-alpha. Version numbers are semver-shaped, but compatibility is 
 - Added `ANTHROPIC_BASE_URL` for mocked LLM integration tests.
 - Added `beater dev --host` / `[app] host` for container and remote test binding.
 - Added `beater new <app>` to scaffold a runnable hello app.
+- Added `remoteMcpTool` / `remote_mcp` registry support for mock-tested networked MCP tool sources.
 - Added slow-tool fixtures for the M2 live crash/resume gate.
 
 ## Versioning Policy
