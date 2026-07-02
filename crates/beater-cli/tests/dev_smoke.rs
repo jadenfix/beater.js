@@ -196,6 +196,42 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
             "missing scaffold file {relative_path}"
         );
     }
+    std::fs::create_dir_all(app.join("node_modules/zod")).expect("create fixture zod package");
+    std::fs::write(
+        app.join("node_modules/zod/package.json"),
+        r#"{
+  "name": "zod",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./index.js",
+      "require": "./index.cjs"
+    }
+  }
+}"#,
+    )
+    .expect("write fixture zod package.json");
+    std::fs::write(
+        app.join("node_modules/zod/index.js"),
+        "export const z = { string: () => ({ parse: (value) => String(value).trim() }) };\n",
+    )
+    .expect("write fixture zod index");
+    std::fs::write(
+        app.join("app/routes/api/zod.ts"),
+        r#"import { z } from "zod";
+
+const Name = z.string();
+
+export function GET() {
+  return {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ value: Name.parse(" beater ") }),
+  };
+}
+"#,
+    )
+    .expect("write zod route");
 
     let child = Command::new(&beater)
         .arg("dev")
@@ -217,6 +253,10 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
     let health = wait_for_http(port, "GET", "/api/health", None);
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
     assert!(health.contains("\"runtime\":\"beater.js\""), "{health}");
+
+    let zod = http_request(port, "GET", "/api/zod", None).expect("GET /api/zod");
+    assert!(zod.starts_with("HTTP/1.1 200"), "{zod}");
+    assert!(zod.contains(r#""value":"beater""#), "{zod}");
 
     let home = http_request(port, "GET", "/", None).expect("GET scaffolded /");
     assert!(home.starts_with("HTTP/1.1 200"), "{home}");

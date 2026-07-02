@@ -23,6 +23,8 @@ Pre-alpha, built in the open. Current milestone progress:
 - [x] **M3** — MCP server endpoint (spec 2025-11-25, verified with the official MCP inspector) + agent-ready crawl layer (robots.txt, sitemap.xml, llms.txt, .well-known manifest — auto-generated from the route table)
 - [x] **M4** — streamed React 19 SSR (`renderToReadableStream`; shell chunks flush before Suspense-delayed subtrees)
 - [x] **M5** — route-scoped client module (`/_beater/client/index.js`) hydrates a counter on the hello route
+- [x] **M6** — route-scoped RSC transport (`/_beater/rsc/index.flight`) streams server islands to the browser
+- [x] **M7** — server routes can import local ESM packages from `node_modules` with bare specifiers
 
 ## Quickstart (target DX)
 
@@ -52,9 +54,11 @@ export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # browser-based oper
 
 `beater dev` currently uses one JS route isolate, so TS routes and React SSR serialize through that worker. One dev server serves one app directory. See [Runtime limits](docs/runtime-limits.md) for the exact concurrency model and isolate-pool path.
 
-Client modules are route companions such as `app/routes/index.client.ts`. They are transpiled and served as same-origin browser modules, but they are not bundled with npm dependencies yet; that remains the Phase C npm/node-compat item.
+Server-side routes can import local ESM packages from `node_modules` with bare package specifiers. The resolver handles basic/exact package `exports` entries with `import`, `module`, `browser`, and `default` conditions, plus `module`/`main` fallbacks; CommonJS `require`, Node built-ins, and client-side dependency bundling are still outside this wedge.
 
-RSC transport is starting as route companions such as `app/routes/index.server.tsx`, streamed from `/_beater/rsc/index.flight` with `text/x-component` frames over the same isolate-to-host stream channel. This is the transport wedge; full React Flight client runtime, client-reference manifests, and npm package adoption are still Phase C work.
+Client modules are route companions such as `app/routes/index.client.ts`. They are transpiled and served as same-origin browser modules, but they are not bundled with npm dependencies yet.
+
+RSC transport is starting as route companions such as `app/routes/index.server.tsx`, streamed from `/_beater/rsc/index.flight` with `text/x-component` frames over the same isolate-to-host stream channel. This is the transport wedge; full React Flight client runtime and client-reference manifests are still Phase C work.
 
 ## Build from source
 
