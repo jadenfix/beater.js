@@ -92,7 +92,10 @@ impl ToolRegistry {
     pub fn extend(&mut self, other: ToolRegistry) {
         for tool in other.tools {
             if self.get(&tool.name).is_some() {
-                tracing::warn!("duplicate tool {} across agents — keeping the first", tool.name);
+                tracing::warn!(
+                    "duplicate tool {} across agents — keeping the first",
+                    tool.name
+                );
             } else {
                 self.tools.push(tool);
             }
@@ -126,7 +129,9 @@ impl ToolRegistry {
     /// Execute a tool; returns the result serialized as a JSON string
     /// (the tool_result content).
     pub async fn execute(&self, name: &str, input: &Value) -> Result<String> {
-        let tool = self.get(name).with_context(|| format!("no tool named {name}"))?;
+        let tool = self
+            .get(name)
+            .with_context(|| format!("no tool named {name}"))?;
         match &tool.imp {
             ToolImpl::Python { path } => {
                 beater_py::call_tool(path.clone(), input.to_string()).await
@@ -156,5 +161,53 @@ fn execute_builtin(name: &str, _input: &Value) -> Result<String> {
             Ok(json!({"iso": now.to_rfc3339(), "unix": now.timestamp()}).to_string())
         }
         _ => bail!("no rust builtin {name}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{ToolDecl, ToolRegistry};
+
+    #[test]
+    fn hello_slow_fixture_tools_preserve_resume_contract() {
+        let agent_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/hello/agents/support");
+        let registry = ToolRegistry::build(
+            &agent_dir,
+            &[
+                ToolDecl {
+                    kind: "python".to_string(),
+                    name: "slow_summarize".to_string(),
+                    path: Some("./tools/slow_summarize.py".to_string()),
+                    idempotent: true,
+                },
+                ToolDecl {
+                    kind: "python".to_string(),
+                    name: "slow_summarize_once".to_string(),
+                    path: Some("./tools/slow_summarize_once.py".to_string()),
+                    idempotent: false,
+                },
+            ],
+        )
+        .expect("slow fixture tools should load");
+
+        let slow = registry.get("slow_summarize").expect("slow_summarize");
+        assert!(slow.idempotent);
+        assert!(
+            slow.description
+                .contains("explicitly asks for slow_summarize by name")
+        );
+
+        let once = registry
+            .get("slow_summarize_once")
+            .expect("slow_summarize_once");
+        assert!(!once.idempotent);
+        assert!(
+            once.description
+                .contains("explicitly asks for slow_summarize_once by name")
+        );
     }
 }

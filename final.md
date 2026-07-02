@@ -100,18 +100,27 @@ Add `examples/hello/agents/support/tools/slow_summarize.py` — same as `summari
 ### A4. Gate 2 — crash + resume (THE thesis proof)
 
 ```sh
-./target/debug/beater agent run --app examples/hello support "use slow_summarize on 3,1,4,1,5" &
-sleep 8 && kill -9 %1        # mid-tool, after the started row is committed
+log=/tmp/beater-slow-run.log
+rm -f "$log"
+./target/debug/beater agent run --app examples/hello support "use slow_summarize on 3,1,4,1,5" >"$log" 2>&1 &
+pid=$!
+
+until run_id=$(sed -n 's/^run //p' "$log" | head -n1) && test -n "$run_id"; do sleep 0.2; done
+until sqlite3 examples/hello/.beater/journal.db \
+  "SELECT 1 FROM steps WHERE run_id='$run_id' AND kind='tool_call' AND status='started' AND tool_name='slow_summarize' LIMIT 1" \
+  2>/dev/null | grep -qx 1; do sleep 0.2; done
+kill -9 "$pid"        # mid-tool, after the started row is committed
+
 ./target/debug/beater agent runs --app examples/hello        # status: running (stale)
-./target/debug/beater agent resume --app examples/hello <run_id>
-sqlite3 examples/hello/.beater/journal.db 'SELECT seq,kind,status,attempt FROM steps WHERE run_id="<run_id>"'
+./target/debug/beater agent resume --app examples/hello "$run_id"
+sqlite3 examples/hello/.beater/journal.db "SELECT seq,kind,status,attempt FROM steps WHERE run_id='$run_id'"
 ```
 
 **Pass:** resume completes the run; the journal shows the interrupted tool_call re-ran with `attempt=2` and **only** that step re-executed (no duplicate LLM calls before the crash point).
 
 ### A5. Gate 3 — non-idempotent safety
 
-Same kill -9, but against the `idempotent: false` variant.
+Same kill -9 flow, but prompt for `slow_summarize_once` and wait for `tool_name='slow_summarize_once'` before killing.
 
 **Pass:** `beater agent resume` refuses to re-run the tool, prints the reason, and `beater agent runs` shows `needs_review`. Nothing executes twice.
 

@@ -11,6 +11,12 @@ export default defineAgent({
     pyTool("summarize_numbers", "./tools/summarize_numbers.py", {
       idempotent: true,
     }),
+    pyTool("slow_summarize", "./tools/slow_summarize.py", {
+      idempotent: true,
+    }),
+    pyTool("slow_summarize_once", "./tools/slow_summarize_once.py", {
+      idempotent: false,
+    }),
     rustTool("get_time"),
   ],
 });
