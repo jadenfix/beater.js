@@ -45,6 +45,7 @@ pub async fn serve(
     base_url: String,
     registry: ToolRegistry,
     agents: Vec<String>,
+    allow_unauthenticated_remote: bool,
 ) -> Result<()> {
     let table = RouteTable::scan(&config.app_dir)?;
     if table.is_empty() {
@@ -62,10 +63,16 @@ pub async fn serve(
 
     let mcp_access = mcp::AccessConfig::from_env();
     if !host.is_loopback() && !mcp_access.auth_required() {
-        tracing::warn!(
-            "MCP endpoint is bound beyond loopback without bearer auth; set {} before exposing remote management",
-            mcp::DEFAULT_TOKEN_ENV
-        );
+        if allow_unauthenticated_remote {
+            tracing::warn!(
+                "MCP endpoint is bound beyond loopback without bearer auth because --allow-unauthenticated-remote was set"
+            );
+        } else {
+            anyhow::bail!(
+                "refusing to bind {host}:{port} without {}; pass --allow-unauthenticated-remote only for isolated test networks",
+                mcp::DEFAULT_TOKEN_ENV
+            );
+        }
     }
     if mcp_access.auth_required() {
         tracing::info!("MCP bearer-token auth enabled");

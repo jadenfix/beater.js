@@ -99,7 +99,8 @@ impl AccessConfig {
         let Some((scheme, token)) = value.split_once(' ') else {
             return false;
         };
-        scheme.eq_ignore_ascii_case("bearer") && token.trim() == expected
+        scheme.eq_ignore_ascii_case("bearer")
+            && constant_time_eq(token.as_bytes(), expected.as_bytes())
     }
 
     fn cors_origin(&self, headers: &HeaderMap) -> Option<HeaderValue> {
@@ -159,6 +160,17 @@ fn is_loopback_origin(origin: &str) -> bool {
         Some(Host::Ipv6(addr)) => addr == Ipv6Addr::LOCALHOST,
         None => false,
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let max_len = left.len().max(right.len());
+    let mut diff = left.len() ^ right.len();
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left_byte ^ right_byte);
+    }
+    diff == 0
 }
 
 pub async fn handle_post(
@@ -443,6 +455,24 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn bearer_token_requires_exact_match() {
+        let registry = ToolRegistry::empty();
+        let access = AccessConfig::new(Some("secret".to_string()), Vec::new());
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer secret ".parse().unwrap());
+
+        let response = handle_post(
+            &registry,
+            &access,
+            &headers,
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

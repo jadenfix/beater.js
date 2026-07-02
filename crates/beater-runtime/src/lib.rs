@@ -25,6 +25,7 @@ pub fn dev(
     port_override: Option<u16>,
     host_override: Option<std::net::IpAddr>,
     base_url_override: Option<String>,
+    allow_unauthenticated_remote: bool,
 ) -> Result<()> {
     let config = AppConfig::load(app_dir)?;
     let port = port_override.unwrap_or(config.port);
@@ -45,7 +46,13 @@ pub fn dev(
         .enable_all()
         .build()?;
     rt.block_on(server::serve(
-        config, host, port, base_url, registry, agents,
+        config,
+        host,
+        port,
+        base_url,
+        registry,
+        agents,
+        allow_unauthenticated_remote,
     ))
 }
 

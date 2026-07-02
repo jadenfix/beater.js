@@ -35,6 +35,9 @@ enum Command {
         /// Public base URL advertised in agent/crawl metadata
         #[arg(long)]
         base_url: Option<String>,
+        /// Allow binding beyond loopback without BEATER_MCP_TOKEN.
+        #[arg(long)]
+        allow_unauthenticated_remote: bool,
     },
     /// Run, resume, and inspect durable agent runs
     Agent {
@@ -89,7 +92,8 @@ fn main() -> Result<()> {
             host,
             port,
             base_url,
-        } => beater_runtime::dev(&app, port, host, base_url),
+            allow_unauthenticated_remote,
+        } => beater_runtime::dev(&app, port, host, base_url, allow_unauthenticated_remote),
         Command::Agent { command } => match command {
             AgentCommand::Run { app, name, prompt } => {
                 let config = beater_runtime::load_agent_config(&app, &name)?;
