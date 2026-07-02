@@ -167,7 +167,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 - [x] Mockable outbound LLM networking: `ANTHROPIC_BASE_URL` lets resume and integration tests run against local servers instead of live vendor APIs.
 - [x] Network bind control: `--host` / `[app] host` makes container, VM, and remote-management smoke tests possible.
 - [x] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, browser preflight/CORS support, public base URL metadata, and a safe way to expose a dev/prod agent endpoint beyond localhost.
-- [ ] Networked integration contract: remote MCP tool sources, request timeouts/retries, secret handling, and egress policy tested against mock servers.
+- [x] Networked integration contract (v0.1 direct `tools/call`): `remote_mcp` tool sources, request timeouts/retries, bearer-secret handling, `tool_use_id` idempotency keys, review parking, and egress policy are tested against mock servers. Provider discovery and MCP sessions remain Phase C item 8.
 - [ ] Agentic browsing foundation: CDP/Playwright provider contract, browser session lifecycle cleanup, and e2e tests proving an agent can complete a browser task through a tool declaration.
 - [x] Integration registry docs: `docs/integrations.md` shows how first-party Python/Rust tools, remote MCP servers, and browser providers coexist in one agent config without queues or sidecar services.
 

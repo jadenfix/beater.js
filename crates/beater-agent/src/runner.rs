@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::anthropic::Anthropic;
 use crate::journal::Journal;
-use crate::registry::{AgentConfig, ToolRegistry};
+use crate::registry::{AgentConfig, ToolCallContext, ToolNeedsReview, ToolRegistry};
 
 const MAX_TOKENS: u64 = 16000;
 const MAX_LOOP_STEPS: usize = 50;
@@ -280,6 +280,11 @@ async fn agent_loop(ctx: &Ctx, mut messages: Vec<Value>) -> Result<()> {
                                 "type": "tool_result", "tool_use_id": id, "content": content,
                             }));
                         }
+                        Err(e) if e.downcast_ref::<ToolNeedsReview>().is_some() => {
+                            println!("← needs review: {e:#}");
+                            ctx.journal.set_run_status(&ctx.run_id, "needs_review")?;
+                            return Ok(());
+                        }
                         Err(e) => {
                             println!("← tool error: {e:#}");
                             tool_results.push(json!({
@@ -328,7 +333,14 @@ async fn execute_tool_step(
         Some(tool_use_id),
         attempt,
     )?;
-    match ctx.registry.execute(name, input).await {
+    let tool_context = ToolCallContext {
+        tool_use_id: Some(tool_use_id.to_string()),
+    };
+    match ctx
+        .registry
+        .execute_with_context(name, input, &tool_context)
+        .await
+    {
         Ok(result) => {
             ctx.journal
                 .complete_step(&ctx.run_id, seq, &json!({"content": result}))?;

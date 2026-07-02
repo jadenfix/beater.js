@@ -23,3 +23,33 @@ export function pyTool(name, path, opts = {}) {
 export function rustTool(name, opts = {}) {
   return { kind: "rust", name, idempotent: opts.idempotent ?? true };
 }
+
+// Remote MCP tool source. Metadata is declared locally so the agent can expose
+// stable tool schemas before it calls the networked provider.
+export function remoteMcpTool(name, opts = {}) {
+  if (!opts.endpoint) {
+    throw new Error("remoteMcpTool requires opts.endpoint");
+  }
+  if (!opts.tool) {
+    throw new Error("remoteMcpTool requires opts.tool");
+  }
+  if (!opts.description) {
+    throw new Error("remoteMcpTool requires opts.description");
+  }
+  if (!opts.inputSchema) {
+    throw new Error("remoteMcpTool requires opts.inputSchema");
+  }
+  return {
+    kind: "remote_mcp",
+    name,
+    idempotent: opts.idempotent ?? false,
+    description: opts.description,
+    inputSchema: opts.inputSchema,
+    endpoint: opts.endpoint,
+    tool: opts.tool,
+    auth: opts.auth ?? null,
+    timeoutMs: opts.timeoutMs ?? 10000,
+    retry: opts.retry ?? null,
+    egress: opts.egress ?? [],
+  };
+}

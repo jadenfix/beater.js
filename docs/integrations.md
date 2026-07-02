@@ -2,7 +2,7 @@
 
 beater.js should expose one integration registry, not separate queues or sidecar services for web actions, local tools, remote MCP servers, and browser-control providers.
 
-The implemented registry today supports first-party Python and Rust tools. Remote MCP sources and browser providers are planned tool kinds, but they must fit the same contract before they ship.
+The implemented registry today supports first-party Python tools, Rust built-ins, and declared remote MCP tools. Browser providers are still planned, but they must fit the same contract before they ship.
 
 ## Contract
 
@@ -11,7 +11,7 @@ Every integration exposed to an agent should have:
 - `name`: stable, globally unique tool name within the app.
 - `description`: human-readable capability summary for LLM/tool clients.
 - `input_schema`: JSON Schema for validation and MCP/tool metadata.
-- `kind`: implementation kind, such as `python`, `rust`, planned `remote_mcp`, or planned `browser`.
+- `kind`: implementation kind, such as `python`, `rust`, `remote_mcp`, or planned `browser`.
 - `idempotent`: crash-resume safety signal used by the journal.
 - `timeout`: maximum time for one call before it fails closed.
 - `retry`: explicit retry policy for network failures, including whether retries use an idempotency key.
@@ -56,33 +56,46 @@ rustTool("get_time")
 
 Rust built-ins are appropriate for stable host capabilities, low-level system integration, and functionality that should ship inside the binary.
 
-## Planned Kinds
-
-The declarations below are target shapes, not implemented APIs yet. They define the bar for future work.
-
 ### Remote MCP Tools
 
-Remote MCP providers should be declared as registry-backed tools with scoped credentials and mock-server coverage:
+Remote MCP providers are declared as registry-backed tools with scoped credentials, explicit egress, and mock-server coverage. Metadata is declared locally so agents and `/mcp tools/list` can expose a stable schema without making startup depend on a remote provider:
 
 ```ts
 remoteMcpTool("linear.create_issue", {
-  server: "linear",
   tool: "create_issue",
   endpoint: "https://mcp.linear.example/mcp",
+  description: "Create a Linear issue.",
+  inputSchema: {
+    type: "object",
+    properties: {title: {type: "string"}},
+    required: ["title"],
+  },
   auth: {type: "bearer", env: "LINEAR_MCP_TOKEN"},
   timeoutMs: 10_000,
   retry: {attempts: 2, backoffMs: 250, idempotencyKey: "tool_use_id"},
+  egress: ["mcp.linear.example"],
   idempotent: false,
 })
 ```
 
-Release criteria:
+Implemented behavior:
 
-- initialize/list/call are tested against a local mock MCP server
-- auth failures fail closed and do not reach tool execution
-- timeouts and retry behavior are deterministic in tests
-- idempotent tools reuse `tool_use_id` when the remote API supports it
-- non-idempotent calls park as `needs_review` on crash-resume
+- calls are tested against a local mock MCP server
+- bearer auth reads tokens from environment variables only; missing or empty secrets fail before any network connection
+- bearer auth requires HTTPS for non-loopback endpoints
+- endpoint hosts must match the declaration's `egress` allowlist
+- HTTP redirects are not followed, so an allowed endpoint cannot redirect tool arguments or credentials to a host outside the egress policy
+- HTTP timeouts fail closed
+- transient server errors and rate limits retry only when the tool is idempotent or a configured `tool_use_id` idempotency key is available
+- outbound MCP `tools/call` requests reuse `tool_use_id` as the JSON-RPC id and `Idempotency-Key` header when configured
+- non-idempotent calls park as `needs_review` on crash-resume and after ambiguous network/provider failures
+
+Planned next steps:
+
+- remote `initialize` and `tools/list` discovery for provider health checks
+- MCP sessions and resumable transport metadata
+
+## Planned Kinds
 
 ### Browser Providers
 
@@ -117,15 +130,18 @@ export default defineAgent({
   tools: [
     pyTool("score_lead", "./tools/score_lead.py", {idempotent: true}),
     rustTool("get_time"),
-    // planned:
     remoteMcpTool("crm.update_contact", {
-      server: "crm",
       tool: "update_contact",
+      endpoint: "https://mcp.crm.example/mcp",
+      description: "Update a CRM contact.",
+      inputSchema: {type: "object", properties: {}, additionalProperties: true},
       auth: {type: "bearer", env: "CRM_MCP_TOKEN"},
       timeoutMs: 10_000,
       retry: {attempts: 1},
+      egress: ["mcp.crm.example"],
       idempotent: false,
     }),
+    // planned:
     browserTool("verify_checkout", {
       provider: "playwright",
       session: {scope: "run", cleanup: "always"},
