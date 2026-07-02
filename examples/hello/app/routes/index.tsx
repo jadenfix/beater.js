@@ -476,6 +476,36 @@ a {
   font-weight: 720;
 }
 
+.rsc-root {
+  min-height: 86px;
+  border: 1px solid #d4dace;
+  border-radius: 8px;
+  background: #f7faf2;
+  padding: 12px;
+  color: #32382f;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.rsc-root[data-state="loading"] {
+  color: var(--muted);
+}
+
+.rsc-root [data-rsc-panel] {
+  display: grid;
+  gap: 6px;
+}
+
+.rsc-root strong {
+  color: #20332e;
+}
+
+.rsc-root [data-rsc-copy],
+.rsc-root [data-rsc-delayed],
+.rsc-root [data-rsc-fallback] {
+  display: block;
+}
+
 @media (max-width: 980px) {
   .topbar,
   .grid,
@@ -766,6 +796,9 @@ export default function Home({ request }: { request: PageRequest }) {
                 <div className="counter-strip">
                   <button className="counter-button" type="button" data-beater-increment>0</button>
                   <p className="client-state" data-beater-count>server rendered</p>
+                </div>
+                <div className="rsc-root" data-beater-rsc-root data-state="loading">
+                  waiting for server component flight
                 </div>
               </section>
             </aside>

@@ -102,6 +102,7 @@ The work below is not just about matching Node/Next request handling. The end st
 | M2 crash/resume fixtures | `slow_summarize.py` and `slow_summarize_once.py` are declared from `examples/hello/agents/support/agent.ts`; `scripts/m2-live-gate.sh` drives A3-A5 once `ANTHROPIC_API_KEY` is present |
 | Streaming SSR | `scripts/streaming-ssr-gate.sh` starts `beater dev`, reads the raw HTTP socket, and proved shell marker at 0.026s before Suspense-delayed marker at 0.489s while `/api/health` returned in 0.002s |
 | Client hydration | `/_beater/client/index.js` serves `app/routes/index.client.ts`; the hello page loads it as a module and `scripts/client-hydration-gate.cjs` verifies the counter increments in a browser |
+| RSC transport foundation | `/_beater/rsc/index.flight` serves `app/routes/index.server.tsx` as `text/x-component` frames over the worker stream channel; `scripts/rsc-flight-gate.cjs` verifies the browser renders the server island and the client counter still hydrates |
 
 ---
 
@@ -218,12 +219,13 @@ Phase C progress so far:
 
 - Route responses can now carry ordered `body_chunks`; the Rust server forwards them as chunked response bodies and strips stale `content-length` headers.
 - Route-scoped client modules can now live beside page routes as `*.client.ts` files and are served from `/_beater/client/<route>.js`; the hello page uses this to prove same-origin browser code can hydrate a counter without Node/npm. Full React hydration and bundling are still open.
+- Route-scoped server components can now live beside page routes as `*.server.tsx` files and stream `text/x-component` flight frames from `/_beater/rsc/<route>.flight`; this proves the transport and browser island path, not full official React Flight manifests.
 
 | # | Item | Done when |
 |---|---|---|
 | 1 | **Streaming SSR** — renderToReadableStream over the chunked worker channel | **done:** `scripts/streaming-ssr-gate.sh` proved the shell chunk arrived before the Suspense-delayed subtree chunk |
 | 2 | **Client hydration** — route-scoped client bundles (`/_beater/client/<route>.js`) | **done:** `/_beater/client/index.js` serves the route companion client module; the hello counter increments in the browser gate |
-| 3 | **RSC** — flight protocol over the same chunked channel | server components with client islands render + hydrate |
+| 3 | **RSC** — flight protocol over the same chunked channel | **partial:** `/_beater/rsc/index.flight` streams the hello server island and the browser gate renders it; official React Flight client references/manifests remain after npm-compat |
 | 4 | **npm/node-compat** — the adoption wedge (Deno-style compat layer, not a reimplementation) | `import { z } from "zod"` works in a route |
 | 5 | **Isolate pool** — N workers behind the existing channel protocol | wrk shows near-linear scaling to core count |
 | 6 | **Wasm sandbox tier** — Wasmtime as the 4th tool impl kind | an untrusted tool runs capability-scoped and cannot read the filesystem |

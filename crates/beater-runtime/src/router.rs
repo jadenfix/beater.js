@@ -49,7 +49,7 @@ impl RouteTable {
                 if path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
-                    .is_some_and(|stem| stem.ends_with(".client"))
+                    .is_some_and(|stem| stem.ends_with(".client") || stem.ends_with(".server"))
                 {
                     continue;
                 }
@@ -175,10 +175,18 @@ mod tests {
         app.write("app/routes/api/health.ts", "export function GET() {}");
         app.write("app/routes/index.client.ts", "console.log('client')");
         app.write(
+            "app/routes/index.server.tsx",
+            "export default function Rsc() {}",
+        );
+        app.write(
             "app/routes/users/[id].tsx",
             "export default function User() {}",
         );
         app.write("app/routes/users/[id].client.ts", "console.log('client')");
+        app.write(
+            "app/routes/users/[id].server.tsx",
+            "export default function Rsc() {}",
+        );
         app.write("app/routes/ignored.css", "body {}");
 
         let table = RouteTable::scan(app.path()).unwrap();
@@ -188,7 +196,9 @@ mod tests {
         assert!(patterns.contains(&"/api/health"));
         assert!(patterns.contains(&"/users/[id]"));
         assert!(!patterns.contains(&"/index.client"));
+        assert!(!patterns.contains(&"/index.server"));
         assert!(!patterns.contains(&"/users/[id].client"));
+        assert!(!patterns.contains(&"/users/[id].server"));
         assert_eq!(patterns.len(), 3);
 
         let (route, _) = table.match_path("/").unwrap();

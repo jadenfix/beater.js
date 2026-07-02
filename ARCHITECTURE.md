@@ -137,7 +137,7 @@ CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` 
 
 - **npm ecosystem / node-compat** — the adoption wedge; adopt a Deno-style compat layer rather than reimplementing.
 - **WHATWG fetch classes in routes** — comes with npm-compat.
-- **RSC** — the chunked isolate→host streaming plumbing plus route-scoped client modules are the substrate; add the flight protocol after hydration.
+- **Full RSC** — the chunked isolate→host streaming plumbing, route-scoped client modules, and initial `text/x-component` flight transport are the substrate; add official React Flight client references/manifests after npm-compat.
 - **Wasmtime sandbox** — fourth `impl` kind in the tool registry, for untrusted/agent-generated code.
 - **C++ tools** — via `cxx` on the Rust built-in path when a real use case appears.
 - **Production agentic browsing** — the registry has a mock CDP browser provider for contract tests; reuse beater-agents' real CDP/Playwright crates as the production provider.
@@ -157,3 +157,4 @@ CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` 
 | M3 | `/mcp` endpoint (inspector-verified) + crawl layer (robots/sitemap/llms.txt/.well-known) | ecosystem | **done** |
 | M4 | React streaming SSR (`renderToReadableStream`) | the web half | **done** |
 | M5 | route-scoped client module (`/_beater/client/<route>.js`) + hydrated counter | interactivity | **done** |
+| M6 | route-scoped RSC transport (`/_beater/rsc/<route>.flight`) + browser-rendered server island | RSC substrate | transport done; official React Flight manifests pending |

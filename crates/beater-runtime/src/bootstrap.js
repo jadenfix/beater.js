@@ -89,7 +89,6 @@
       }
     };
   }
-
   if (!globalThis.ReadableStream) {
     globalThis.ReadableStream = class ReadableStream {
       constructor(source = {}) {
@@ -176,7 +175,7 @@
     };
   }
 
-  const pageStreams = new Map();
+  const activeStreams = new Map();
 
   function streamChunkBytes(value) {
     if (value == null) return new Uint8Array();
@@ -186,6 +185,16 @@
     }
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     return new TextEncoder().encode(String(value));
+  }
+
+  const flightEncoder = new TextEncoder();
+
+  function flightFrame(kind, payload) {
+    return flightEncoder.encode(`${kind}${JSON.stringify(payload)}\n`);
+  }
+
+  function writeFlightFrame(stream_id, kind, payload) {
+    return ops.op_beater_stream_chunk(stream_id, flightFrame(kind, payload));
   }
 
   async function cancelReader(reader) {
@@ -220,12 +229,38 @@
       }
       ops.op_beater_stream_end(stream_id);
     } catch (error) {
-      if (pageStreams.get(stream_id) === reader) {
+      if (activeStreams.get(stream_id) === reader) {
         ops.op_beater_stream_error(stream_id, fmt(error));
       }
     } finally {
-      if (pageStreams.get(stream_id) === reader) {
-        pageStreams.delete(stream_id);
+      if (activeStreams.get(stream_id) === reader) {
+        activeStreams.delete(stream_id);
+      }
+      releaseReader(reader);
+    }
+  }
+
+  async function pumpRscFlightStream(stream_id, reader) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const bytes = Array.from(streamChunkBytes(value));
+        if (bytes.length && !writeFlightFrame(stream_id, "H", bytes)) {
+          await cancelReader(reader);
+          return;
+        }
+      }
+      writeFlightFrame(stream_id, "E", { ok: true });
+      ops.op_beater_stream_end(stream_id);
+    } catch (error) {
+      if (activeStreams.get(stream_id) === reader) {
+        writeFlightFrame(stream_id, "E", { ok: false, error: fmt(error) });
+        ops.op_beater_stream_end(stream_id);
+      }
+    } finally {
+      if (activeStreams.get(stream_id) === reader) {
+        activeStreams.delete(stream_id);
       }
       releaseReader(reader);
     }
@@ -256,7 +291,7 @@
       },
     );
     const reader = stream.getReader();
-    pageStreams.set(stream_id, reader);
+    activeStreams.set(stream_id, reader);
     pumpPageStream(stream_id, reader);
     return {
       status: 200,
@@ -264,9 +299,46 @@
     };
   };
 
+  globalThis.__beaterPrepareRscFlightStream = async (specifier, request, stream_id) => {
+    const [mod, React, ReactDOMServer] = await Promise.all([
+      import(specifier),
+      import("react"),
+      import("react-dom/server"),
+    ]);
+    const Component = mod.default;
+    if (typeof Component !== "function") {
+      throw new Error(`RSC route must export a default component: ${specifier}`);
+    }
+    if (typeof ReactDOMServer.renderToReadableStream !== "function") {
+      throw new Error("react-dom/server renderToReadableStream is unavailable");
+    }
+    writeFlightFrame(stream_id, "B", {
+      protocol: "beater-flight",
+      version: 0,
+    });
+    const stream = await ReactDOMServer.renderToReadableStream(
+      React.createElement(Component, { request }),
+      {
+        onError(error) {
+          if (!isExpectedRenderAbort(error)) console.error(error);
+        },
+      },
+    );
+    const reader = stream.getReader();
+    activeStreams.set(stream_id, reader);
+    pumpRscFlightStream(stream_id, reader);
+    return {
+      status: 200,
+      headers: {
+        "content-type": "text/x-component; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    };
+  };
+
   globalThis.__beaterCancelPageStream = async (stream_id) => {
-    const reader = pageStreams.get(stream_id);
-    pageStreams.delete(stream_id);
+    const reader = activeStreams.get(stream_id);
+    activeStreams.delete(stream_id);
     await cancelReader(reader);
     releaseReader(reader);
     ops.op_beater_stream_end(stream_id);

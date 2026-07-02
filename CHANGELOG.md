@@ -12,6 +12,7 @@ beater.js is pre-alpha. Version numbers are semver-shaped, but compatibility is 
 - Added `browserTool` / `browser` registry support with a mock CDP provider for agent-loop and session-cleanup tests.
 - Added slow-tool fixtures for the M2 live crash/resume gate.
 - Added route-scoped client modules at `/_beater/client/<route>.js` and a hydrated counter in the hello app.
+- Added route-scoped RSC transport frames at `/_beater/rsc/<route>.flight` and a browser gate for the hello server island.
 
 ## Versioning Policy
 

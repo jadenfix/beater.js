@@ -31,6 +31,7 @@ use crate::{crawl, mcp};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const CLIENT_MODULE_PREFIX: &str = "/_beater/client/";
+const RSC_FLIGHT_PREFIX: &str = "/_beater/rsc/";
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
@@ -320,6 +321,9 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
     let method = req.method().as_str().to_uppercase();
     let head = method == "HEAD";
     let path = req.uri().path().to_string();
+    if path.starts_with(RSC_FLIGHT_PREFIX) {
+        return rsc_flight_response(&state, &method, &path, head).await;
+    }
     if path.starts_with(CLIENT_MODULE_PREFIX) {
         return client_module_response(&state.app_dir, &method, &path);
     }
@@ -407,51 +411,124 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
         .map_err(|_| anyhow::anyhow!("js worker dropped the request (reloading?)"))?;
 
     match result {
-        Ok(route_resp) => {
-            let uses_chunked_body = matches!(
-                &route_resp.body,
-                RouteBody::Chunks(_) | RouteBody::Stream { .. }
-            );
-            let mut builder = Response::builder().status(route_resp.status);
-            for (k, v) in &route_resp.headers {
-                if uses_chunked_body && k.eq_ignore_ascii_case("content-length") {
-                    continue;
-                }
-                builder = builder.header(k, v);
-            }
-            let body = match route_resp.body {
-                RouteBody::Full(body) => {
-                    if head {
-                        empty_unknown_len_body()
-                    } else {
-                        Body::from(body)
-                    }
-                }
-                RouteBody::Chunks(chunks) => {
-                    if head {
-                        empty_unknown_len_body()
-                    } else {
-                        chunks_body(chunks)
-                    }
-                }
-                RouteBody::Stream { stream_id, rx } => {
-                    if head {
-                        let _ = state
-                            .worker_tx
-                            .read()
-                            .await
-                            .send(WorkerMsg::CancelStream { stream_id })
-                            .await;
-                        drop(rx);
-                        empty_unknown_len_body()
-                    } else {
-                        Body::from_stream(UnboundedReceiverStream::new(rx))
-                    }
-                }
-            };
-            Ok(builder.body(body)?)
-        }
+        Ok(route_resp) => route_response_to_http(&state, head, route_resp).await,
         // JS error: readable, source-mapped stack in the dev response
+        Err(stack) => Ok(text_response(StatusCode::INTERNAL_SERVER_ERROR, stack)),
+    }
+}
+
+async fn route_response_to_http(
+    state: &DevState,
+    head: bool,
+    route_resp: worker::RouteResponse,
+) -> Result<Response<Body>> {
+    let uses_chunked_body = matches!(
+        &route_resp.body,
+        RouteBody::Chunks(_) | RouteBody::Stream { .. }
+    );
+    let mut builder = Response::builder().status(route_resp.status);
+    for (k, v) in &route_resp.headers {
+        if uses_chunked_body && k.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        builder = builder.header(k, v);
+    }
+    let body = match route_resp.body {
+        RouteBody::Full(body) => {
+            if head {
+                empty_unknown_len_body()
+            } else {
+                Body::from(body)
+            }
+        }
+        RouteBody::Chunks(chunks) => {
+            if head {
+                empty_unknown_len_body()
+            } else {
+                chunks_body(chunks)
+            }
+        }
+        RouteBody::Stream { stream_id, rx } => {
+            if head {
+                let _ = state
+                    .worker_tx
+                    .read()
+                    .await
+                    .send(WorkerMsg::CancelStream { stream_id })
+                    .await;
+                drop(rx);
+                empty_unknown_len_body()
+            } else {
+                Body::from_stream(UnboundedReceiverStream::new(rx))
+            }
+        }
+    };
+    Ok(builder.body(body)?)
+}
+
+async fn rsc_flight_response(
+    state: &DevState,
+    method: &str,
+    path: &str,
+    head: bool,
+) -> Result<Response<Body>> {
+    if method != "GET" && method != "HEAD" {
+        return Ok(text_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "RSC flight streams are GET-only".to_string(),
+        ));
+    }
+
+    let Some(route_path) = rsc_flight_route_path(path) else {
+        return Ok(text_response(
+            StatusCode::NOT_FOUND,
+            "RSC flight stream not found".to_string(),
+        ));
+    };
+    let module_path = {
+        let table = state.routes.read().await;
+        let Some(path) = find_rsc_server_module(&state.app_dir, &table, &route_path) else {
+            return Ok(text_response(
+                StatusCode::NOT_FOUND,
+                "RSC flight stream not found".to_string(),
+            ));
+        };
+        path
+    };
+    let specifier = deno_core::ModuleSpecifier::from_file_path(&module_path)
+        .map_err(|_| anyhow::anyhow!("bad RSC server module path {}", module_path.display()))?;
+    let request_json = json!({
+        "id": NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed).to_string(),
+        "method": method,
+        "path": path,
+        "route": route_path.to_string_lossy(),
+        "params": {},
+        "query": {},
+        "headers": {},
+        "body": serde_json::Value::Null,
+    })
+    .to_string();
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .worker_tx
+        .read()
+        .await
+        .send(WorkerMsg::RscFlight {
+            specifier: specifier.to_string(),
+            request_json,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("js worker is gone"))?;
+
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, reply_rx)
+        .await
+        .map_err(|_| anyhow::anyhow!("RSC flight stream timed out after {REQUEST_TIMEOUT:?}"))?
+        .map_err(|_| anyhow::anyhow!("js worker dropped the RSC flight request (reloading?)"))?;
+
+    match result {
+        Ok(route_resp) => route_response_to_http(state, head, route_resp).await,
         Err(stack) => Ok(text_response(StatusCode::INTERNAL_SERVER_ERROR, stack)),
     }
 }
@@ -492,9 +569,54 @@ fn client_module_response(app_dir: &Path, method: &str, path: &str) -> Result<Re
 }
 
 fn client_module_route_path(path: &str) -> Option<PathBuf> {
-    let rel = path
-        .strip_prefix(CLIENT_MODULE_PREFIX)?
-        .strip_suffix(".js")?;
+    route_scoped_internal_path(path, CLIENT_MODULE_PREFIX, ".js")
+}
+
+fn find_client_module(app_dir: &Path, route_path: &Path) -> Option<PathBuf> {
+    let routes_dir = app_dir.join("app").join("routes");
+    ["ts", "tsx", "js", "jsx", "mjs"]
+        .into_iter()
+        .map(|ext| {
+            routes_dir
+                .join(route_path)
+                .with_extension(format!("client.{ext}"))
+        })
+        .find(|path| path.is_file())
+}
+
+fn rsc_flight_route_path(path: &str) -> Option<PathBuf> {
+    route_scoped_internal_path(path, RSC_FLIGHT_PREFIX, ".flight")
+}
+
+fn find_rsc_server_module(
+    app_dir: &Path,
+    routes: &RouteTable,
+    route_path: &Path,
+) -> Option<PathBuf> {
+    if !has_matching_page_route(app_dir, routes, route_path) {
+        return None;
+    }
+    let routes_dir = app_dir.join("app").join("routes");
+    ["tsx", "ts", "jsx", "js", "mjs"]
+        .into_iter()
+        .map(|ext| {
+            routes_dir
+                .join(route_path)
+                .with_extension(format!("server.{ext}"))
+        })
+        .find(|path| path.is_file())
+}
+
+fn has_matching_page_route(app_dir: &Path, routes: &RouteTable, route_path: &Path) -> bool {
+    let routes_dir = app_dir.join("app").join("routes");
+    let candidates = ["tsx", "jsx"].map(|ext| routes_dir.join(route_path).with_extension(ext));
+    routes
+        .iter()
+        .any(|route| route.kind == RouteKind::Page && candidates.contains(&route.file))
+}
+
+fn route_scoped_internal_path(path: &str, prefix: &str, suffix: &str) -> Option<PathBuf> {
+    let rel = path.strip_prefix(prefix)?.strip_suffix(suffix)?;
     if rel.is_empty() {
         return None;
     }
@@ -512,18 +634,6 @@ fn client_module_route_path(path: &str) -> Option<PathBuf> {
         route_path.push(segment);
     }
     Some(route_path)
-}
-
-fn find_client_module(app_dir: &Path, route_path: &Path) -> Option<PathBuf> {
-    let routes_dir = app_dir.join("app").join("routes");
-    ["ts", "tsx", "js", "jsx", "mjs"]
-        .into_iter()
-        .map(|ext| {
-            routes_dir
-                .join(route_path)
-                .with_extension(format!("client.{ext}"))
-        })
-        .find(|path| path.is_file())
 }
 
 #[cfg(test)]
@@ -617,8 +727,10 @@ mod tests {
 
     use super::{
         apply_route_security_headers, client_module_response, client_module_route_path,
-        find_client_module, route_response, route_response_body, text_response,
+        find_client_module, find_rsc_server_module, route_response, route_response_body,
+        rsc_flight_route_path, text_response,
     };
+    use crate::router::RouteTable;
     use crate::worker;
 
     #[test]
@@ -741,6 +853,20 @@ mod tests {
     }
 
     #[test]
+    fn rsc_flight_route_paths_are_normalized() {
+        assert_eq!(
+            rsc_flight_route_path("/_beater/rsc/index.flight").as_deref(),
+            Some(Path::new("index"))
+        );
+        assert_eq!(
+            rsc_flight_route_path("/_beater/rsc/dashboard/settings.flight").as_deref(),
+            Some(Path::new("dashboard/settings"))
+        );
+        assert!(rsc_flight_route_path("/_beater/rsc/../secret.flight").is_none());
+        assert!(rsc_flight_route_path("/_beater/rsc/index.js").is_none());
+    }
+
+    #[test]
     fn finds_adjacent_route_client_module() {
         let app = TempDir::new("find");
         app.write(
@@ -751,6 +877,40 @@ mod tests {
         let found = find_client_module(app.path(), Path::new("index")).unwrap();
 
         assert_eq!(found, app.path().join("app/routes/index.client.ts"));
+    }
+
+    #[test]
+    fn finds_adjacent_route_server_component_module() {
+        let app = TempDir::new("find-rsc");
+        app.write(
+            "app/routes/dashboard/settings.tsx",
+            "export default function SettingsPage() {}",
+        );
+        app.write(
+            "app/routes/dashboard/settings.server.tsx",
+            "export default function SettingsFlight() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        let found =
+            find_rsc_server_module(app.path(), &table, Path::new("dashboard/settings")).unwrap();
+
+        assert_eq!(
+            found,
+            app.path().join("app/routes/dashboard/settings.server.tsx")
+        );
+    }
+
+    #[test]
+    fn rsc_server_module_requires_matching_page_route() {
+        let app = TempDir::new("find-rsc-stray");
+        app.write(
+            "app/routes/admin/secret.server.tsx",
+            "export default function SecretFlight() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        assert!(find_rsc_server_module(app.path(), &table, Path::new("admin/secret")).is_none());
     }
 
     #[tokio::test]

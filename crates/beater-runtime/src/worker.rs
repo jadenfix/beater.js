@@ -30,6 +30,13 @@ pub enum WorkerMsg {
         page: bool,
         reply: oneshot::Sender<Result<RouteResponse, String>>,
     },
+    RscFlight {
+        /// file:// specifier of the route-scoped server component module.
+        specifier: String,
+        /// JSON-serialized request object passed to the server component.
+        request_json: String,
+        reply: oneshot::Sender<Result<RouteResponse, String>>,
+    },
     /// Read a route module's optional `export const agent = {...}` metadata.
     RouteMeta {
         specifier: String,
@@ -204,6 +211,15 @@ async fn handle_worker_msg(runtime: &mut JsRuntime, next_stream_id: &mut u32, ms
                 let _ = reply.send(result);
             }
         }
+        WorkerMsg::RscFlight {
+            specifier,
+            request_json,
+            reply,
+        } => {
+            let stream_id = *next_stream_id;
+            *next_stream_id = next_stream_id.saturating_add(1).max(1);
+            dispatch_rsc_flight_stream(runtime, &specifier, &request_json, stream_id, reply).await;
+        }
         WorkerMsg::RouteMeta { specifier, reply } => {
             let result = route_meta(runtime, &specifier).await;
             let _ = reply.send(result);
@@ -312,6 +328,39 @@ async fn dispatch_page_stream(
     }
 }
 
+async fn dispatch_rsc_flight_stream(
+    runtime: &mut JsRuntime,
+    specifier: &str,
+    request_json: &str,
+    stream_id: u32,
+    reply: oneshot::Sender<Result<RouteResponse, String>>,
+) {
+    let (body_tx, body_rx) = mpsc::unbounded_channel();
+    register_page_stream(runtime, stream_id, body_tx);
+
+    let flight_stream =
+        match prepare_rsc_flight_stream(runtime, specifier, request_json, stream_id).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                remove_page_stream(runtime, stream_id);
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
+
+    let response = RouteResponse {
+        status: flight_stream.status,
+        headers: flight_stream.headers,
+        body: RouteBody::Stream {
+            stream_id,
+            rx: body_rx,
+        },
+    };
+    if reply.send(Ok(response)).is_err() {
+        let _ = cancel_page_stream(runtime, stream_id).await;
+    }
+}
+
 fn register_page_stream(
     runtime: &mut JsRuntime,
     stream_id: u32,
@@ -358,6 +407,32 @@ async fn prepare_page_stream(
     let local = v8::Local::new(scope, global);
     deno_core::serde_v8::from_v8(scope, local)
         .map_err(|e| format!("page stream response did not match {{ status, headers }}: {e}"))
+}
+
+async fn prepare_rsc_flight_stream(
+    runtime: &mut JsRuntime,
+    specifier: &str,
+    request_json: &str,
+    stream_id: u32,
+) -> Result<JsPageStream, String> {
+    let code = format!(
+        "globalThis.__beaterPrepareRscFlightStream({}, {}, {stream_id})",
+        serde_json::Value::String(specifier.to_string()),
+        request_json,
+    );
+    let promise = runtime
+        .execute_script("beater:prepare-rsc-flight-stream", code)
+        .map_err(|e| format_js_error(&e))?;
+    let resolved = runtime.resolve(promise);
+    let global = runtime
+        .with_event_loop_promise(resolved, PollEventLoopOptions::default())
+        .await
+        .map_err(format_core_error)?;
+
+    deno_core::scope!(scope, runtime);
+    let local = v8::Local::new(scope, global);
+    deno_core::serde_v8::from_v8(scope, local)
+        .map_err(|e| format!("RSC flight stream response did not match {{ status, headers }}: {e}"))
 }
 
 async fn cancel_page_stream(runtime: &mut JsRuntime, stream_id: u32) -> Result<(), String> {

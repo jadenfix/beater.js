@@ -182,6 +182,7 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
     for relative_path in [
         "app/routes/index.tsx",
         "app/routes/index.client.ts",
+        "app/routes/index.server.tsx",
         "app/routes/api/health.ts",
         "app/routes/api/boom.ts",
         "agents/support/agent.ts",
@@ -240,6 +241,20 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
         "{client}"
     );
     assert!(!client.contains(": number"), "{client}");
+
+    let flight =
+        http_request(port, "GET", "/_beater/rsc/index.flight", None).expect("GET RSC flight");
+    assert!(flight.starts_with("HTTP/1.1 200"), "{flight}");
+    assert!(
+        flight.contains("content-type: text/x-component"),
+        "{flight}"
+    );
+    assert!(
+        flight.contains("B{\"protocol\":\"beater-flight\""),
+        "{flight}"
+    );
+    assert!(flight.contains("H["), "{flight}");
+    assert!(flight.contains("E{\"ok\":true}"), "{flight}");
 
     let doctor = Command::new(&beater)
         .arg("doctor")

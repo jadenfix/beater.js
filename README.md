@@ -54,6 +54,8 @@ export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # browser-based oper
 
 Client modules are route companions such as `app/routes/index.client.ts`. They are transpiled and served as same-origin browser modules, but they are not bundled with npm dependencies yet; that remains the Phase C npm/node-compat item.
 
+RSC transport is starting as route companions such as `app/routes/index.server.tsx`, streamed from `/_beater/rsc/index.flight` with `text/x-component` frames over the same isolate-to-host stream channel. This is the transport wedge; full React Flight client runtime, client-reference manifests, and npm package adoption are still Phase C work.
+
 ## Build from source
 
 ```sh
