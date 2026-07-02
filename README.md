@@ -27,6 +27,7 @@ Pre-alpha, built in the open. Current milestone progress:
 
 ```sh
 beater dev examples/hello                 # serve routes with hot reload
+beater dev examples/hello --host 0.0.0.0  # bind for containers/VMs
 beater agent run support "summarize 3,1,4,1,5"
 beater agent resume <run_id>              # crash-safe: picks up mid-loop
 beater doctor                             # verify Python/venv/V8 wiring
@@ -38,7 +39,9 @@ beater doctor                             # verify Python/venv/V8 wiring
 cargo build --workspace      # first build downloads a prebuilt V8; takes a while
 ```
 
-Requires: Rust (pinned via rust-toolchain.toml), a CPython 3.12+ with shared library (for the embedded interpreter).
+Requires: Rust (pinned via rust-toolchain.toml) and CPython with a shared library for the embedded interpreter. If your Python is not the local default in `.cargo/config.toml`, set `PYO3_PYTHON=$(which python3.11)` before building.
+
+Agent tests and local mock runs can point at a non-Anthropic endpoint with `ANTHROPIC_BASE_URL`; production runs still require `ANTHROPIC_API_KEY`.
 
 ## License
 

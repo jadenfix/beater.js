@@ -8,6 +8,7 @@ use serde::Deserialize;
 pub struct AppConfig {
     pub name: String,
     pub port: u16,
+    pub host: std::net::IpAddr,
     /// Path to a Python venv whose site-packages are attached at runtime.
     pub python_venv: Option<PathBuf>,
     pub app_dir: PathBuf,
@@ -25,6 +26,8 @@ struct RawApp {
     name: String,
     #[serde(default = "default_port")]
     port: u16,
+    #[serde(default = "default_host")]
+    host: std::net::IpAddr,
 }
 
 #[derive(Deserialize, Default)]
@@ -34,6 +37,10 @@ struct RawPython {
 
 fn default_port() -> u16 {
     3000
+}
+
+fn default_host() -> std::net::IpAddr {
+    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
 }
 
 impl AppConfig {
@@ -50,6 +57,7 @@ impl AppConfig {
         Ok(Self {
             name: raw.app.name,
             port: raw.app.port,
+            host: raw.app.host,
             python_venv: raw.python.venv.map(|v| app_dir.join(v)),
             app_dir: app_dir.to_path_buf(),
         })

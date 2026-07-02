@@ -13,7 +13,10 @@ pub fn robots_txt(base_url: &str) -> String {
 }
 
 /// Crawlable routes (per their `agent` metadata) with lastmod from file mtime.
-pub fn sitemap_xml(base_url: &str, routes: &[(String, std::path::PathBuf, Option<RouteMeta>)]) -> String {
+pub fn sitemap_xml(
+    base_url: &str,
+    routes: &[(String, std::path::PathBuf, Option<RouteMeta>)],
+) -> String {
     let mut out = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
     );
@@ -24,7 +27,11 @@ pub fn sitemap_xml(base_url: &str, routes: &[(String, std::path::PathBuf, Option
         let lastmod = std::fs::metadata(file)
             .and_then(|m| m.modified())
             .ok()
-            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%Y-%m-%d").to_string());
+            .map(|t| {
+                chrono::DateTime::<chrono::Utc>::from(t)
+                    .format("%Y-%m-%d")
+                    .to_string()
+            });
         out.push_str("  <url>\n");
         out.push_str(&format!("    <loc>{base_url}{pattern}</loc>\n"));
         if let Some(lastmod) = lastmod {

@@ -33,14 +33,15 @@ This file is also the coordination contract for finishing `beater.js` in paralle
 
 **Owner:** second goal-oriented agent started separately by Jaden.
 
-**Goal:** make [B] shippable by removing author-machine assumptions and adding automated confidence that does not depend on the live Anthropic API.
+**Goal:** make [B] shippable by removing author-machine assumptions and adding automated confidence that does not depend on the live Anthropic API. This hardening work must also unblock the next agent era: remotely managed agents, networked tool integrations, remote MCP servers, browser-control providers, and production deployments that can be tested without vendor-specific live credentials.
 
 **Primary PR sequence:**
-- [ ] Add focused unit tests for router matching, journal lifecycle/resume invariants, and loader transpile-cache behavior.
-- [ ] Add `ANTHROPIC_BASE_URL` support plus mocked journal-resume tests.
-- [ ] Add the no-key integration test that spawns `beater dev` and checks `/api/health`, `/`, and `/mcp`.
-- [ ] Add CI for fmt, clippy, and tests on macOS/Linux with rusty_v8 caching.
+- [x] Add focused unit tests for router matching, journal lifecycle/resume invariants, and loader transpile-cache behavior.
+- [x] Add `ANTHROPIC_BASE_URL` support plus mocked journal-resume tests.
+- [x] Add the no-key integration test that spawns `beater dev` and checks `/api/health`, `/`, and `/mcp`.
+- [x] Add CI for fmt, clippy, and tests on macOS/Linux with rusty_v8 caching.
 - [ ] Improve portability/docs: Python discovery guidance, host binding, quickstart, `docs/tools.md`, and security notes.
+- [x] Keep every release-hardening PR pointed at agent-platform foundations: deterministic network tests, explicit host binding, auth-ready remote surfaces, integration-friendly tool contracts, and browser/e2e hooks.
 
 **Likely touched files:** `crates/**`, `.github/workflows/**`, docs under `docs/**`, `README.md`, `ARCHITECTURE.md`, and `final.md`.
 
@@ -138,17 +139,25 @@ Same kill -9 flow, but prompt for `slow_summarize_once` and wait for `tool_name=
 
 The MVP proves the thesis on this machine. A release requires removing the machine- and author-specific assumptions:
 
-### Correctness & tests (currently: zero automated tests)
-- [ ] Unit tests: router matching (params, index, collisions), journal lifecycle (start/complete/fail/resume invariants), loader transpile cache behavior
-- [ ] Integration test: spawn `beater dev`, curl /api/health + / + /mcp tools/call (no API key needed — this is exactly the M3 gate, automated)
-- [ ] Journal resume tests with a mocked Anthropic endpoint (`ANTHROPIC_BASE_URL` override — **needs a small code change**: the API URL is currently a hardcoded const in `anthropic.rs`)
-- [ ] CI: GitHub Actions running fmt + clippy + tests on macOS and Linux, with the rusty_v8 archive cached
+### Correctness & tests
+- [x] Unit tests: router matching (params, index, collisions), journal lifecycle (start/complete/fail), journal resume invariants (idempotent retry + non-idempotent `needs_review`), loader transpile-cache behavior
+- [x] Integration test: spawn `beater dev`, curl /api/health + / + /mcp tools/call (no API key needed — this is exactly the M3 gate, automated)
+- [x] Journal resume tests with a mocked Anthropic endpoint (`ANTHROPIC_BASE_URL` override)
+- [x] CI: GitHub Actions running fmt + clippy + tests on macOS and Linux, with the rusty_v8 archive cached
 
 ### Portability (currently: works on this Mac)
 - [ ] **Python discovery**: `.cargo/config.toml` hardcodes `PYO3_PYTHON=/opt/homebrew/bin/python3.11`. Replace with documented per-platform setup + a `beater doctor` check that explains mismatches. Linux build verified.
 - [ ] **Concurrency**: one isolate = requests serialize; one dev server = one app. Either ship the isolate pool (the channel protocol is already pool-shaped) or document the limitation prominently.
-- [ ] **Port/host binding**: 127.0.0.1 hardcoded; `--host` flag for containers.
+- [x] **Port/host binding**: `beater dev --host <ip>` and `[app] host = "..."`; the no-key integration test binds `0.0.0.0` and curls through localhost.
 - [ ] `beater new <app>` scaffolding command (copy of examples/hello) — the first-five-minutes experience.
+
+### Agent-platform enablers
+- [x] Mockable outbound LLM networking: `ANTHROPIC_BASE_URL` lets resume and integration tests run against local servers instead of live vendor APIs.
+- [x] Network bind control: `--host` / `[app] host` makes container, VM, and remote-management smoke tests possible.
+- [ ] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, and a safe way to expose a dev/prod agent endpoint beyond localhost.
+- [ ] Networked integration contract: remote MCP tool sources, request timeouts/retries, secret handling, and egress policy tested against mock servers.
+- [ ] Agentic browsing foundation: CDP/Playwright provider contract, browser session lifecycle cleanup, and e2e tests proving an agent can complete a browser task through a tool declaration.
+- [ ] Integration registry docs: show how first-party Python/Rust tools, remote MCP servers, and browser providers coexist in one agent config without queues or sidecar services.
 
 ### Security floor (currently: dev-mode assumptions everywhere)
 - [ ] /mcp has no auth — fine on localhost, must be stated loudly + bearer-token option before anyone binds 0.0.0.0
@@ -166,6 +175,8 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 
 These are the items ARCHITECTURE.md §8 explicitly deferred, in dependency order. Each has a one-line acceptance criterion.
 
+The through-line is not just parity with Node/Next; it is an agent-native runtime where browsers, remote MCP servers, SaaS APIs, local ML tools, and human-facing web actions are all first-class, durable, inspectable capabilities. Phase C work should therefore prefer slices that improve remote management, networking, integrations, browser automation, and deployability over isolated demos.
+
 | # | Item | Done when |
 |---|---|---|
 | 1 | **Streaming SSR** — renderToReadableStream over the chunked worker channel (needs ReadableStream shim or deno_web) | `curl -N /` shows the shell chunk arrive before a Suspense-delayed subtree chunk |
@@ -175,15 +186,15 @@ These are the items ARCHITECTURE.md §8 explicitly deferred, in dependency order
 | 5 | **Isolate pool** — N workers behind the existing channel protocol | wrk shows near-linear scaling to core count |
 | 6 | **Wasm sandbox tier** — Wasmtime as the 4th tool impl kind | an untrusted tool runs capability-scoped and cannot read the filesystem |
 | 7 | **LLM streaming** — SSE to browser + partial-step journal records | tokens stream to a page while every step stays crash-resumable |
-| 8 | **MCP consume + sessions** — use remote MCP servers as tool sources; adopt the next MCP spec when released | an agent uses a third-party MCP server's tool via config only |
-| 9 | **Agentic browsing** — reuse beater-agents' CDP/Playwright crates as a tool provider | an agent completes a real browsing task from a pyTool-style declaration |
+| 8 | **MCP consume + sessions** — use remote MCP servers as tool sources; add session/auth plumbing for remote management; adopt the next MCP spec when released | an agent uses a third-party MCP server's tool via config only, with scoped credentials and resumable error handling |
+| 9 | **Agentic browsing** — reuse beater-agents' CDP/Playwright crates as a tool provider | an agent completes a real browsing task from a pyTool-style declaration, with browser sessions cleaned up after crashes |
 | 10 | **defineAction** — one definition → HTML form + MCP tool + OpenAPI + crawler metadata (§6b end state) | a form posts for humans AND appears in tools/list with auth + confirm semantics |
 | 11 | **Deploy story** — `beater build` → single container (binary + assets + venv) | `docker run` of the built image serves the app cold in <1s |
 | 12 | **Observability** — OTLP out of the agent loop into beater-agents | a run's trace appears in the beater-agents dashboard |
 | 13 | **Free-threaded Python** — pyo3 on 3.14t once ML wheels are reliable | two Python tools execute truly in parallel under load |
 | 14 | **C++ tools** — via cxx on the Rust builtin path | a C++ function is callable as a tool with schema |
 
-**Definition of thesis-done:** a team can build and deploy a production app where the web UI, the agents, and the ML tools live in one repo, run in one process, survive crashes mid-agent-loop, and are discoverable/callable by third-party AI agents — without Node, without a queue between the web and ML halves, and without a cloud lock-in. Items 1–5 + 11 are the minimum for that sentence to be true; 6–10 + 12–14 make it competitive.
+**Definition of thesis-done:** a team can build and deploy a production app where the web UI, the agents, the browser automation, the remote integrations, and the ML tools live in one repo, run in one process, survive crashes mid-agent-loop, and are discoverable/callable by third-party AI agents — without Node, without a queue between the web and ML halves, and without a cloud lock-in. Items 1–5 + 11 are the minimum for the web-runtime replacement to be true; 6–10 + 12–14 make it an agent-native platform for remote management, networking, integrations, and browsing.
 
 ---
 

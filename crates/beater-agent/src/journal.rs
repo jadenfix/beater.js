@@ -17,16 +17,19 @@ pub struct RunRow {
     pub agent: String,
     pub status: String,
     pub input: String,
+    #[allow(dead_code)]
     pub created_at: i64,
 }
 
 #[derive(Debug)]
 pub struct StepRow {
+    #[allow(dead_code)]
     pub seq: i64,
     pub kind: String,   // llm_call | tool_call
     pub status: String, // started | completed | failed
     pub request: serde_json::Value,
     pub result: Option<serde_json::Value>,
+    #[allow(dead_code)]
     pub tool_name: Option<String>,
     pub tool_use_id: Option<String>,
     pub attempt: i64,
@@ -152,7 +155,12 @@ impl Journal {
         self.conn.execute(
             "UPDATE steps SET status = 'failed', result = ?3, finished_at = ?4
              WHERE run_id = ?1 AND seq = ?2",
-            params![run_id, seq, serde_json::json!({"error": error}).to_string(), now()],
+            params![
+                run_id,
+                seq,
+                serde_json::json!({"error": error}).to_string(),
+                now()
+            ],
         )?;
         Ok(())
     }
@@ -177,18 +185,122 @@ impl Journal {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
-            .map(|(seq, kind, status, request, result, tool_name, tool_use_id, attempt)| {
-                Ok(StepRow {
-                    seq,
-                    kind,
-                    status,
-                    request: serde_json::from_str(&request)?,
-                    result: result.map(|r| serde_json::from_str(&r)).transpose()?,
-                    tool_name,
-                    tool_use_id,
-                    attempt,
-                })
-            })
+            .map(
+                |(seq, kind, status, request, result, tool_name, tool_use_id, attempt)| {
+                    Ok(StepRow {
+                        seq,
+                        kind,
+                        status,
+                        request: serde_json::from_str(&request)?,
+                        result: result.map(|r| serde_json::from_str(&r)).transpose()?,
+                        tool_name,
+                        tool_use_id,
+                        attempt,
+                    })
+                },
+            )
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Journal;
+    use serde_json::json;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "beater-journal-{name}-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn records_run_and_step_lifecycle_in_order() {
+        let app = TempDir::new("lifecycle");
+        let journal = Journal::open(app.path()).unwrap();
+        journal.create_run("run-1", "support", "hello").unwrap();
+
+        let llm = journal
+            .start_step(
+                "run-1",
+                "llm_call",
+                &json!({"messages": [{"role": "user", "content": "hello"}]}),
+                None,
+                None,
+                1,
+            )
+            .unwrap();
+        journal
+            .complete_step("run-1", llm, &json!({"stop_reason": "tool_use"}))
+            .unwrap();
+        let tool = journal
+            .start_step(
+                "run-1",
+                "tool_call",
+                &json!({"name": "summarize_numbers"}),
+                Some("summarize_numbers"),
+                Some("toolu_1"),
+                2,
+            )
+            .unwrap();
+        journal.fail_step("run-1", tool, "boom").unwrap();
+        journal.set_run_status("run-1", "needs_review").unwrap();
+
+        let run = journal.run("run-1").unwrap();
+        assert_eq!(run.status, "needs_review");
+
+        let steps = journal.steps("run-1").unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].seq, 1);
+        assert_eq!(steps[0].kind, "llm_call");
+        assert_eq!(steps[0].status, "completed");
+        assert_eq!(steps[1].seq, 2);
+        assert_eq!(steps[1].kind, "tool_call");
+        assert_eq!(steps[1].status, "failed");
+        assert_eq!(steps[1].tool_name.as_deref(), Some("summarize_numbers"));
+        assert_eq!(steps[1].tool_use_id.as_deref(), Some("toolu_1"));
+        assert_eq!(steps[1].attempt, 2);
+        assert_eq!(steps[1].result.as_ref().unwrap()["error"], "boom");
+    }
+
+    #[test]
+    fn list_runs_reports_step_counts() {
+        let app = TempDir::new("list");
+        let journal = Journal::open(app.path()).unwrap();
+        journal.create_run("run-1", "support", "one").unwrap();
+        journal.create_run("run-2", "support", "two").unwrap();
+        journal
+            .start_step("run-2", "llm_call", &json!({"messages": []}), None, None, 1)
+            .unwrap();
+
+        let runs = journal.list_runs().unwrap();
+
+        assert_eq!(runs.len(), 2);
+        let run_2 = runs.iter().find(|(run, _)| run.id == "run-2").unwrap();
+        assert_eq!(run_2.1, 1);
+        let run_1 = runs.iter().find(|(run, _)| run.id == "run-1").unwrap();
+        assert_eq!(run_1.1, 0);
     }
 }

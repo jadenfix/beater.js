@@ -21,6 +21,9 @@ enum Command {
         /// App directory (contains beater.toml)
         #[arg(default_value = ".")]
         app: PathBuf,
+        /// Override the bind host from beater.toml
+        #[arg(long)]
+        host: Option<std::net::IpAddr>,
         /// Override the port from beater.toml
         #[arg(long)]
         port: Option<u16>,
@@ -66,14 +69,13 @@ enum AgentCommand {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Dev { app, port } => beater_runtime::dev(&app, port),
+        Command::Dev { app, host, port } => beater_runtime::dev(&app, port, host),
         Command::Agent { command } => match command {
             AgentCommand::Run { app, name, prompt } => {
                 let config = beater_runtime::load_agent_config(&app, &name)?;
