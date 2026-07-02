@@ -1,0 +1,15 @@
+[package]
+name = "beater-connect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent access layer: generate MCP, OpenAPI, A2A, crawl, and consent surfaces from one registry."
+
+[lib]
+name = "beater_connect"
+path = "src/lib.rs"
+
+[[bin]]
+name = "beater-connect"
+path = "src/main.rs"

@@ -5,6 +5,7 @@ members = [
   "crates/beater-runtime",
   "crates/beater-agent",
   "crates/beater-py",
+  "crates/beater-connect",
 ]
 
 [workspace.package]
@@ -54,6 +55,7 @@ uuid = { version = "1", features = ["v4"] }
 beater-runtime = { path = "crates/beater-runtime" }
 beater-agent = { path = "crates/beater-agent" }
 beater-py = { path = "crates/beater-py" }
+beater-connect = { path = "crates/beater-connect" }
 
 # V8 and swc are unusable at opt-level 0; keep our own crates fast to compile
 [profile.dev.package."*"]

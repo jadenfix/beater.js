@@ -1,4 +1,5 @@
 /target
+.agent*/
 .beater/
 *.db
 .venv/
