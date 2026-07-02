@@ -2,7 +2,17 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
 
 struct ChildGuard {
     child: Child,
@@ -99,6 +109,125 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
 
     let mcp_get = http_request(port, "GET", "/mcp", None).expect("GET /mcp");
     assert!(mcp_get.starts_with("HTTP/1.1 405"), "{mcp_get}");
+}
+
+#[test]
+fn new_scaffolds_runnable_app_and_refuses_overwrite() {
+    let port = free_port();
+    let workspace = workspace();
+    let beater = beater_bin(&workspace);
+    let temp = temp_dir("new-scaffold");
+    let app = temp.path.join("my-app");
+
+    let output = Command::new(&beater)
+        .arg("new")
+        .arg(&app)
+        .output()
+        .expect("run beater new");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = std::fs::read_to_string(app.join("beater.toml")).expect("read beater.toml");
+    assert!(config.contains("name = \"my-app\""), "{config}");
+    for relative_path in [
+        "app/routes/index.tsx",
+        "app/routes/api/health.ts",
+        "app/routes/api/boom.ts",
+        "agents/support/agent.ts",
+        "agents/support/tools/summarize_numbers.py",
+        "agents/support/tools/slow_summarize.py",
+        "agents/support/tools/slow_summarize_once.py",
+    ] {
+        assert!(
+            app.join(relative_path).is_file(),
+            "missing scaffold file {relative_path}"
+        );
+    }
+
+    let child = Command::new(&beater)
+        .arg("dev")
+        .arg(&app)
+        .arg("--host")
+        .arg("0.0.0.0")
+        .arg("--port")
+        .arg(port.to_string())
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("BEATER_BASE_URL")
+        .env_remove("BEATER_MCP_TOKEN")
+        .env_remove("BEATER_MCP_TRUSTED_ORIGINS")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn scaffolded beater dev");
+    let _child = ChildGuard { child };
+
+    let health = wait_for_http(port, "GET", "/api/health", None);
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+    assert!(health.contains("\"runtime\":\"beater.js\""), "{health}");
+
+    let home = http_request(port, "GET", "/", None).expect("GET scaffolded /");
+    assert!(home.starts_with("HTTP/1.1 200"), "{home}");
+    assert!(
+        home.contains("<h1 class=\"brand-title\">beater.js</h1>"),
+        "{home}"
+    );
+
+    let doctor = Command::new(&beater)
+        .arg("doctor")
+        .arg(&app)
+        .output()
+        .expect("run doctor on scaffolded app");
+    assert!(doctor.status.success());
+    assert!(
+        String::from_utf8_lossy(&doctor.stdout).contains("app:     my-app"),
+        "stdout:\n{}",
+        String::from_utf8_lossy(&doctor.stdout)
+    );
+
+    let overwrite = Command::new(&beater)
+        .arg("new")
+        .arg(&app)
+        .output()
+        .expect("run beater new over existing app");
+    assert!(!overwrite.status.success());
+    assert!(
+        String::from_utf8_lossy(&overwrite.stderr).contains("destination is not empty"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&overwrite.stderr)
+    );
+
+    let file_destination = temp.path.join("already-file");
+    std::fs::write(&file_destination, "not a dir").expect("write file destination");
+    let file_output = Command::new(&beater)
+        .arg("new")
+        .arg(&file_destination)
+        .output()
+        .expect("run beater new over file");
+    assert!(!file_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&file_output.stderr).contains("not a directory"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&file_output.stderr)
+    );
+
+    let escaped = temp.path.join("line\nbreak");
+    let escaped_output = Command::new(&beater)
+        .arg("new")
+        .arg(&escaped)
+        .output()
+        .expect("run beater new with escaped name");
+    assert!(
+        escaped_output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&escaped_output.stderr)
+    );
+    let escaped_config =
+        std::fs::read_to_string(escaped.join("beater.toml")).expect("read escaped beater.toml");
+    assert!(escaped_config.contains("name = \"line\\nbreak\""));
 }
 
 #[test]
@@ -277,6 +406,17 @@ fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+fn temp_dir(label: &str) -> TempDirGuard {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_nanos();
+    let mut path = std::env::temp_dir();
+    path.push(format!("beater-{label}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&path).expect("create temp dir");
+    TempDirGuard { path }
 }
 
 fn wait_for_http(port: u16, method: &str, path: &str, body: Option<&str>) -> String {

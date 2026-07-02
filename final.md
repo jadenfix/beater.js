@@ -161,7 +161,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 - [x] **Python discovery**: `.cargo/config.toml` no longer hardcodes `PYO3_PYTHON`; README documents macOS/Linux setup; `beater doctor` reports embedded Python + venv mismatches; remote macOS/Linux CI is green.
 - [x] **Concurrency**: one isolate = JS route requests serialize; one dev server = one app. The limitation is documented prominently in README and `docs/runtime-limits.md`; the isolate pool remains Phase C work.
 - [x] **Port/host binding**: `beater dev --host <ip>` and `[app] host = "..."`; the no-key integration test binds `0.0.0.0` and curls through localhost.
-- [ ] `beater new <app>` scaffolding command (copy of examples/hello) — the first-five-minutes experience.
+- [x] `beater new <app>` scaffolding command (embedded hello template) — the first-five-minutes experience is tested by scaffolding and serving a generated app.
 
 ### Agent-platform enablers
 - [x] Mockable outbound LLM networking: `ANTHROPIC_BASE_URL` lets resume and integration tests run against local servers instead of live vendor APIs.
@@ -177,7 +177,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 - [x] Journal stores full prompts/results in plaintext SQLite — documented in `docs/security.md`; redaction hooks remain later work
 
 ### Docs
-- [x] README quickstart actually runnable start-to-finish by a stranger (install Rust, install Python 3.11+, cargo build, beater dev)
+- [x] README quickstart actually runnable start-to-finish by a stranger (install Rust, install Python 3.11+, cargo build, `beater new`, `beater dev`)
 - [x] `docs/tools.md`: the pyTool/rustTool contract (TOOL dict, run(), idempotency rules)
 - [x] `docs/integrations.md`: one-registry contract for first-party tools, planned remote MCP sources, planned browser providers, secrets, retries, idempotency, egress, and journal audit rules
 - [x] `docs/runtime-limits.md`: current single-isolate route serialization, one-app-per-dev-server limit, operational guidance, and isolate-pool acceptance path
