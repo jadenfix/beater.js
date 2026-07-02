@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use beater_agent::{BeatboxConfig, DEFAULT_BEATBOX_URL};
 use serde::Deserialize;
 
 pub const BASE_URL_ENV: &str = "BEATER_BASE_URL";
+pub const BEATBOX_URL_ENV: &str = "BEATBOX_URL";
+pub const BEATBOX_API_KEY_ENV: &str = "BEATBOX_API_KEY";
 
 /// Parsed `beater.toml`.
 #[derive(Debug, Clone)]
@@ -15,6 +18,8 @@ pub struct AppConfig {
     pub base_url: Option<String>,
     /// Path to a Python venv whose site-packages are attached at runtime.
     pub python_venv: Option<PathBuf>,
+    /// Local beatbox daemon used for Tier-4 sandbox tools.
+    pub beatbox: BeatboxConfig,
     pub app_dir: PathBuf,
 }
 
@@ -23,6 +28,8 @@ struct RawConfig {
     app: RawApp,
     #[serde(default)]
     python: RawPython,
+    #[serde(default)]
+    beatbox: RawBeatbox,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +45,12 @@ struct RawApp {
 #[derive(Deserialize, Default)]
 struct RawPython {
     venv: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawBeatbox {
+    url: Option<String>,
+    api_key: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -72,6 +85,11 @@ impl AppConfig {
             host: raw.app.host,
             base_url,
             python_venv: raw.python.venv.map(|v| app_dir.join(v)),
+            beatbox: resolve_beatbox_config(
+                raw.beatbox.url.as_deref(),
+                raw.beatbox.api_key.as_deref(),
+            )
+            .with_context(|| format!("invalid [beatbox] config in {}", path.display()))?,
             app_dir: app_dir.to_path_buf(),
         })
     }
@@ -91,6 +109,44 @@ impl AppConfig {
             self.base_url.as_deref(),
         )
     }
+}
+
+fn resolve_beatbox_config(
+    config_url: Option<&str>,
+    config_api_key: Option<&str>,
+) -> Result<BeatboxConfig> {
+    let env_url = std::env::var(BEATBOX_URL_ENV).ok();
+    let env_api_key = std::env::var(BEATBOX_API_KEY_ENV).ok();
+    resolve_beatbox_config_with_env(
+        config_url,
+        config_api_key,
+        env_url.as_deref(),
+        env_api_key.as_deref(),
+    )
+}
+
+fn resolve_beatbox_config_with_env(
+    config_url: Option<&str>,
+    config_api_key: Option<&str>,
+    env_url: Option<&str>,
+    env_api_key: Option<&str>,
+) -> Result<BeatboxConfig> {
+    let url = env_url
+        .and_then(non_empty_str)
+        .or_else(|| config_url.and_then(non_empty_str))
+        .map(normalize_base_url)
+        .transpose()?
+        .unwrap_or_else(|| DEFAULT_BEATBOX_URL.to_string());
+    let api_key = env_api_key
+        .and_then(non_empty_str)
+        .or_else(|| config_api_key.and_then(non_empty_str))
+        .map(str::to_string);
+    Ok(BeatboxConfig { url, api_key })
+}
+
+fn non_empty_str(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 fn resolve_public_base_url(
@@ -137,7 +193,10 @@ fn default_base_url(host: std::net::IpAddr, port: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_base_url, normalize_base_url, resolve_public_base_url};
+    use super::{
+        default_base_url, normalize_base_url, resolve_beatbox_config_with_env,
+        resolve_public_base_url,
+    };
     use std::net::{IpAddr, Ipv6Addr};
 
     #[test]
@@ -198,5 +257,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, "https://config.example");
+    }
+
+    #[test]
+    fn beatbox_config_prefers_env_then_config_then_loopback_default() {
+        let resolved = resolve_beatbox_config_with_env(
+            Some("http://127.0.0.1:7300/"),
+            Some("config-token"),
+            Some("http://127.0.0.1:7400///"),
+            Some("env-token"),
+        )
+        .unwrap();
+        assert_eq!(resolved.url, "http://127.0.0.1:7400");
+        assert_eq!(resolved.api_key.as_deref(), Some("env-token"));
+
+        let resolved = resolve_beatbox_config_with_env(
+            Some("http://127.0.0.1:7300"),
+            Some("config-token"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved.url, "http://127.0.0.1:7300");
+        assert_eq!(resolved.api_key.as_deref(), Some("config-token"));
+
+        let resolved = resolve_beatbox_config_with_env(None, None, None, None).unwrap();
+        assert_eq!(resolved.url, beater_agent::DEFAULT_BEATBOX_URL);
+        assert!(resolved.api_key.is_none());
+    }
+
+    #[test]
+    fn beatbox_url_reuses_base_url_validation() {
+        assert!(
+            resolve_beatbox_config_with_env(Some("file:///tmp/socket"), None, None, None).is_err()
+        );
+        assert!(
+            resolve_beatbox_config_with_env(
+                Some("https://user:pass@example.com"),
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 }

@@ -40,7 +40,7 @@ pub fn dev(
     {
         beater_py::attach_venv(venv)?;
     }
-    let (registry, agents) = build_registry(&config.app_dir)?;
+    let (registry, agents) = build_registry(&config.app_dir, &config.beatbox)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -57,7 +57,10 @@ pub fn dev(
 }
 
 /// Merge every agent's tools into the registry served over /mcp.
-fn build_registry(app_dir: &Path) -> Result<(beater_agent::ToolRegistry, Vec<String>)> {
+fn build_registry(
+    app_dir: &Path,
+    beatbox: &beater_agent::BeatboxConfig,
+) -> Result<(beater_agent::ToolRegistry, Vec<String>)> {
     let mut registry = beater_agent::ToolRegistry::empty();
     let mut agents = Vec::new();
     let agents_dir = app_dir.join("agents");
@@ -74,7 +77,11 @@ fn build_registry(app_dir: &Path) -> Result<(beater_agent::ToolRegistry, Vec<Str
             let value = load_agent_config(app_dir, &name)?;
             let config: beater_agent::AgentConfig = serde_json::from_value(value)
                 .with_context(|| format!("agents/{name}/agent.ts config shape"))?;
-            registry.extend(beater_agent::ToolRegistry::build(&dir, &config.tools)?);
+            registry.extend(beater_agent::ToolRegistry::build(
+                &dir,
+                &config.tools,
+                beatbox,
+            )?);
             agents.push(name);
         }
     }

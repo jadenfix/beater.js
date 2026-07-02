@@ -213,10 +213,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "beatbox-client"
+version = "0.1.0"
+source = "git+https://github.com/jadenfix/beatbox?rev=dc2ddd9d93542737627210a05eeae96e008a1aad#dc2ddd9d93542737627210a05eeae96e008a1aad"
+dependencies = [
+ "beatbox-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "beatbox-core"
+version = "0.1.0"
+source = "git+https://github.com/jadenfix/beatbox?rev=dc2ddd9d93542737627210a05eeae96e008a1aad#dc2ddd9d93542737627210a05eeae96e008a1aad"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "beater-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
+ "beatbox-client",
  "beater-py",
  "chrono",
  "reqwest",

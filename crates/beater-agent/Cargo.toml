@@ -6,6 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
+beatbox-client.workspace = true
 beater-py.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

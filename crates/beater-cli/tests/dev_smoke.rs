@@ -168,6 +168,7 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
         "agents/support/tools/summarize_numbers.py",
         "agents/support/tools/slow_summarize.py",
         "agents/support/tools/slow_summarize_once.py",
+        "agents/support/tools/fib.wat",
     ] {
         assert!(
             app.join(relative_path).is_file(),
@@ -407,6 +408,7 @@ fn doctor_reports_python_v8_and_venv_diagnostics() {
     assert!(stdout.contains("python:"), "{stdout}");
     assert!(stdout.contains("venv:"), "{stdout}");
     assert!(stdout.contains("public:"), "{stdout}");
+    assert!(stdout.contains("beatbox:"), "{stdout}");
     assert!(stdout.contains("mcp:"), "{stdout}");
     assert!(stdout.contains("v8:"), "{stdout}");
 }

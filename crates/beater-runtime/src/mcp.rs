@@ -311,7 +311,7 @@ async fn tools_call(registry: &ToolRegistry, params: &Value) -> Result<Value, (i
         return Err((-32602, format!("unknown tool: {name}")));
     }
     // Tool failures are results with isError, not protocol errors.
-    match registry.execute(name, &arguments).await {
+    match registry.execute(name, &arguments, None).await {
         Ok(result) => Ok(json!({
             "content": [{"type": "text", "text": result}],
             "isError": false,

@@ -9,5 +9,5 @@ mod journal;
 mod registry;
 mod runner;
 
-pub use registry::{AgentConfig, ToolDecl, ToolRegistry};
+pub use registry::{AgentConfig, BeatboxConfig, DEFAULT_BEATBOX_URL, ToolDecl, ToolRegistry};
 pub use runner::{list_runs, resume, run};

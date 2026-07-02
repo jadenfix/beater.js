@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::anthropic::Anthropic;
 use crate::journal::Journal;
-use crate::registry::{AgentConfig, ToolRegistry};
+use crate::registry::{AgentConfig, BeatboxConfig, ToolRegistry};
 
 const MAX_TOKENS: u64 = 16000;
 const MAX_LOOP_STEPS: usize = 50;
@@ -31,6 +31,7 @@ fn setup(
     app_dir: &Path,
     config_value: Value,
     venv: Option<&PathBuf>,
+    beatbox: &BeatboxConfig,
 ) -> Result<(AgentConfig, ToolRegistry)> {
     if let Some(venv) = venv {
         if venv.is_dir() {
@@ -42,7 +43,7 @@ fn setup(
     let config: AgentConfig = serde_json::from_value(config_value)
         .context("agent.ts default export did not match defineAgent shape")?;
     let agent_dir = app_dir.join("agents").join(&config.name);
-    let registry = ToolRegistry::build(&agent_dir, &config.tools)?;
+    let registry = ToolRegistry::build(&agent_dir, &config.tools, beatbox)?;
     Ok((config, registry))
 }
 
@@ -51,9 +52,10 @@ pub fn run(
     agent_name: &str,
     config_value: Value,
     venv: Option<PathBuf>,
+    beatbox: BeatboxConfig,
     prompt: &str,
 ) -> Result<()> {
-    let (config, registry) = setup(app_dir, config_value, venv.as_ref())?;
+    let (config, registry) = setup(app_dir, config_value, venv.as_ref(), &beatbox)?;
     anyhow::ensure!(
         config.name == agent_name,
         "agent.ts declares name {:?} but directory is {agent_name:?}",
@@ -80,6 +82,7 @@ pub fn resume(
     app_dir: &Path,
     run_id: &str,
     venv: Option<PathBuf>,
+    beatbox: BeatboxConfig,
     load_config: impl Fn(&str) -> Result<Value>,
 ) -> Result<()> {
     let journal = Journal::open(app_dir)?;
@@ -89,7 +92,7 @@ pub fn resume(
         return Ok(());
     }
     let config_value = load_config(&run.agent)?;
-    let (config, registry) = setup(app_dir, config_value, venv.as_ref())?;
+    let (config, registry) = setup(app_dir, config_value, venv.as_ref(), &beatbox)?;
     let steps = journal.steps(run_id)?;
 
     let ctx = Ctx {
@@ -320,6 +323,16 @@ async fn execute_tool_step(
     attempt: i64,
 ) -> Result<String> {
     let request = json!({"name": name, "input": input, "tool_use_id": tool_use_id});
+    let idempotency_key = tool_idempotency_key(&ctx.run_id, tool_use_id);
+    let request = match &idempotency_key {
+        Some(key) => json!({
+            "name": name,
+            "input": input,
+            "tool_use_id": tool_use_id,
+            "idempotency_key": key,
+        }),
+        None => request,
+    };
     let seq = ctx.journal.start_step(
         &ctx.run_id,
         "tool_call",
@@ -328,7 +341,7 @@ async fn execute_tool_step(
         Some(tool_use_id),
         attempt,
     )?;
-    match ctx.registry.execute(name, input).await {
+    match ctx.registry.execute(name, input, idempotency_key).await {
         Ok(result) => {
             ctx.journal
                 .complete_step(&ctx.run_id, seq, &json!({"content": result}))?;
@@ -341,10 +354,15 @@ async fn execute_tool_step(
     }
 }
 
+fn tool_idempotency_key(run_id: &str, tool_use_id: &str) -> Option<String> {
+    (!tool_use_id.is_empty()).then(|| format!("beater:{run_id}:tool:{tool_use_id}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resume;
+    use super::{resume, tool_idempotency_key};
     use crate::journal::Journal;
+    use crate::registry::BeatboxConfig;
     use serde_json::{Value, json};
     use std::collections::VecDeque;
     use std::fs;
@@ -382,6 +400,31 @@ TOOL = {
 
 def run(input):
     return {"echo": input["value"]}
+"#,
+            )
+            .unwrap();
+            fs::write(
+                path.join("agents/support/tools/fib.wat"),
+                r#"
+(module
+  (func $fib (param $n i64) (result i64)
+    local.get $n
+    i64.const 2
+    i64.lt_s
+    if (result i64)
+      local.get $n
+    else
+      local.get $n
+      i64.const 1
+      i64.sub
+      call $fib
+      local.get $n
+      i64.const 2
+      i64.sub
+      call $fib
+      i64.add
+    end)
+  (export "run" (func $fib)))
 "#,
             )
             .unwrap();
@@ -426,6 +469,59 @@ def run(input):
         handle: Option<thread::JoinHandle<()>>,
     }
 
+    #[derive(Debug)]
+    struct CapturedRequest {
+        request_line: String,
+        body: String,
+    }
+
+    struct MockBeatbox {
+        base_url: String,
+        requests: Arc<Mutex<Vec<CapturedRequest>>>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockBeatbox {
+        fn new(responses: Vec<Value>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let server_requests = Arc::clone(&requests);
+            let mut responses: VecDeque<String> = responses
+                .into_iter()
+                .map(|value| value.to_string())
+                .collect();
+            let handle = thread::spawn(move || {
+                while let Some(response) = responses.pop_front() {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    server_requests.lock().unwrap().push(request);
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response.len(),
+                        response
+                    );
+                    stream.write_all(reply.as_bytes()).unwrap();
+                }
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+                requests,
+                handle: Some(handle),
+            }
+        }
+
+        fn join(mut self) -> Vec<CapturedRequest> {
+            if let Some(handle) = self.handle.take() {
+                handle.join().unwrap();
+            }
+            Arc::try_unwrap(self.requests)
+                .unwrap()
+                .into_inner()
+                .unwrap()
+        }
+    }
+
     impl MockAnthropic {
         fn new(responses: Vec<Value>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -468,6 +564,10 @@ def run(input):
     }
 
     fn read_http_body(stream: &mut std::net::TcpStream) -> String {
+        read_http_request(stream).body
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> CapturedRequest {
         let mut bytes = Vec::new();
         let mut buf = [0_u8; 1024];
         let mut headers_end = None;
@@ -487,11 +587,30 @@ def run(input):
                     });
                 }
             }
+            if let Some(end) = headers_end
+                && content_len.is_none()
+            {
+                return CapturedRequest {
+                    request_line: String::from_utf8_lossy(&bytes[..end])
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string(),
+                    body: String::new(),
+                };
+            }
             if let (Some(end), Some(len)) = (headers_end, content_len) {
                 let body_start = end + 4;
                 if bytes.len() >= body_start + len {
-                    return String::from_utf8(bytes[body_start..body_start + len].to_vec())
-                        .unwrap();
+                    return CapturedRequest {
+                        request_line: String::from_utf8_lossy(&bytes[..end])
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .to_string(),
+                        body: String::from_utf8(bytes[body_start..body_start + len].to_vec())
+                            .unwrap(),
+                    };
                 }
             }
         }
@@ -511,18 +630,44 @@ def run(input):
         })
     }
 
+    fn sandbox_config(idempotent: bool) -> Value {
+        json!({
+            "name": "support",
+            "model": "mock",
+            "system": "test",
+            "tools": [{
+                "kind": "sandbox",
+                "name": "fib_wasm",
+                "path": "./tools/fib.wat",
+                "idempotent": idempotent,
+                "description": "Run fib in beatbox.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"n": {"type": "integer"}},
+                    "required": ["n"],
+                },
+            }],
+        })
+    }
+
     fn seed_interrupted_tool_run(app: &TempApp) {
+        seed_interrupted_tool_run_for(app, "echo", json!({"value": "ok"}));
+    }
+
+    fn seed_interrupted_tool_run_for(app: &TempApp, name: &str, input: Value) {
         let journal = Journal::open(app.path()).unwrap();
-        journal.create_run("run-1", "support", "echo ok").unwrap();
+        journal
+            .create_run("run-1", "support", &format!("call {name}"))
+            .unwrap();
         let request = json!({
-            "messages": [{"role": "user", "content": "echo ok"}],
+            "messages": [{"role": "user", "content": format!("call {name}")}],
         });
         let response = json!({
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_1",
-                "name": "echo",
-                "input": {"value": "ok"},
+                "name": name,
+                "input": input,
             }],
             "stop_reason": "tool_use",
         });
@@ -534,12 +679,63 @@ def run(input):
             .start_step(
                 "run-1",
                 "tool_call",
-                &json!({"name": "echo", "input": {"value": "ok"}, "tool_use_id": "toolu_1"}),
-                Some("echo"),
+                &json!({"name": name, "input": input, "tool_use_id": "toolu_1"}),
+                Some(name),
                 Some("toolu_1"),
                 1,
             )
             .unwrap();
+    }
+
+    fn execution_result_json(value: i64) -> Value {
+        json!({
+            "status": "ok",
+            "value": value,
+            "exit_code": null,
+            "stdout": "",
+            "stdout_truncated": false,
+            "stderr": "",
+            "stderr_truncated": false,
+            "error": null,
+            "metrics": {
+                "wall_time_ms": 1,
+                "cpu_time_ms": 1,
+                "fuel_used": 42,
+                "peak_memory_bytes": null,
+            },
+            "lane": "wasm",
+            "deterministic": true,
+            "inputs_digest": "sha256:test",
+            "engine_version": "test",
+            "beatbox_version": "test",
+            "effective_isolation": {
+                "os": "test",
+                "mechanisms": ["wasmtime", "empty-linker"],
+                "landlock_abi": null,
+                "downgrades": [],
+            },
+            "egress": [],
+        })
+    }
+
+    fn job_record_json(job_id: &str, result: Value) -> Value {
+        json!({
+            "job_id": job_id,
+            "status": "succeeded",
+            "request": {
+                "lane": "wasm",
+                "source": {"kind": "wasm_wat", "text": "(module)"},
+                "entrypoint": null,
+                "input": {"n": 10},
+                "stdin": "",
+                "policy": {},
+                "idempotency_key": "beater:run-1:tool:toolu_1",
+            },
+            "result": result,
+            "error": null,
+            "created_at": "2026-07-02T00:00:00Z",
+            "updated_at": "2026-07-02T00:00:00Z",
+        })
     }
 
     #[test]
@@ -553,7 +749,10 @@ def run(input):
         })]);
         let _env = EnvGuard::set(&server.base_url);
 
-        resume(app.path(), "run-1", None, |_| Ok(config(true))).unwrap();
+        resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(config(true))
+        })
+        .unwrap();
         let requests = server.join();
 
         assert_eq!(requests.len(), 1);
@@ -579,6 +778,88 @@ def run(input):
         assert_eq!(tool_steps[0].attempt, 1);
         assert_eq!(tool_steps[1].status, "completed");
         assert_eq!(tool_steps[1].attempt, 2);
+        assert_eq!(
+            tool_steps[1].request["idempotency_key"],
+            "beater:run-1:tool:toolu_1"
+        );
+    }
+
+    #[test]
+    fn resume_reruns_interrupted_idempotent_sandbox_tool_through_beatbox_job() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("sandbox-idempotent");
+        seed_interrupted_tool_run_for(&app, "fib_wasm", json!({"n": 10}));
+        let anthropic = MockAnthropic::new(vec![json!({
+            "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "end_turn",
+        })]);
+        let beatbox = MockBeatbox::new(vec![
+            json!({"job_id": "job-1"}),
+            job_record_json("job-1", execution_result_json(55)),
+        ]);
+        let beatbox_config = BeatboxConfig {
+            url: beatbox.base_url.clone(),
+            api_key: None,
+        };
+        let _env = EnvGuard::set(&anthropic.base_url);
+
+        resume(app.path(), "run-1", None, beatbox_config, |_| {
+            Ok(sandbox_config(true))
+        })
+        .unwrap();
+
+        let beatbox_requests = beatbox.join();
+        assert_eq!(beatbox_requests.len(), 2);
+        assert!(
+            beatbox_requests[0]
+                .request_line
+                .starts_with("POST /v1/jobs ")
+        );
+        let body: Value = serde_json::from_str(&beatbox_requests[0].body).unwrap();
+        assert_eq!(body["idempotency_key"], "beater:run-1:tool:toolu_1");
+        assert!(
+            beatbox_requests[1]
+                .request_line
+                .starts_with("GET /v1/jobs/job-1 ")
+        );
+
+        let _anthropic_requests = anthropic.join();
+        let journal = Journal::open(app.path()).unwrap();
+        assert_eq!(journal.run("run-1").unwrap().status, "completed");
+        let steps = journal.steps("run-1").unwrap();
+        let completed = steps
+            .iter()
+            .find(|step| step.kind == "tool_call" && step.status == "completed")
+            .expect("completed sandbox tool step");
+        let content = completed.result.as_ref().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        let result: Value = serde_json::from_str(content).unwrap();
+        assert_eq!(result["value"], 55);
+    }
+
+    #[test]
+    fn resume_parks_interrupted_non_idempotent_sandbox_tool_for_review() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("sandbox-non-idempotent");
+        seed_interrupted_tool_run_for(&app, "fib_wasm", json!({"n": 10}));
+        let _env = EnvGuard::set("http://127.0.0.1:9");
+
+        resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(sandbox_config(false))
+        })
+        .unwrap();
+
+        let journal = Journal::open(app.path()).unwrap();
+        assert_eq!(journal.run("run-1").unwrap().status, "needs_review");
+        let tool_steps: Vec<_> = journal
+            .steps("run-1")
+            .unwrap()
+            .into_iter()
+            .filter(|step| step.kind == "tool_call")
+            .collect();
+        assert_eq!(tool_steps.len(), 1);
+        assert_eq!(tool_steps[0].status, "started");
     }
 
     #[test]
@@ -588,7 +869,10 @@ def run(input):
         seed_interrupted_tool_run(&app);
         let _env = EnvGuard::set("http://127.0.0.1:9");
 
-        resume(app.path(), "run-1", None, |_| Ok(config(false))).unwrap();
+        resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(config(false))
+        })
+        .unwrap();
 
         let journal = Journal::open(app.path()).unwrap();
         assert_eq!(journal.run("run-1").unwrap().status, "needs_review");
@@ -601,5 +885,14 @@ def run(input):
         assert_eq!(tool_steps.len(), 1);
         assert_eq!(tool_steps[0].status, "started");
         assert_eq!(tool_steps[0].attempt, 1);
+    }
+
+    #[test]
+    fn idempotency_keys_are_stable_per_run_tool_use() {
+        assert_eq!(
+            tool_idempotency_key("run-1", "toolu_1").as_deref(),
+            Some("beater:run-1:tool:toolu_1")
+        );
+        assert_eq!(tool_idempotency_key("run-1", ""), None);
     }
 }
