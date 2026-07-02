@@ -131,6 +131,75 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
 }
 
 #[test]
+fn dev_server_round_robins_js_routes_across_worker_pool() {
+    let port = free_port();
+    let temp = temp_dir("worker-pool");
+    let app = temp.path.join("pool-app");
+    let root = workspace();
+    let beater = beater_bin(&root);
+    let output = Command::new(&beater)
+        .arg("new")
+        .arg(&app)
+        .output()
+        .expect("run beater new");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut config = std::fs::read_to_string(app.join("beater.toml")).expect("read beater.toml");
+    config = config.replace("workers = 1\n", "workers = 2\n");
+    std::fs::write(app.join("beater.toml"), config).expect("write beater.toml");
+    std::fs::write(
+        app.join("app/routes/api/pool.ts"),
+        r#"
+globalThis.__beaterPoolCount = globalThis.__beaterPoolCount ?? 0;
+
+export function GET() {
+  globalThis.__beaterPoolCount += 1;
+  return { status: 200, body: String(globalThis.__beaterPoolCount) };
+}
+"#,
+    )
+    .expect("write pool route");
+
+    let child = Command::new(&beater)
+        .arg("dev")
+        .arg(&app)
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("BEATER_BASE_URL")
+        .env_remove("BEATER_MCP_TOKEN")
+        .env_remove("BEATER_MCP_TRUSTED_ORIGINS")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn pooled beater dev");
+    let _child = ChildGuard { child };
+
+    let ready = wait_for_http(port, "GET", "/api/health", None);
+    assert!(ready.starts_with("HTTP/1.1 200"), "{ready}");
+
+    let first = http_request(port, "GET", "/api/pool", None).expect("GET /api/pool #1");
+    let second = http_request(port, "GET", "/api/pool", None).expect("GET /api/pool #2");
+    let third = http_request(port, "GET", "/api/pool", None).expect("GET /api/pool #3");
+    let fourth = http_request(port, "GET", "/api/pool", None).expect("GET /api/pool #4");
+
+    for response in [&first, &second, &third, &fourth] {
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    }
+    assert_eq!(http_body(&first), "1");
+    assert_eq!(http_body(&second), "1");
+    assert_eq!(http_body(&third), "2");
+    assert_eq!(http_body(&fourth), "2");
+}
+
+#[test]
 fn dev_server_refuses_remote_mcp_without_bearer_token() {
     let port = free_port();
     let workspace = workspace();
@@ -537,4 +606,8 @@ fn http_request_with_headers(
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     Ok(response)
+}
+
+fn http_body(response: &str) -> &str {
+    response.split("\r\n\r\n").nth(1).unwrap_or_default().trim()
 }

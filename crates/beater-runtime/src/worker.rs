@@ -26,6 +26,10 @@ pub enum WorkerMsg {
         method: String,
         /// JSON-serialized request object passed to the handler.
         request_json: String,
+        /// Worker-local stream id for page responses.
+        stream_id: u32,
+        /// Host sender for route-specific cancel messages.
+        cancel_tx: mpsc::Sender<WorkerMsg>,
         /// Page routes render their default export as React SSR.
         page: bool,
         reply: oneshot::Sender<Result<RouteResponse, String>>,
@@ -60,6 +64,7 @@ pub enum RouteBody {
     Chunks(Vec<String>),
     Stream {
         stream_id: u32,
+        cancel_tx: mpsc::Sender<WorkerMsg>,
         rx: mpsc::UnboundedReceiver<Result<Bytes, io::Error>>,
     },
 }
@@ -164,7 +169,6 @@ async fn worker_main(mut rx: mpsc::Receiver<WorkerMsg>) {
         .expect("bootstrap.js must evaluate");
     tracing::debug!("js worker ready (V8 {})", v8::VERSION_STRING);
 
-    let mut next_stream_id = 1_u32;
     loop {
         if active_streams(&runtime) {
             if let Err(e) = poll_event_loop_once(&mut runtime) {
@@ -174,31 +178,39 @@ async fn worker_main(mut rx: mpsc::Receiver<WorkerMsg>) {
             tokio::select! {
                 maybe_msg = rx.recv() => {
                     let Some(msg) = maybe_msg else { break };
-                    handle_worker_msg(&mut runtime, &mut next_stream_id, msg).await;
+                    handle_worker_msg(&mut runtime, msg).await;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(5)) => {}
             }
         } else {
             let Some(msg) = rx.recv().await else { break };
-            handle_worker_msg(&mut runtime, &mut next_stream_id, msg).await;
+            handle_worker_msg(&mut runtime, msg).await;
         }
     }
     tracing::debug!("js worker shutting down");
 }
 
-async fn handle_worker_msg(runtime: &mut JsRuntime, next_stream_id: &mut u32, msg: WorkerMsg) {
+async fn handle_worker_msg(runtime: &mut JsRuntime, msg: WorkerMsg) {
     match msg {
         WorkerMsg::Route {
             specifier,
             method,
             request_json,
+            stream_id,
+            cancel_tx,
             page,
             reply,
         } => {
             if page {
-                let stream_id = *next_stream_id;
-                *next_stream_id = next_stream_id.saturating_add(1).max(1);
-                dispatch_page_stream(runtime, &specifier, &request_json, stream_id, reply).await;
+                dispatch_page_stream(
+                    runtime,
+                    &specifier,
+                    &request_json,
+                    cancel_tx,
+                    stream_id,
+                    reply,
+                )
+                .await;
             } else {
                 let result = dispatch_api(runtime, &specifier, &method, &request_json).await;
                 let _ = reply.send(result);
@@ -284,6 +296,7 @@ async fn dispatch_page_stream(
     runtime: &mut JsRuntime,
     specifier: &str,
     request_json: &str,
+    cancel_tx: mpsc::Sender<WorkerMsg>,
     stream_id: u32,
     reply: oneshot::Sender<Result<RouteResponse, String>>,
 ) {
@@ -304,6 +317,7 @@ async fn dispatch_page_stream(
         headers: page_stream.headers,
         body: RouteBody::Stream {
             stream_id,
+            cancel_tx,
             rx: body_rx,
         },
     };

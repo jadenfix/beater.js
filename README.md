@@ -50,7 +50,7 @@ export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # browser-based oper
 
 ## Current limits
 
-`beater dev` currently uses one JS route isolate, so TS routes and React SSR serialize through that worker. One dev server serves one app directory. See [Runtime limits](docs/runtime-limits.md) for the exact concurrency model and isolate-pool path.
+`beater dev` defaults to one JS route isolate, so TS routes and React SSR serialize unless you raise `[app].workers`. One dev server serves one app directory. See [Runtime limits](docs/runtime-limits.md) for the exact concurrency model and isolate-pool path.
 
 Client modules are route companions such as `app/routes/index.client.ts`. They are transpiled and served as same-origin browser modules, but they are not bundled with npm dependencies yet; that remains the Phase C npm/node-compat item.
 

@@ -7,7 +7,7 @@ use std::convert::Infallible;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -36,13 +36,15 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone)]
 struct DevState {
     routes: Arc<RwLock<RouteTable>>,
-    worker_tx: Arc<RwLock<mpsc::Sender<WorkerMsg>>>,
+    worker_txs: Arc<RwLock<Vec<mpsc::Sender<WorkerMsg>>>>,
+    next_worker: Arc<AtomicUsize>,
     registry: Arc<ToolRegistry>,
     app_name: String,
     agents: Arc<Vec<String>>,
     base_url: String,
     mcp_access: mcp::AccessConfig,
     app_dir: PathBuf,
+    worker_count: usize,
 }
 
 pub async fn serve(
@@ -91,16 +93,18 @@ pub async fn serve(
         );
     }
 
-    let worker = worker::spawn()?;
+    let worker_txs = spawn_worker_pool(config.workers)?;
     let state = DevState {
         routes: Arc::new(RwLock::new(table)),
-        worker_tx: Arc::new(RwLock::new(worker.tx)),
+        worker_txs: Arc::new(RwLock::new(worker_txs)),
+        next_worker: Arc::new(AtomicUsize::new(0)),
         registry: Arc::new(registry),
         app_name: config.name.clone(),
         agents: Arc::new(agents),
         base_url,
         mcp_access,
         app_dir: config.app_dir.clone(),
+        worker_count: config.workers,
     };
 
     spawn_reloader(config.app_dir.clone(), state.clone());
@@ -176,10 +180,13 @@ fn spawn_reloader(app_dir: PathBuf, state: DevState) {
             // debounce editor save bursts
             tokio::time::sleep(Duration::from_millis(120)).await;
             while rx.try_recv().is_ok() {}
-            match (RouteTable::scan(&app_dir), worker::spawn()) {
-                (Ok(table), Ok(worker)) => {
+            match (
+                RouteTable::scan(&app_dir),
+                spawn_worker_pool(state.worker_count),
+            ) {
+                (Ok(table), Ok(worker_txs)) => {
                     *state.routes.write().await = table;
-                    *state.worker_tx.write().await = worker.tx;
+                    *state.worker_txs.write().await = worker_txs;
                     tracing::info!("reloaded (fresh isolate)");
                 }
                 (Err(e), _) => tracing::error!("reload: route scan failed: {e:#}"),
@@ -282,10 +289,14 @@ async fn handle_well_known(State(state): State<DevState>) -> Response<Body> {
 
 async fn route_meta(state: &DevState, specifier: String) -> Option<RouteMeta> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    state
-        .worker_tx
-        .read()
-        .await
+    let worker_tx = match pick_worker_tx(state).await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::warn!("route meta worker unavailable: {e:#}");
+            return None;
+        }
+    };
+    worker_tx
         .send(WorkerMsg::RouteMeta {
             specifier,
             reply: reply_tx,
@@ -374,8 +385,12 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
         serde_json::Value::String(String::from_utf8_lossy(&body_bytes).into_owned())
     };
 
+    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let worker_tx = pick_worker_tx(&state).await?;
+    let stream_id = if page { request_id as u32 } else { 0 };
+
     let request_json = json!({
-        "id": NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed).to_string(),
+        "id": request_id.to_string(),
         "method": method,
         "path": path,
         "params": params,
@@ -390,13 +405,12 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
         specifier,
         method,
         request_json,
+        stream_id,
+        cancel_tx: worker_tx.clone(),
         page,
         reply: reply_tx,
     };
-    state
-        .worker_tx
-        .read()
-        .await
+    worker_tx
         .send(msg)
         .await
         .map_err(|_| anyhow::anyhow!("js worker is gone"))?;
@@ -434,14 +448,13 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
                         chunks_body(chunks)
                     }
                 }
-                RouteBody::Stream { stream_id, rx } => {
+                RouteBody::Stream {
+                    stream_id,
+                    cancel_tx,
+                    rx,
+                } => {
                     if head {
-                        let _ = state
-                            .worker_tx
-                            .read()
-                            .await
-                            .send(WorkerMsg::CancelStream { stream_id })
-                            .await;
+                        let _ = cancel_tx.send(WorkerMsg::CancelStream { stream_id }).await;
                         drop(rx);
                         empty_unknown_len_body()
                     } else {
@@ -524,6 +537,23 @@ fn find_client_module(app_dir: &Path, route_path: &Path) -> Option<PathBuf> {
                 .with_extension(format!("client.{ext}"))
         })
         .find(|path| path.is_file())
+}
+
+async fn pick_worker_tx(state: &DevState) -> Result<mpsc::Sender<WorkerMsg>> {
+    let worker_txs = state.worker_txs.read().await;
+    if worker_txs.is_empty() {
+        return Err(anyhow::anyhow!("no js workers available"));
+    }
+    let index = state.next_worker.fetch_add(1, Ordering::Relaxed) % worker_txs.len();
+    Ok(worker_txs[index].clone())
+}
+
+fn spawn_worker_pool(count: usize) -> Result<Vec<mpsc::Sender<WorkerMsg>>> {
+    let mut workers = Vec::with_capacity(count.max(1));
+    for _ in 0..count.max(1) {
+        workers.push(worker::spawn()?.tx);
+    }
+    Ok(workers)
 }
 
 #[cfg(test)]

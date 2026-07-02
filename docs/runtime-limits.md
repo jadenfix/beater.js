@@ -4,7 +4,7 @@ beater.js is pre-alpha. The current runtime is optimized for a correct vertical 
 
 ## Current Concurrency Model
 
-`beater dev` accepts concurrent HTTP connections through axum, but all user JS/TS route work is sent to one V8 worker isolate over a channel. That means route handlers and React SSR render work are serialized today.
+`beater dev` accepts concurrent HTTP connections through axum. By default it runs one V8 worker isolate, but `[app].workers = N` can start a small pool and round-robin route work across those isolates. When `workers = 1`, route handlers and React SSR render work are serialized.
 
 What is concurrent today:
 
@@ -15,10 +15,10 @@ What is concurrent today:
 
 What is not concurrent today:
 
-- multiple JS/TS route handlers do not execute in parallel
-- multiple React SSR renders do not execute in parallel
+- with `workers = 1`, multiple JS/TS route handlers do not execute in parallel
+- with `workers = 1`, multiple React SSR renders do not execute in parallel
 - one `beater dev` process serves one app directory
-- hot reload swaps the single worker isolate, not a pool
+- hot reload swaps the active worker set rather than preserving in-flight work across versions
 
 ## Operational Guidance
 

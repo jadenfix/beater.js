@@ -1,6 +1,7 @@
 [app]
 name = "hello"
 port = 3000
+workers = 1
 
 [python]
 venv = ".venv"

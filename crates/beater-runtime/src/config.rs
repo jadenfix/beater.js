@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub name: String,
     pub port: u16,
     pub host: std::net::IpAddr,
+    /// Number of JS route isolates to keep hot in `beater dev`.
+    pub workers: usize,
     /// Public URL advertised in crawl and remote-agent metadata.
     pub base_url: Option<String>,
     /// Path to a Python venv whose site-packages are attached at runtime.
@@ -39,6 +41,8 @@ struct RawApp {
     port: u16,
     #[serde(default = "default_host")]
     host: std::net::IpAddr,
+    #[serde(default = "default_workers")]
+    workers: usize,
     base_url: Option<String>,
 }
 
@@ -59,6 +63,10 @@ fn default_port() -> u16 {
 
 fn default_host() -> std::net::IpAddr {
     std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+}
+
+fn default_workers() -> usize {
+    1
 }
 
 impl AppConfig {
@@ -83,6 +91,7 @@ impl AppConfig {
             name: raw.app.name,
             port: raw.app.port,
             host: raw.app.host,
+            workers: raw.app.workers.max(1),
             base_url,
             python_venv: raw.python.venv.map(|v| app_dir.join(v)),
             beatbox: resolve_beatbox_config(
