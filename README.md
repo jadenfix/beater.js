@@ -26,15 +26,17 @@ Pre-alpha, built in the open. Current milestone progress:
 ## Quickstart (target DX)
 
 ```sh
-python3.11 -m venv examples/hello/.venv   # optional: enables third-party Python packages
 export PYO3_PYTHON=$(command -v python3.11)
 cargo build --workspace
 
-./target/debug/beater dev examples/hello                 # serve routes with hot reload
-./target/debug/beater dev examples/hello --host 0.0.0.0  # bind for containers/VMs
-./target/debug/beater agent run --app examples/hello support "summarize 3,1,4,1,5"
-./target/debug/beater agent resume --app examples/hello <run_id>
-./target/debug/beater doctor examples/hello              # verify Python/venv/V8 wiring
+./target/debug/beater new my-app                         # scaffold from the hello template
+python3.11 -m venv my-app/.venv                          # optional: enables third-party Python packages
+./target/debug/beater dev my-app                         # serve routes with hot reload
+./target/debug/beater dev my-app --host 0.0.0.0          # bind for containers/VMs
+export ANTHROPIC_API_KEY=sk-ant-...                     # required for live agent runs
+./target/debug/beater agent run --app my-app support "summarize 3,1,4,1,5"
+./target/debug/beater agent resume --app my-app <run_id>
+./target/debug/beater doctor my-app                      # verify Python/venv/V8 wiring
 ```
 
 When exposing `/mcp` beyond localhost, require a bearer token and add browser origins explicitly:
@@ -42,7 +44,7 @@ When exposing `/mcp` beyond localhost, require a bearer token and add browser or
 ```sh
 export BEATER_MCP_TOKEN="$(openssl rand -hex 32)"
 export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # browser-based operators only
-./target/debug/beater dev examples/hello --host 0.0.0.0 --base-url https://hello.example.com
+./target/debug/beater dev my-app --host 0.0.0.0 --base-url https://hello.example.com
 ```
 
 ## Current limits
@@ -63,7 +65,6 @@ brew install python@3.11
 export PYO3_PYTHON="$(brew --prefix python@3.11)/bin/python3.11"
 
 # Linux
-python3.11 -m venv examples/hello/.venv
 export PYO3_PYTHON="$(command -v python3.11)"
 ```
 

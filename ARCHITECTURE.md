@@ -131,7 +131,7 @@ my-app/
     └── tools/summarize_numbers.py     # def run(input) -> dict; TOOL = {...}
 ```
 
-CLI: `beater dev` · `beater agent run <name> "<prompt>"` · `beater agent resume <run_id>` · `beater agent runs` · `beater doctor`.
+CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` · `beater agent resume <run_id>` · `beater agent runs` · `beater doctor`.
 
 ## 8. Not yet (each with its future path)
 

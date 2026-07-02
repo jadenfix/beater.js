@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -16,6 +16,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Scaffold a new app from the built-in hello template
+    New {
+        /// Destination app directory
+        app: PathBuf,
+    },
     /// Serve an app with file-based routes and hot reload
     Dev {
         /// App directory (contains beater.toml)
@@ -81,6 +86,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
+        Command::New { app } => scaffold(&app),
         Command::Dev {
             app,
             host,
@@ -104,6 +110,105 @@ fn main() -> Result<()> {
         },
         Command::Doctor { app } => doctor(&app),
     }
+}
+
+const TEMPLATE_FILES: &[(&str, &str)] = &[
+    (
+        "beater.toml",
+        include_str!("../../../examples/hello/beater.toml"),
+    ),
+    (
+        "app/routes/index.tsx",
+        include_str!("../../../examples/hello/app/routes/index.tsx"),
+    ),
+    (
+        "app/routes/api/health.ts",
+        include_str!("../../../examples/hello/app/routes/api/health.ts"),
+    ),
+    (
+        "app/routes/api/boom.ts",
+        include_str!("../../../examples/hello/app/routes/api/boom.ts"),
+    ),
+    (
+        "agents/support/agent.ts",
+        include_str!("../../../examples/hello/agents/support/agent.ts"),
+    ),
+    (
+        "agents/support/tools/summarize_numbers.py",
+        include_str!("../../../examples/hello/agents/support/tools/summarize_numbers.py"),
+    ),
+    (
+        "agents/support/tools/slow_summarize.py",
+        include_str!("../../../examples/hello/agents/support/tools/slow_summarize.py"),
+    ),
+    (
+        "agents/support/tools/slow_summarize_once.py",
+        include_str!("../../../examples/hello/agents/support/tools/slow_summarize_once.py"),
+    ),
+];
+
+fn scaffold(app: &Path) -> Result<()> {
+    if app.exists() {
+        if !app.is_dir() {
+            bail!(
+                "destination exists and is not a directory: {}",
+                app.display()
+            );
+        }
+        if app
+            .read_dir()
+            .with_context(|| format!("read {}", app.display()))?
+            .next()
+            .is_some()
+        {
+            bail!("destination is not empty: {}", app.display());
+        }
+    }
+
+    let app_name = app
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("beater-app");
+
+    for (relative_path, contents) in TEMPLATE_FILES {
+        let path = app.join(relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let contents = if *relative_path == "beater.toml" {
+            contents.replace(
+                "name = \"hello\"",
+                &format!("name = \"{}\"", toml_basic_string(app_name)),
+            )
+        } else {
+            contents.to_string()
+        };
+        std::fs::write(&path, contents).with_context(|| format!("write {}", path.display()))?;
+    }
+
+    println!("created {}", app.display());
+    println!("next: beater dev {}", app.display());
+    Ok(())
+}
+
+fn toml_basic_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04X}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out
 }
 
 fn doctor(app: &std::path::Path) -> Result<()> {
