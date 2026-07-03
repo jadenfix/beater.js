@@ -10,14 +10,16 @@
 //! via runpy so edits are picked up without restarting.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use pyo3::prelude::*;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Cap concurrent Python executions: every call holds the GIL on a blocking
 /// thread, so unbounded fan-out would only pile up blocked threads.
-static PY_PERMITS: Semaphore = Semaphore::const_new(4);
+static PY_PERMITS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(4)));
 
 #[derive(Debug, Clone)]
 pub struct PythonRuntime {
@@ -136,13 +138,45 @@ pub fn load_tool_spec(path: &Path) -> Result<(String, serde_json::Value)> {
 /// Runs on the blocking pool behind a semaphore — the GIL never blocks the
 /// async runtime.
 pub async fn call_tool(path: PathBuf, input_json: String) -> Result<String> {
-    let _permit = PY_PERMITS.acquire().await.expect("semaphore never closed");
-    tokio::task::spawn_blocking(move || call_tool_blocking(&path, &input_json))
-        .await
-        .context("python tool task panicked")?
+    call_tool_with_timeout(path, input_json, Duration::from_secs(10)).await
 }
 
-fn call_tool_blocking(path: &Path, input_json: &str) -> Result<String> {
+pub async fn call_tool_with_timeout(
+    path: PathBuf,
+    input_json: String,
+    timeout: Duration,
+) -> Result<String> {
+    let display_path = path.display().to_string();
+    let timeout_ms = timeout.as_millis();
+    let task = async move {
+        let permit = PY_PERMITS
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore never closed");
+        tokio::task::spawn_blocking(move || call_tool_blocking(permit, &path, &input_json))
+            .await
+            .context("python tool task panicked")?
+    };
+
+    match tokio::time::timeout(timeout, task).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                path = %display_path,
+                timeout_ms,
+                "python tool timed out; blocking execution continues until Python returns"
+            );
+            bail!("python tool {display_path} timed out after {timeout_ms}ms");
+        }
+    }
+}
+
+fn call_tool_blocking(
+    _permit: OwnedSemaphorePermit,
+    path: &Path,
+    input_json: &str,
+) -> Result<String> {
     Python::attach(|py| {
         let module = run_path(py, path)?;
         let run = module
@@ -165,4 +199,102 @@ fn run_path<'py>(py: Python<'py>, path: &Path) -> Result<Bound<'py, PyAny>> {
         .call_method1("run_path", (path.to_string_lossy().as_ref(),))
         .with_context(|| format!("failed to load python tool {}", path.display()))?;
     Ok(module)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use serde_json::json;
+
+    use super::{PY_PERMITS, call_tool_with_timeout};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_calls_hold_permits_until_python_returns() {
+        let path = write_sleep_tool();
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                tokio::spawn(async move {
+                    call_tool_with_timeout(
+                        path,
+                        json!({"sleepMs": 1000}).to_string(),
+                        Duration::from_millis(50),
+                    )
+                    .await
+                })
+            })
+            .collect();
+
+        wait_for_available_permits(0, Duration::from_secs(2)).await;
+        for handle in handles {
+            let error = handle
+                .await
+                .expect("python timeout task should not panic")
+                .expect_err("sleeping python call should time out");
+            assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        }
+        assert_eq!(PY_PERMITS.available_permits(), 0);
+
+        let error = call_tool_with_timeout(
+            path.clone(),
+            json!({"sleepMs": 0}).to_string(),
+            Duration::from_millis(50),
+        )
+        .await
+        .expect_err("fast call should wait behind timed-out executions");
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+
+        wait_for_available_permits(4, Duration::from_secs(3)).await;
+        let output = call_tool_with_timeout(
+            path,
+            json!({"sleepMs": 0}).to_string(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("python permits should recover after sleepers return");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).expect("json output"),
+            json!({"ok": true})
+        );
+    }
+
+    async fn wait_for_available_permits(expected: usize, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if PY_PERMITS.available_permits() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "expected {expected} python permits, got {}",
+            PY_PERMITS.available_permits()
+        );
+    }
+
+    fn write_sleep_tool() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("beater-py-timeout-{unique}"));
+        fs::create_dir_all(&dir).expect("create temp python tool dir");
+        let path = dir.join("sleep_tool.py");
+        fs::write(
+            &path,
+            r#"
+TOOL = {"description": "Sleep briefly.", "input_schema": {"type": "object"}}
+
+def run(input):
+    import time
+    time.sleep(input.get("sleepMs", 0) / 1000)
+    return {"ok": True}
+"#,
+        )
+        .expect("write temp python tool");
+        path
+    }
 }
