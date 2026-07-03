@@ -18,6 +18,7 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use deno_core::url::{Host, Url};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use beater_agent::{ToolCallContext, ToolRegistry};
 
@@ -224,7 +225,7 @@ pub async fn handle_post(
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools_json(registry)})),
-        "tools/call" => tools_call(registry, &params, &id).await,
+        "tools/call" => tools_call(registry, &params).await,
         other => Err((-32601, format!("method not found: {other}"))),
     };
 
@@ -302,11 +303,7 @@ fn tools_json(registry: &ToolRegistry) -> Value {
     )
 }
 
-async fn tools_call(
-    registry: &ToolRegistry,
-    params: &Value,
-    id: &Value,
-) -> Result<Value, (i64, String)> {
+async fn tools_call(registry: &ToolRegistry, params: &Value) -> Result<Value, (i64, String)> {
     let name = params["name"]
         .as_str()
         .ok_or((-32602, "tools/call requires params.name".to_string()))?;
@@ -316,7 +313,7 @@ async fn tools_call(
     }
     // Tool failures are results with isError, not protocol errors.
     let context = ToolCallContext {
-        tool_use_id: json_rpc_id_to_tool_use_id(id),
+        tool_use_id: Some(mcp_tool_use_id()),
         idempotency_key: None,
     };
     match registry
@@ -334,12 +331,8 @@ async fn tools_call(
     }
 }
 
-fn json_rpc_id_to_tool_use_id(id: &Value) -> Option<String> {
-    match id {
-        Value::String(id) => Some(id.clone()),
-        Value::Number(id) => Some(id.to_string()),
-        _ => None,
-    }
+fn mcp_tool_use_id() -> String {
+    format!("beater:mcp:{}", Uuid::new_v4())
 }
 
 fn http_response(status: StatusCode, body: Value) -> Response<Body> {
@@ -395,9 +388,7 @@ mod tests {
     use beater_agent::{ToolDecl, ToolRegistry};
     use serde_json::{Value, json};
 
-    use super::{
-        AccessConfig, handle_get, handle_options, handle_post, json_rpc_id_to_tool_use_id,
-    };
+    use super::{AccessConfig, handle_get, handle_options, handle_post, mcp_tool_use_id};
 
     #[test]
     fn origin_policy_accepts_loopback_and_rejects_prefix_spoofing() {
@@ -505,57 +496,84 @@ mod tests {
     }
 
     #[test]
-    fn json_rpc_id_becomes_tool_context_id() {
-        assert_eq!(
-            json_rpc_id_to_tool_use_id(&json!("toolu_123")),
-            Some("toolu_123".to_string())
-        );
-        assert_eq!(
-            json_rpc_id_to_tool_use_id(&json!(42)),
-            Some("42".to_string())
-        );
-        assert_eq!(json_rpc_id_to_tool_use_id(&json!({})), None);
+    fn mcp_tool_use_id_is_namespaced_and_unique() {
+        let first = mcp_tool_use_id();
+        let second = mcp_tool_use_id();
+
+        assert!(first.starts_with("beater:mcp:"), "{first}");
+        assert!(second.starts_with("beater:mcp:"), "{second}");
+        assert_ne!(first, second);
+        uuid::Uuid::parse_str(first.trim_start_matches("beater:mcp:"))
+            .expect("mcp tool use id should contain a UUID");
     }
 
     #[tokio::test]
-    async fn tools_call_forwards_json_rpc_id_to_remote_mcp_context() {
-        let remote = MockRemoteMcp::new(json!({
+    async fn tools_call_uses_unique_namespaced_remote_mcp_context_ids() {
+        let remote = MockRemoteMcp::new_many(vec![
+            json!({
             "jsonrpc": "2.0",
-            "id": "mcp-call-1",
+            "id": null,
             "result": {
                 "content": [{"type": "text", "text": "{\"ok\":true}"}],
                 "isError": false
             }
-        }));
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "result": {
+                    "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                    "isError": false
+                }
+            }),
+        ]);
         let registry = ToolRegistry::build(
             Path::new(""),
             &[remote_decl("crm.lookup", &remote.endpoint)],
         )
         .expect("remote MCP registry should build");
 
-        let response = handle_post(
+        let first_response = handle_post(
             &registry,
             &AccessConfig::default(),
             &HeaderMap::new(),
-            br#"{"jsonrpc":"2.0","id":"mcp-call-1","method":"tools/call","params":{"name":"crm.lookup","arguments":{"email":"a@example.com"}}}"#,
+            br#"{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"crm.lookup","arguments":{"email":"a@example.com"}}}"#,
+        )
+        .await;
+        let second_response = handle_post(
+            &registry,
+            &AccessConfig::default(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"crm.lookup","arguments":{"email":"b@example.com"}}}"#,
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(first_response.status(), StatusCode::OK);
+        assert_eq!(second_response.status(), StatusCode::OK);
+        assert_eq!(response_json(first_response).await["id"], "1");
+        assert_eq!(response_json(second_response).await["id"], "1");
+
         let requests = remote.requests();
-        assert_eq!(requests.len(), 1);
-        assert!(
-            requests[0]
-                .headers
-                .to_ascii_lowercase()
-                .contains("idempotency-key: mcp-call-1"),
-            "{}",
-            requests[0].headers
-        );
-        let body: Value = serde_json::from_str(&requests[0].body).unwrap();
-        assert_eq!(body["id"], "mcp-call-1");
-        assert_eq!(body["params"]["name"], "lookup_contact");
-        assert_eq!(body["params"]["arguments"]["email"], "a@example.com");
+        assert_eq!(requests.len(), 2);
+
+        let first_body: Value = serde_json::from_str(&requests[0].body).unwrap();
+        let second_body: Value = serde_json::from_str(&requests[1].body).unwrap();
+        let first_id = first_body["id"].as_str().unwrap();
+        let second_id = second_body["id"].as_str().unwrap();
+        let first_key = header_value(&requests[0].headers, "idempotency-key").unwrap();
+        let second_key = header_value(&requests[1].headers, "idempotency-key").unwrap();
+
+        assert!(first_id.starts_with("beater:mcp:"), "{first_id}");
+        assert!(second_id.starts_with("beater:mcp:"), "{second_id}");
+        assert_ne!(first_id, "1");
+        assert_ne!(second_id, "1");
+        assert_ne!(first_id, second_id);
+        assert_eq!(first_key, first_id);
+        assert_eq!(second_key, second_id);
+        assert_eq!(first_body["params"]["name"], "lookup_contact");
+        assert_eq!(second_body["params"]["name"], "lookup_contact");
+        assert_eq!(first_body["params"]["arguments"]["email"], "a@example.com");
+        assert_eq!(second_body["params"]["arguments"]["email"], "b@example.com");
     }
 
     #[test]
@@ -664,7 +682,7 @@ mod tests {
     }
 
     impl MockRemoteMcp {
-        fn new(response: Value) -> Self {
+        fn new_many(responses: Vec<Value>) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             listener.set_nonblocking(true).unwrap();
             let endpoint = format!(
@@ -673,12 +691,17 @@ mod tests {
             );
             let requests = Arc::new(Mutex::new(Vec::new()));
             let thread_requests = requests.clone();
-            let body = response.to_string();
             let handle = thread::spawn(move || {
-                let (mut stream, _) = accept_with_deadline(&listener);
-                let request = read_request(&mut stream);
-                thread_requests.lock().unwrap().push(request);
-                let _ = write_response(&mut stream, &body);
+                for response in responses {
+                    let (mut stream, _) = accept_with_deadline(&listener);
+                    let request = read_request(&mut stream);
+                    let request_body: Value = serde_json::from_str(&request.body).unwrap();
+                    let mut response = response;
+                    response["id"] = request_body["id"].clone();
+                    let body = response.to_string();
+                    thread_requests.lock().unwrap().push(request);
+                    let _ = write_response(&mut stream, &body);
+                }
             });
             Self {
                 endpoint,
@@ -690,6 +713,22 @@ mod tests {
         fn requests(&self) -> Vec<MockRequest> {
             self.requests.lock().unwrap().clone()
         }
+    }
+
+    async fn response_json(response: axum::http::Response<axum::body::Body>) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn header_value(headers: &str, name: &str) -> Option<String> {
+        headers.lines().find_map(|line| {
+            let (header_name, header_value) = line.split_once(':')?;
+            header_name
+                .eq_ignore_ascii_case(name)
+                .then(|| header_value.trim().to_string())
+        })
     }
 
     impl Drop for MockRemoteMcp {

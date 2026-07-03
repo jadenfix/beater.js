@@ -93,18 +93,24 @@ The work below is not just about matching Node/Next request handling. The end st
 |---|---|
 | One binary, three runtimes | `beater doctor` reports embedded V8 14.9 + embedded CPython 3.11 (`sys.executable` = the beater binary) |
 | TS routes in embedded V8 | `curl /api/health` returns JSON from a `.ts` handler; live edit hot-reloads in ~1s (fresh isolate) |
+| URL path decoding | router tests prove percent-encoded static segments match routes, dynamic params decode UTF-8 path segments, and malformed escapes, `%2F`, and `%00` are rejected |
 | Source-mapped errors | broken route returns a stack pointing at `boom.ts:8:9` (original TS line) |
 | React 19 SSR | `curl /` returns server-rendered HTML from `index.tsx`; vendored ESM, no Node/npm anywhere |
 | MCP server (2025-11-25) | official MCP inspector completes initialize + tools/list + tools/call; bogus Origin → 403; GET → 405; bearer-token mode returns 401 without `Authorization`; trusted remote browser origins get preflight/CORS support |
+| MCP tools/call idempotency isolation | runtime tests prove repeated `/mcp tools/call` requests with JSON-RPC id `1` generate unique `beater:mcp:<uuid>` remote tool ids and matching idempotency keys |
 | Python-over-MCP | `summarize_numbers` (a `.py` file) executes in embedded CPython when called by an external MCP client |
+| Python tool path containment | registry tests reject relative and absolute Python tool paths outside the agent directory before loading, then re-check containment before execute after symlink replacement |
 | Agent Access Layer | /robots.txt, /sitemap.xml, /llms.txt, /.well-known/beater.json generated from the route table; `export const agent = {crawl: false}` excludes a route from sitemap + llms.txt; remote deployments can override the advertised public base URL |
 | Agent config pipeline | `agent.ts` (via `beater:agent` shim) evaluates in a one-shot isolate → JSON config → Rust registry; Python TOOL metadata loads through embedded CPython |
 | Durability machinery (code) | SQLite journal with started/completed/failed lifecycle + attempts; resume logic for dangling LLM calls and idempotent-only tool re-runs; `needs_review` parking |
+| Anthropic network hardening | the Messages client has a request timeout; focused tests prove stalled requests and truncated successful responses retry, while truncated non-retryable API errors do not |
+| Resume stop_reason safety | `resume_preserves_failed_refusal_instead_of_marking_completed`, `resume_marks_running_max_tokens_failed_and_does_not_run_truncated_tools`, `resume_marks_completed_end_turn_finished_without_reissuing_llm`, and `resume_reissues_pause_turn_instead_of_marking_completed` prove resume no longer turns refusal/max_tokens/pause_turn journal states into false completions |
 | M2 crash/resume fixtures | `slow_summarize.py` and `slow_summarize_once.py` are declared from `examples/hello/agents/support/agent.ts`; `scripts/m2-live-gate.sh` drives A3-A5 once `ANTHROPIC_API_KEY` is present and writes raw transcripts plus `evidence.md` |
+| M2 live gate harness safety | `scripts/m2-live-gate-self-test.sh` proves cleanup kills tracked background runs, untracked PIDs survive cleanup, and strict journal count queries fail instead of passing expected-zero assertions on SQLite errors |
 | Streaming SSR | `scripts/streaming-ssr-gate.sh` starts `beater dev`, reads the raw HTTP socket, and proved shell marker at 0.026s before Suspense-delayed marker at 0.489s while `/api/health` returned in 0.002s |
 | Client hydration | `/_beater/client/index.js` serves `app/routes/index.client.ts`; the hello page loads it as a module and `scripts/client-hydration-gate.cjs` verifies the counter increments in a browser |
 | RSC transport foundation | `/_beater/rsc/index.flight` serves `app/routes/index.server.tsx` as `text/x-component` frames over the worker stream channel; `scripts/rsc-flight-gate.cjs` verifies the browser renders the server island and the client counter still hydrates |
-| npm/node-compat wedge | `scripts/npm-compat-gate.sh` scaffolds a temp app, installs `zod@4.4.3`, adds a route importing `import { z } from "zod"`, and verifies `/api/zod` returns the parsed payload |
+| npm/node-compat wedge | `scripts/npm-compat-gate.sh` scaffolds a temp app, installs `zod@4.4.3`, adds a route importing `import { z } from "zod"`, and verifies `/api/zod` returns the parsed payload; loader unit tests cover server-side export conditions and wildcard subpath exports |
 
 ---
 

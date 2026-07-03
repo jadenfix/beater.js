@@ -109,7 +109,7 @@ impl RouteTable {
 
     /// Match a URL path, returning the route and extracted params.
     pub fn match_path(&self, path: &str) -> Option<(&Route, HashMap<String, String>)> {
-        let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+        let parts = decoded_path_segments(path)?;
         'route: for route in &self.routes {
             if route.segments.len() != parts.len() {
                 continue;
@@ -120,13 +120,58 @@ impl RouteTable {
                     Segment::Static(s) if s == part => {}
                     Segment::Static(_) => continue 'route,
                     Segment::Param(name) => {
-                        params.insert(name.clone(), (*part).to_string());
+                        params.insert(name.clone(), part.clone());
                     }
                 }
             }
             return Some((route, params));
         }
         None
+    }
+}
+
+fn decoded_path_segments(path: &str) -> Option<Vec<String>> {
+    path.split('/')
+        .filter(|part| !part.is_empty())
+        .map(percent_decode_path_segment)
+        .collect()
+}
+
+fn percent_decode_path_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                let high = *bytes.get(index + 1)?;
+                let low = *bytes.get(index + 2)?;
+                let byte = hex_byte(high, low)?;
+                if matches!(byte, b'/' | b'\0') {
+                    return None;
+                }
+                out.push(byte);
+                index += 3;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_byte(high: u8, low: u8) -> Option<u8> {
+    Some((hex_digit(high)? << 4) | hex_digit(low)?)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -226,6 +271,48 @@ mod tests {
 
         assert_eq!(route.pattern, "/users/settings");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn percent_decodes_static_path_segments_and_params() {
+        let app = TempDir::new("percent");
+        app.write("app/routes/api/health.ts", "export function GET() {}");
+        app.write(
+            "app/routes/users/[id].tsx",
+            "export default function User() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        let (route, _) = table.match_path("/api/he%61lth").unwrap();
+        assert_eq!(route.pattern, "/api/health");
+
+        let (_, params) = table.match_path("/users/John%20Doe").unwrap();
+        assert_eq!(params.get("id").map(String::as_str), Some("John Doe"));
+
+        let (_, params) = table.match_path("/users/Ol%C3%A9").unwrap();
+        assert_eq!(params.get("id").map(String::as_str), Some("Olé"));
+    }
+
+    #[test]
+    fn rejects_path_segment_decode_escape_and_utf8_failures() {
+        let app = TempDir::new("bad-percent");
+        app.write(
+            "app/routes/users/[id].tsx",
+            "export default function User() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        for path in [
+            "/users/a%2Fb",
+            "/users/a%2fb",
+            "/users/a%00b",
+            "/users/%",
+            "/users/%2",
+            "/users/%GG",
+            "/users/%FF",
+        ] {
+            assert!(table.match_path(path).is_none(), "{path}");
+        }
     }
 
     #[test]
