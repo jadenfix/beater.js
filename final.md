@@ -93,6 +93,7 @@ The work below is not just about matching Node/Next request handling. The end st
 |---|---|
 | One binary, three runtimes | `beater doctor` reports embedded V8 14.9 + embedded CPython 3.11 (`sys.executable` = the beater binary) |
 | TS routes in embedded V8 | `curl /api/health` returns JSON from a `.ts` handler; live edit hot-reloads in ~1s (fresh isolate) |
+| URL path decoding | router tests prove percent-encoded static segments match routes, dynamic params decode UTF-8 path segments, and malformed escapes, `%2F`, and `%00` are rejected |
 | Source-mapped errors | broken route returns a stack pointing at `boom.ts:8:9` (original TS line) |
 | React 19 SSR | `curl /` returns server-rendered HTML from `index.tsx`; vendored ESM, no Node/npm anywhere |
 | MCP server (2025-11-25) | official MCP inspector completes initialize + tools/list + tools/call; bogus Origin → 403; GET → 405; bearer-token mode returns 401 without `Authorization`; trusted remote browser origins get preflight/CORS support |
