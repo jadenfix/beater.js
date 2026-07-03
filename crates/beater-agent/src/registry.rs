@@ -725,6 +725,7 @@ enum IdempotencyKeySource {
 enum RemoteAttempt {
     Retryable(anyhow::Error),
     ProviderFailure(anyhow::Error),
+    AmbiguousSuccess(anyhow::Error),
     Fatal(anyhow::Error),
 }
 
@@ -1030,9 +1031,13 @@ impl RemoteMcpTool {
                 {
                     return Err(ToolNeedsReview::remote_ambiguous(&self.remote_tool, error).into());
                 }
+                Err(RemoteAttempt::AmbiguousSuccess(error)) if !self.idempotent => {
+                    return Err(ToolNeedsReview::remote_ambiguous(&self.remote_tool, error).into());
+                }
                 Err(
                     RemoteAttempt::Retryable(error)
                     | RemoteAttempt::ProviderFailure(error)
+                    | RemoteAttempt::AmbiguousSuccess(error)
                     | RemoteAttempt::Fatal(error),
                 ) => {
                     return Err(error);
@@ -1066,10 +1071,14 @@ impl RemoteMcpTool {
     }
 
     fn idempotency_key(&self, context: &ToolCallContext) -> Option<String> {
-        match self.retry.idempotency_key {
-            Some(IdempotencyKeySource::ToolUseId) => context.tool_use_id.clone(),
-            None => None,
-        }
+        context.idempotency_key.clone().or_else(|| {
+            self.retry
+                .idempotency_key
+                .as_ref()
+                .and_then(|source| match source {
+                    IdempotencyKeySource::ToolUseId => context.tool_use_id.clone(),
+                })
+        })
     }
 
     async fn send_once(
@@ -1131,20 +1140,20 @@ impl RemoteMcpTool {
             )));
         }
         let message: Value = serde_json::from_str(&text).map_err(|error| {
-            RemoteAttempt::Fatal(anyhow!(
+            RemoteAttempt::AmbiguousSuccess(anyhow!(
                 "remote MCP tool {} returned invalid JSON: {error}: {text}",
                 self.remote_tool
             ))
         })?;
         if message["jsonrpc"] != "2.0" {
-            return Err(RemoteAttempt::Fatal(anyhow!(
+            return Err(RemoteAttempt::AmbiguousSuccess(anyhow!(
                 "remote MCP tool {} response has invalid jsonrpc version: {}",
                 self.remote_tool,
                 message["jsonrpc"]
             )));
         }
         if message["id"] != id {
-            return Err(RemoteAttempt::Fatal(anyhow!(
+            return Err(RemoteAttempt::AmbiguousSuccess(anyhow!(
                 "remote MCP tool {} response id {} did not match request id {id:?}",
                 self.remote_tool,
                 message["id"]
@@ -1157,7 +1166,7 @@ impl RemoteMcpTool {
             )));
         }
         let result = message.get("result").ok_or_else(|| {
-            RemoteAttempt::Fatal(anyhow!(
+            RemoteAttempt::AmbiguousSuccess(anyhow!(
                 "remote MCP tool {} response has no result",
                 self.remote_tool
             ))
@@ -1169,7 +1178,7 @@ impl RemoteMcpTool {
                 mcp_content_text(result)
             )));
         }
-        mcp_result_to_string(result).map_err(RemoteAttempt::Fatal)
+        mcp_result_to_string(result).map_err(RemoteAttempt::AmbiguousSuccess)
     }
 }
 
@@ -1860,6 +1869,88 @@ def run(input):
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn remote_mcp_non_idempotent_malformed_success_needs_review() {
+        for response in [
+            MockResponse::text("200 OK", "{not json"),
+            MockResponse::json(
+                "200 OK",
+                json!({
+                    "jsonrpc": "1.0",
+                    "id": "toolu_malformed",
+                    "result": {
+                        "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                        "isError": false
+                    }
+                }),
+            ),
+            MockResponse::json(
+                "200 OK",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "wrong-id",
+                    "result": {
+                        "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                        "isError": false
+                    }
+                }),
+            ),
+            MockResponse::json("200 OK", json!({"jsonrpc": "2.0", "id": "toolu_malformed"})),
+        ] {
+            let server = MockMcp::new(vec![response]);
+            let registry = ToolRegistry::build(
+                PathBuf::new().as_path(),
+                &[remote_decl(&server.endpoint, None, None, false)],
+            )
+            .expect("remote MCP registry should build");
+
+            let error = registry
+                .execute_with_context(
+                    "crm.lookup",
+                    &json!({"email": "a@example.com"}),
+                    &ToolCallContext {
+                        tool_use_id: Some("toolu_malformed".to_string()),
+                        ..ToolCallContext::default()
+                    },
+                )
+                .await
+                .expect_err("malformed HTTP 200 should need review for non-idempotent tools");
+            assert!(
+                error.downcast_ref::<ToolNeedsReview>().is_some(),
+                "{error:#}"
+            );
+            assert_eq!(server.requests().len(), 1);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_mcp_fatal_client_errors_do_not_need_review() {
+        let server = MockMcp::new(vec![MockResponse::text("400 Bad Request", "{not json")]);
+        let registry = ToolRegistry::build(
+            PathBuf::new().as_path(),
+            &[remote_decl(&server.endpoint, None, None, false)],
+        )
+        .expect("remote MCP registry should build");
+
+        let error = registry
+            .execute_with_context(
+                "crm.lookup",
+                &json!({"email": "a@example.com"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_bad_request".to_string()),
+                    ..ToolCallContext::default()
+                },
+            )
+            .await
+            .expect_err("HTTP 400 should remain fatal");
+        assert!(
+            error.downcast_ref::<ToolNeedsReview>().is_none(),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains("HTTP 400"), "{error:#}");
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn remote_mcp_retries_server_errors_with_tool_use_id() {
         let server = MockMcp::new(vec![
             MockResponse::json(
@@ -1917,6 +2008,94 @@ def run(input):
             let body: Value = serde_json::from_str(&request.body).unwrap();
             assert_eq!(body["id"], "toolu_123");
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_mcp_sends_journaled_idempotency_key_for_idempotent_tools() {
+        let server = MockMcp::new(vec![MockResponse::json(
+            "200 OK",
+            json!({
+                "jsonrpc": "2.0",
+                "id": "toolu_journaled",
+                "result": {
+                    "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                    "isError": false
+                }
+            }),
+        )]);
+        let registry = ToolRegistry::build(
+            PathBuf::new().as_path(),
+            &[remote_decl(&server.endpoint, None, None, true)],
+        )
+        .expect("remote MCP registry should build");
+
+        registry
+            .execute_with_context(
+                "crm.lookup",
+                &json!({"email": "a@example.com"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_journaled".to_string()),
+                    idempotency_key: Some("beater:run-1:tool:toolu_journaled".to_string()),
+                },
+            )
+            .await
+            .expect("idempotent remote MCP call should succeed");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        let headers = requests[0].headers.to_ascii_lowercase();
+        assert!(
+            headers.contains("idempotency-key: beater:run-1:tool:toolu_journaled"),
+            "{}",
+            requests[0].headers
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_mcp_prefers_journaled_idempotency_key_over_tool_use_id_header() {
+        let server = MockMcp::new(vec![MockResponse::json(
+            "200 OK",
+            json!({
+                "jsonrpc": "2.0",
+                "id": "toolu_raw",
+                "result": {
+                    "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                    "isError": false
+                }
+            }),
+        )]);
+        let mut decl = remote_decl(&server.endpoint, None, None, true);
+        decl.retry = Some(
+            serde_json::from_value(json!({
+                "attempts": 1,
+                "idempotencyKey": "tool_use_id"
+            }))
+            .unwrap(),
+        );
+        let registry = ToolRegistry::build(PathBuf::new().as_path(), &[decl])
+            .expect("remote MCP registry should build");
+
+        registry
+            .execute_with_context(
+                "crm.lookup",
+                &json!({"email": "a@example.com"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_raw".to_string()),
+                    idempotency_key: Some("beater:run-1:tool:toolu_raw".to_string()),
+                },
+            )
+            .await
+            .expect("idempotent remote MCP call should succeed");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        let headers = requests[0].headers.to_ascii_lowercase();
+        assert!(
+            headers.contains("idempotency-key: beater:run-1:tool:toolu_raw"),
+            "{}",
+            requests[0].headers
+        );
+        assert!(!headers.contains("idempotency-key: toolu_raw"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2244,6 +2423,15 @@ def run(input):
 
     impl MockResponse {
         fn json(status: &'static str, body: Value) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+                delay: Duration::ZERO,
+                headers: Vec::new(),
+            }
+        }
+
+        fn text(status: &'static str, body: &str) -> Self {
             Self {
                 status,
                 body: body.to_string(),

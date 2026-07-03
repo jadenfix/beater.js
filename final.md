@@ -236,6 +236,7 @@ Phase C progress so far:
 - `beater build --out <dir>` now emits a runnable host-platform bundle with `bin/beater`, copied app assets, `run.sh`, `beater-build.json`, `.dockerignore`, and a non-root Dockerfile. Runtime state and common local credential files are excluded; symlinked app files and symlinked outputs are refused. `build_creates_runnable_bundle_and_refuses_unsafe_output` starts the generated launcher and hits `/api/health`; the Docker cold-start gate remains open.
 - Dropping an SSR/RSC response body before it reaches EOF now sends `CancelStream` to the owning worker, so disconnected clients do not leave stalled stream state registered indefinitely.
 - SSR/RSC stream chunks now cross from the isolate to the HTTP body through a bounded async channel, the local `ReadableStream` shim exposes queue pressure through `desiredSize`, and stale timer clears no longer accumulate cancellation ids in long-lived workers.
+- Remote MCP tools now treat malformed JSON-RPC bodies after HTTP 2xx as ambiguous for non-idempotent calls, and send the journaled `ToolCallContext.idempotency_key` as the provider-facing idempotency header.
 
 | # | Item | Done when |
 |---|---|---|
