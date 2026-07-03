@@ -164,6 +164,15 @@ pub async fn serve(
 
 /// Watch app/ and agents/; on change, rescan routes and swap in a fresh
 /// isolate. The old worker drains and exits when its channel closes.
+fn is_ignored_reload_path(path: &std::path::Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some(".beater") | Some("node_modules") | Some("target") | Some(".git")
+        )
+    })
+}
+
 fn spawn_reloader(app_dir: PathBuf, beatbox: BeatboxConfig, state: DevState) {
     let (tx, mut rx) = mpsc::channel::<()>(16);
     let watch_dir = app_dir.clone();
@@ -173,6 +182,8 @@ fn spawn_reloader(app_dir: PathBuf, beatbox: BeatboxConfig, state: DevState) {
             match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 if let Ok(event) = res
                     && (event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove())
+                    && (event.paths.is_empty()
+                        || event.paths.iter().any(|p| !is_ignored_reload_path(p)))
                 {
                     let _ = tx.blocking_send(());
                 }
