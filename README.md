@@ -25,6 +25,7 @@ Pre-alpha, built in the open. Current milestone progress:
 - [x] **M5** — route-scoped client module (`/_beater/client/index.js`) hydrates a counter on the hello route
 - [x] **M6** — route-scoped RSC transport (`/_beater/rsc/index.flight`) streams server islands to the browser
 - [x] **M7** — server routes can import local ESM packages from `node_modules` with bare specifiers
+- [ ] **M8** — `beater build` deploy story (runnable host bundle exists; Docker cold-start gate pending)
 
 ## Quickstart (target DX)
 
@@ -35,11 +36,13 @@ cargo build --workspace
 ./target/debug/beater new my-app                         # scaffold from the hello template
 python3.11 -m venv my-app/.venv                          # optional: enables third-party Python packages
 ./target/debug/beater dev my-app                         # serve routes with hot reload
-./target/debug/beater dev my-app --host 0.0.0.0          # bind for containers/VMs
+BEATER_MCP_TOKEN=dev-token ./target/debug/beater dev my-app --host 0.0.0.0 --base-url https://hello.example.com
 export ANTHROPIC_API_KEY=sk-ant-...                     # required for live agent runs
 ./target/debug/beater agent run --app my-app support "summarize 3,1,4,1,5"
 ./target/debug/beater agent resume --app my-app <run_id>
 ./target/debug/beater doctor my-app                      # verify Python/venv/V8 wiring
+./target/debug/beater build my-app --out /tmp/my-app-bundle
+BEATER_HOST=127.0.0.1 BEATER_PORT=3000 /tmp/my-app-bundle/run.sh
 ```
 
 When exposing `/mcp` beyond localhost, require a bearer token and add browser origins explicitly:
@@ -59,6 +62,8 @@ Server-side routes can import local ESM packages from `node_modules` with bare p
 Client modules are route companions such as `app/routes/index.client.ts`. They are transpiled and served as same-origin browser modules, but they are not bundled with npm dependencies yet.
 
 RSC transport is starting as route companions such as `app/routes/index.server.tsx`, streamed from `/_beater/rsc/index.flight` with `text/x-component` frames over the same isolate-to-host stream channel. This is the transport wedge; full React Flight client runtime and client-reference manifests are still Phase C work.
+
+`beater build` currently emits a host-platform bundle: copied app assets, the current `beater` binary, `run.sh`, `beater-build.json`, `.dockerignore`, and a Dockerfile that runs as a non-root `beater` user. Runtime state and common local credential files are excluded. The bundle launcher is tested by starting it and hitting `/api/health`; the final deploy gate still needs a Linux-target image build plus `docker run` cold-start proof.
 
 ## Build from source
 

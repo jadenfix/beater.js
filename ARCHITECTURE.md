@@ -131,7 +131,7 @@ my-app/
     └── tools/summarize_numbers.py     # def run(input) -> dict; TOOL = {...}
 ```
 
-CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` · `beater agent resume <run_id>` · `beater agent runs` · `beater doctor`.
+CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <name> "<prompt>"` · `beater agent resume <run_id>` · `beater agent runs` · `beater doctor`.
 
 ## 8. Not yet (each with its future path)
 
@@ -141,7 +141,7 @@ CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` 
 - **Wasmtime sandbox** — fourth `impl` kind in the tool registry, for untrusted/agent-generated code.
 - **C++ tools** — via `cxx` on the Rust built-in path when a real use case appears.
 - **Production agentic browsing** — the registry has a mock CDP browser provider for contract tests; reuse beater-agents' real CDP/Playwright crates as the production provider.
-- **Deploy** — the host is one binary + assets; `beater build` → container image with the venv baked in.
+- **Deploy** — first slice exists: `beater build --out <dir>` emits a runnable host-platform bundle with copied app assets, the current binary, a launcher, a manifest, and a non-root Docker context while excluding runtime state and common local credential files. Full image building, target-OS binary selection, venv baking guarantees, and the `docker run` cold-start gate remain.
 - **Isolate pool / per-request isolation** — channel protocol already supports N workers; current serialization is documented in `docs/runtime-limits.md`.
 - **LLM streaming (SSE to browser)** — journal needs partial-step records first.
 - **MCP sessions/SSE + the 2026-07-28 spec** — adopt when released.
@@ -159,3 +159,4 @@ CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` 
 | M5 | route-scoped client module (`/_beater/client/<route>.js`) + hydrated counter | interactivity | **done** |
 | M6 | route-scoped RSC transport (`/_beater/rsc/<route>.flight`) + browser-rendered server island | RSC substrate | transport done; official React Flight manifests pending |
 | M7 | bare ESM package imports from local `node_modules` in server routes | adoption wedge | **done** |
+| M8 | `beater build` host bundle + Docker context | deploy substrate | host bundle done; Docker cold-start gate pending |

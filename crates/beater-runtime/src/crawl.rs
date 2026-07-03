@@ -6,10 +6,31 @@ use serde_json::json;
 
 use crate::worker::RouteMeta;
 
-pub fn robots_txt(base_url: &str) -> String {
-    format!(
-        "User-agent: *\nAllow: /\n\nSitemap: {base_url}/sitemap.xml\n# agent-readable map: {base_url}/llms.txt\n# manifest: {base_url}/.well-known/beater.json\n"
-    )
+pub fn robots_txt(base_url: &str, routes: &[(String, Option<RouteMeta>)]) -> String {
+    let mut disallowed: Vec<&str> = routes
+        .iter()
+        .filter_map(|(pattern, meta)| {
+            if matches!(meta, Some(meta) if !meta.crawl) {
+                Some(pattern.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    disallowed.sort_unstable();
+    disallowed.dedup();
+
+    let mut out = String::from("User-agent: *\n");
+    if !disallowed.contains(&"/") {
+        out.push_str("Allow: /\n");
+    }
+    for path in disallowed {
+        out.push_str(&format!("Disallow: {path}\n"));
+    }
+    out.push_str(&format!(
+        "\nSitemap: {base_url}/sitemap.xml\n# agent-readable map: {base_url}/llms.txt\n# manifest: {base_url}/.well-known/beater.json\n"
+    ));
+    out
 }
 
 /// Crawlable routes (per their `agent` metadata) with lastmod from file mtime.
@@ -33,7 +54,10 @@ pub fn sitemap_xml(
                     .to_string()
             });
         out.push_str("  <url>\n");
-        out.push_str(&format!("    <loc>{base_url}{pattern}</loc>\n"));
+        out.push_str(&format!(
+            "    <loc>{}</loc>\n",
+            escape_xml_text(&format!("{base_url}{pattern}"))
+        ));
         if let Some(lastmod) = lastmod {
             out.push_str(&format!("    <lastmod>{lastmod}</lastmod>\n"));
         }
@@ -107,11 +131,120 @@ pub fn well_known(
             "originPolicy": {
                 "noOrigin": "allowed",
                 "loopbackOrigins": true,
-                "trustedOrigins": mcp_access.trusted_origins(),
             },
         },
         "sitemap": format!("{base_url}/sitemap.xml"),
         "llms": format!("{base_url}/llms.txt"),
         "agents": agents,
     })
+}
+
+fn escape_xml_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worker::RouteMeta;
+
+    fn meta(crawl: bool) -> Option<RouteMeta> {
+        Some(RouteMeta {
+            title: None,
+            description: None,
+            crawl,
+        })
+    }
+
+    #[test]
+    fn sitemap_xml_escapes_route_locations() {
+        let xml = sitemap_xml(
+            "https://example.test/root?x=1&y=2",
+            &[(
+                "/docs/<private>&notes".to_string(),
+                std::path::PathBuf::from("missing-route.tsx"),
+                None,
+            )],
+        );
+
+        assert!(
+            xml.contains(
+                "<loc>https://example.test/root?x=1&amp;y=2/docs/&lt;private&gt;&amp;notes</loc>"
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn well_known_does_not_disclose_trusted_origins() {
+        let manifest = well_known(
+            "hello",
+            "https://hello.example.test",
+            &[],
+            &crate::mcp::AccessConfig::new(
+                Some("test-secret".to_string()),
+                vec!["https://ops.example.test".to_string()],
+            ),
+        );
+
+        assert_eq!(manifest["mcp"]["originPolicy"]["noOrigin"], "allowed");
+        assert_eq!(manifest["mcp"]["originPolicy"]["loopbackOrigins"], true);
+        assert!(
+            manifest["mcp"]["originPolicy"]
+                .as_object()
+                .is_some_and(|policy| !policy.contains_key("trustedOrigins"))
+        );
+        assert!(!manifest.to_string().contains("https://ops.example.test"));
+    }
+
+    #[test]
+    fn robots_txt_allows_all_when_no_routes_disable_crawling() {
+        let routes = vec![("/".to_string(), None), ("/docs".to_string(), meta(true))];
+
+        let robots = robots_txt("https://example.test", &routes);
+
+        assert!(robots.contains("Allow: /\n"));
+        assert!(!robots.contains("Disallow:"));
+        assert!(robots.contains("Sitemap: https://example.test/sitemap.xml"));
+    }
+
+    #[test]
+    fn robots_txt_disallows_routes_with_crawl_false() {
+        let routes = vec![
+            ("/".to_string(), None),
+            ("/admin".to_string(), meta(false)),
+            ("/docs".to_string(), meta(true)),
+            ("/admin".to_string(), meta(false)),
+        ];
+
+        let robots = robots_txt("https://example.test", &routes);
+
+        assert!(robots.contains("Allow: /\n"));
+        assert!(robots.contains("Disallow: /admin\n"));
+        assert!(!robots.contains("Disallow: /docs\n"));
+        assert_eq!(robots.matches("Disallow: /admin\n").count(), 1);
+    }
+
+    #[test]
+    fn robots_txt_omits_allow_all_when_root_disallows_crawling() {
+        let routes = vec![("/".to_string(), meta(false))];
+
+        let robots = robots_txt("https://example.test", &routes);
+
+        assert!(!robots.contains("Allow: /\n"));
+        assert!(robots.contains("Disallow: /\n"));
+    }
+}
+    }
 }
