@@ -575,7 +575,15 @@ async fn execute_sandbox(
     } else {
         client.execute(&request).await?
     };
-    Ok(serde_json::to_string(&result)?)
+    sandbox_result_content(&result)
+}
+
+fn sandbox_result_content(result: &beatbox_client::ExecutionResult) -> Result<String> {
+    let content = serde_json::to_string(result)?;
+    if result.status != beatbox_client::ExecutionStatus::Ok {
+        bail!("sandbox execution returned {:?}: {content}", result.status);
+    }
+    Ok(content)
 }
 
 async fn execute_sandbox_job(
@@ -1804,6 +1812,81 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn sandbox_non_ok_execute_result_fails_closed() {
+        let server = MockMcp::new(vec![MockResponse::json(
+            "200 OK",
+            execution_result_json("denied", Some(("policy_denied", "network blocked"))),
+        )]);
+        let registry = ToolRegistry::build_with_beatbox(
+            PathBuf::new().as_path(),
+            &[sandbox_decl(false)],
+            &super::BeatboxConfig {
+                url: server.endpoint.clone(),
+                api_key: None,
+            },
+        )
+        .expect("sandbox registry should build");
+
+        let error = registry
+            .execute("fib_wasm", &json!({"n": 10}))
+            .await
+            .expect_err("sandbox denied result should fail");
+        let text = format!("{error:#}");
+        assert!(text.contains("sandbox execution returned Denied"), "{text}");
+        assert!(text.contains("\"status\":\"denied\""), "{text}");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.starts_with("POST /mcp/v1/execute "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sandbox_non_ok_job_result_fails_closed() {
+        let server = MockMcp::new(vec![
+            MockResponse::json("202 Accepted", json!({"job_id": "job-1"})),
+            MockResponse::json(
+                "200 OK",
+                job_record_json(
+                    "job-1",
+                    execution_result_json("timeout", Some(("wall_timeout", "wall time exceeded"))),
+                ),
+            ),
+        ]);
+        let registry = ToolRegistry::build_with_beatbox(
+            PathBuf::new().as_path(),
+            &[sandbox_decl(true)],
+            &super::BeatboxConfig {
+                url: server.endpoint.clone(),
+                api_key: None,
+            },
+        )
+        .expect("sandbox registry should build");
+
+        let error = registry
+            .execute_with_context(
+                "fib_wasm",
+                &json!({"n": 10}),
+                &ToolCallContext {
+                    idempotency_key: Some("beater:run-1:tool:toolu_1".to_string()),
+                    ..ToolCallContext::default()
+                },
+            )
+            .await
+            .expect_err("sandbox timeout job result should fail");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("sandbox execution returned Timeout"),
+            "{text}"
+        );
+        assert!(text.contains("\"status\":\"timeout\""), "{text}");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].headers.starts_with("POST /mcp/v1/jobs "));
+        assert!(requests[1].headers.starts_with("GET /mcp/v1/jobs/job-1 "));
+    }
+
     fn py_decl(name: &str, path: &str, idempotent: bool) -> ToolDecl {
         serde_json::from_value(json!({
             "kind": "python",
@@ -1847,6 +1930,22 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    fn sandbox_decl(idempotent: bool) -> ToolDecl {
+        serde_json::from_value(json!({
+            "kind": "sandbox",
+            "name": "fib_wasm",
+            "source": {"kind": "wasm_wat", "text": "(module)"},
+            "idempotent": idempotent,
+            "description": "Run fib in beatbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"n": {"type": "integer"}},
+                "required": ["n"]
+            }
+        }))
+        .unwrap()
+    }
+
     fn browser_decl() -> ToolDecl {
         serde_json::from_value(json!({
             "kind": "browser",
@@ -1867,6 +1966,57 @@ mod tests {
             "idempotent": false
         }))
         .unwrap()
+    }
+
+    fn execution_result_json(status: &str, error: Option<(&str, &str)>) -> Value {
+        json!({
+            "status": status,
+            "value": if status == "ok" { json!(55) } else { Value::Null },
+            "exit_code": null,
+            "stdout": "",
+            "stdout_truncated": false,
+            "stderr": "",
+            "stderr_truncated": false,
+            "error": error.map(|(code, message)| json!({"code": code, "message": message})),
+            "metrics": {
+                "wall_time_ms": 1,
+                "cpu_time_ms": 1,
+                "fuel_used": 42,
+                "peak_memory_bytes": null
+            },
+            "lane": "wasm",
+            "deterministic": true,
+            "inputs_digest": "sha256:test",
+            "engine_version": "test",
+            "beatbox_version": "test",
+            "effective_isolation": {
+                "os": "test",
+                "mechanisms": ["wasmtime", "empty-linker"],
+                "landlock_abi": null,
+                "downgrades": []
+            },
+            "egress": []
+        })
+    }
+
+    fn job_record_json(job_id: &str, result: Value) -> Value {
+        json!({
+            "job_id": job_id,
+            "status": "succeeded",
+            "request": {
+                "lane": "wasm",
+                "source": {"kind": "wasm_wat", "text": "(module)"},
+                "entrypoint": null,
+                "input": {"n": 10},
+                "stdin": "",
+                "policy": {},
+                "idempotency_key": "beater:run-1:tool:toolu_1"
+            },
+            "result": result,
+            "error": null,
+            "created_at": "2026-07-02T00:00:00Z",
+            "updated_at": "2026-07-02T00:00:00Z"
+        })
     }
 
     fn unique_env(prefix: &str) -> String {
