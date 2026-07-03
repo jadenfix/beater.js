@@ -58,6 +58,18 @@
   // Minimal UTF-8 TextEncoder — enough for React SSR and stream chunk
   // encoding. Full web API fidelity comes with the npm-compat era.
   if (!globalThis.TextEncoder) {
+    const utf8Bytes = (c) => {
+      if (c < 0x80) return [c];
+      if (c < 0x800) return [0xc0 | (c >> 6), 0x80 | (c & 63)];
+      if (c < 0x10000)
+        return [0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63)];
+      return [
+        0xf0 | (c >> 18),
+        0x80 | ((c >> 12) & 63),
+        0x80 | ((c >> 6) & 63),
+        0x80 | (c & 63),
+      ];
+    };
     globalThis.TextEncoder = class TextEncoder {
       get encoding() {
         return "utf-8";
@@ -67,25 +79,24 @@
         for (let i = 0; i < input.length; i++) {
           let c = input.codePointAt(i);
           if (c > 0xffff) i++;
-          if (c < 0x80) out.push(c);
-          else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-          else if (c < 0x10000)
-            out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-          else
-            out.push(
-              0xf0 | (c >> 18),
-              0x80 | ((c >> 12) & 63),
-              0x80 | ((c >> 6) & 63),
-              0x80 | (c & 63),
-            );
+          out.push(...utf8Bytes(c));
         }
         return new Uint8Array(out);
       }
       encodeInto(src, dest) {
-        const bytes = this.encode(src);
-        const written = Math.min(bytes.length, dest.length);
-        dest.set(bytes.subarray(0, written));
-        return { read: src.length, written };
+        let read = 0;
+        let written = 0;
+        for (let i = 0; i < src.length; ) {
+          const c = src.codePointAt(i);
+          const units = c > 0xffff ? 2 : 1;
+          const bytes = utf8Bytes(c);
+          if (written + bytes.length > dest.length) break;
+          dest.set(bytes, written);
+          written += bytes.length;
+          i += units;
+          read = i;
+        }
+        return { read, written };
       }
     };
   }
@@ -362,7 +373,8 @@
   // API routes export per-method handlers (GET, POST, ...) or a default.
   globalThis.__beaterDispatch = async (specifier, method, request) => {
     const mod = await import(specifier);
-    const handler = mod[method] ?? mod.default;
+    const fallbackGet = method === "HEAD" ? mod.GET : undefined;
+    const handler = mod[method] ?? fallbackGet ?? mod.default;
     if (typeof handler !== "function") {
       throw new Error(
         `route module does not export a ${method} handler or default: ${specifier}`,

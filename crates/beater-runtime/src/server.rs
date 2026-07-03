@@ -209,24 +209,20 @@ async fn handle_mcp_options(State(state): State<DevState>, headers: HeaderMap) -
 }
 
 async fn handle_robots(State(state): State<DevState>) -> Response<Body> {
-    text_response(StatusCode::OK, crawl::robots_txt(&state.base_url))
+    let routes: Vec<(String, Option<RouteMeta>)> = crawlable_routes(&state)
+        .await
+        .into_iter()
+        .map(|(pattern, _, meta)| (pattern, meta))
+        .collect();
+    text_response(StatusCode::OK, crawl::robots_txt(&state.base_url, &routes))
 }
 
-/// Static (non-parameterized) routes with their `agent` metadata resolved
-/// through the isolate — the shared input for sitemap.xml and llms.txt.
+/// Static page routes with their `agent` metadata resolved through the isolate
+/// — the shared input for sitemap.xml and llms.txt.
 async fn crawlable_routes(state: &DevState) -> Vec<(String, PathBuf, Option<RouteMeta>)> {
     let targets: Vec<(String, PathBuf, Option<String>)> = {
         let table = state.routes.read().await;
-        table
-            .iter()
-            .filter(|r| !r.segments.iter().any(|s| matches!(s, Segment::Param(_))))
-            .map(|r| {
-                let spec = deno_core::ModuleSpecifier::from_file_path(&r.file)
-                    .ok()
-                    .map(|s| s.to_string());
-                (r.pattern.clone(), r.file.clone(), spec)
-            })
-            .collect()
+        crawlable_route_targets(&table)
     };
     let mut routes = Vec::new();
     for (pattern, file, spec) in targets {
@@ -237,6 +233,25 @@ async fn crawlable_routes(state: &DevState) -> Vec<(String, PathBuf, Option<Rout
         routes.push((pattern, file, meta));
     }
     routes
+}
+
+fn crawlable_route_targets(table: &RouteTable) -> Vec<(String, PathBuf, Option<String>)> {
+    table
+        .iter()
+        .filter(|route| route.kind == RouteKind::Page)
+        .filter(|route| {
+            !route
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, Segment::Param(_)))
+        })
+        .map(|route| {
+            let spec = deno_core::ModuleSpecifier::from_file_path(&route.file)
+                .ok()
+                .map(|specifier| specifier.to_string());
+            (route.pattern.clone(), route.file.clone(), spec)
+        })
+        .collect()
 }
 
 async fn handle_sitemap(State(state): State<DevState>) -> Response<Body> {
@@ -422,17 +437,7 @@ async fn route_response_to_http(
     head: bool,
     route_resp: worker::RouteResponse,
 ) -> Result<Response<Body>> {
-    let uses_chunked_body = matches!(
-        &route_resp.body,
-        RouteBody::Chunks(_) | RouteBody::Stream { .. }
-    );
-    let mut builder = Response::builder().status(route_resp.status);
-    for (k, v) in &route_resp.headers {
-        if uses_chunked_body && k.eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        builder = builder.header(k, v);
-    }
+    let builder = route_response_builder(route_resp.status, &route_resp.headers, &route_resp.body);
     let body = match route_resp.body {
         RouteBody::Full(body) => {
             if head {
@@ -464,6 +469,28 @@ async fn route_response_to_http(
         }
     };
     Ok(builder.body(body)?)
+}
+
+fn route_response_builder(
+    status: u16,
+    headers: &HashMap<String, String>,
+    body: &RouteBody,
+) -> axum::http::response::Builder {
+    let full_body_len = match body {
+        RouteBody::Full(body) => Some(body.len()),
+        RouteBody::Chunks(_) | RouteBody::Stream { .. } => None,
+    };
+    let mut builder = Response::builder().status(status);
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        builder = builder.header(k, v);
+    }
+    if let Some(len) = full_body_len {
+        builder = builder.header("content-length", len.to_string());
+    }
+    builder
 }
 
 async fn rsc_flight_response(
@@ -643,14 +670,7 @@ fn route_response(route_resp: worker::RouteResponse) -> Result<Response<Body>, a
         headers,
         body,
     } = route_resp;
-    let uses_chunked_body = matches!(&body, RouteBody::Chunks(_) | RouteBody::Stream { .. });
-    let mut builder = Response::builder().status(status);
-    for (k, v) in &headers {
-        if uses_chunked_body && k.eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        builder = builder.header(k, v);
-    }
+    let builder = route_response_builder(status, &headers, &body);
     builder.body(route_body(body))
 }
 
@@ -727,8 +747,8 @@ mod tests {
 
     use super::{
         apply_route_security_headers, client_module_response, client_module_route_path,
-        find_client_module, find_rsc_server_module, route_response, route_response_body,
-        rsc_flight_route_path, text_response,
+        crawlable_route_targets, find_client_module, find_rsc_server_module, route_response,
+        route_response_body, rsc_flight_route_path, text_response,
     };
     use crate::router::RouteTable;
     use crate::worker;
@@ -913,6 +933,28 @@ mod tests {
         assert!(find_rsc_server_module(app.path(), &table, Path::new("admin/secret")).is_none());
     }
 
+    #[test]
+    fn crawlable_routes_exclude_api_and_parameterized_routes() {
+        let app = TempDir::new("crawlable");
+        app.write("app/routes/index.tsx", "export default function Home() {}");
+        app.write("app/routes/about.tsx", "export default function About() {}");
+        app.write("app/routes/api/health.ts", "export function GET() {}");
+        app.write("app/routes/api/export.js", "export function GET() {}");
+        app.write(
+            "app/routes/blog/[slug].tsx",
+            "export default function BlogPost() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        let mut patterns: Vec<_> = crawlable_route_targets(&table)
+            .into_iter()
+            .map(|(pattern, _, _)| pattern)
+            .collect();
+        patterns.sort();
+
+        assert_eq!(patterns, vec!["/", "/about"]);
+    }
+
     #[tokio::test]
     async fn client_module_response_serves_transpiled_javascript() {
         let app = TempDir::new("serve");
@@ -992,9 +1034,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_response_preserves_content_length_for_plain_body() {
+    async fn route_response_derives_content_length_for_plain_body() {
         let mut headers = HashMap::new();
-        headers.insert("content-length".to_string(), "10".to_string());
+        headers.insert("content-length".to_string(), "999".to_string());
 
         let response = route_response(worker::RouteResponse {
             status: 200,
@@ -1004,5 +1046,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.headers().get("content-length").unwrap(), "10");
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"plain body");
     }
 }

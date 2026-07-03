@@ -10,8 +10,16 @@ cd "$ROOT"
 APP="${BEATER_APP:-examples/hello}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 BIN="${BEATER_BIN:-$TARGET_DIR/debug/beater}"
-PORT="${BEATER_STREAM_PORT:-4179}"
-LOG="${BEATER_STREAM_LOG:-$TARGET_DIR/streaming-ssr-gate.log}"
+PORT="${BEATER_STREAM_PORT:-$(python3 - <<'PY'
+import socket
+
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)}"
+LOG="${BEATER_STREAM_LOG:-$TARGET_DIR/streaming-ssr-gate-$PORT.log}"
+GATE_RUST_LOG="${BEATER_STREAM_RUST_LOG:-beater_runtime::server=info,info}"
 
 if [[ "${BEATER_SKIP_BUILD:-0}" != "1" ]]; then
   cargo build -p beater-cli
@@ -21,7 +29,7 @@ fi
 
 mkdir -p "$(dirname "$LOG")"
 
-"$BIN" dev "$APP" --port "$PORT" >"$LOG" 2>&1 &
+env RUST_LOG="$GATE_RUST_LOG" "$BIN" dev "$APP" --host 127.0.0.1 --port "$PORT" >"$LOG" 2>&1 &
 pid=$!
 
 cleanup() {
@@ -30,17 +38,43 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 - "$PORT" "$LOG" <<'PY'
+python3 - "$PORT" "$LOG" "$pid" <<'PY'
+import os
 import socket
 import sys
 import time
 
 port = int(sys.argv[1])
 log = sys.argv[2]
+pid = int(sys.argv[3])
 deadline = time.monotonic() + 20
+listening = f"beater dev listening on http://127.0.0.1:{port}"
+
+def require_child_alive():
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        print(f"server process {pid} exited before accepting connections; log follows", file=sys.stderr)
+        try:
+            print(open(log, encoding="utf-8").read(), file=sys.stderr)
+        except OSError:
+            pass
+        sys.exit(1)
+
+def log_contains_listening_line():
+    try:
+        return listening in open(log, encoding="utf-8").read()
+    except OSError:
+        return False
+
 while time.monotonic() < deadline:
+    require_child_alive()
+    if not log_contains_listening_line():
+        time.sleep(0.1)
+        continue
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            require_child_alive()
             break
     except OSError:
         time.sleep(0.1)

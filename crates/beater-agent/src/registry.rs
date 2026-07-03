@@ -147,7 +147,7 @@ pub struct BrowserSessionDecl {
 }
 
 pub enum ToolImpl {
-    Python { path: PathBuf },
+    Python { agent_dir: PathBuf, path: PathBuf },
     RustBuiltin,
     RemoteMcp { config: RemoteMcpTool },
     Browser { config: BrowserTool },
@@ -217,7 +217,8 @@ impl ToolRegistry {
                         .path
                         .as_deref()
                         .with_context(|| format!("python tool {} has no path", decl.name))?;
-                    let path = agent_dir.join(rel.trim_start_matches("./"));
+                    let (agent_dir, path) = contained_agent_path(agent_dir, rel, "python tool")
+                        .with_context(|| format!("resolving python tool {}", decl.name))?;
                     let (description, input_schema) = beater_py::load_tool_spec(&path)
                         .with_context(|| format!("loading python tool {}", decl.name))?;
                     tools.push(ToolEntry {
@@ -225,7 +226,7 @@ impl ToolRegistry {
                         description,
                         input_schema,
                         idempotent: decl.idempotent,
-                        imp: ToolImpl::Python { path },
+                        imp: ToolImpl::Python { agent_dir, path },
                     });
                 }
                 "rust" => {
@@ -363,7 +364,8 @@ impl ToolRegistry {
             .get(name)
             .with_context(|| format!("no tool named {name}"))?;
         match &tool.imp {
-            ToolImpl::Python { path } => {
+            ToolImpl::Python { agent_dir, path } => {
+                let path = canonical_contained_path(agent_dir, path, "python tool")?;
                 beater_py::call_tool(path.clone(), input.to_string()).await
             }
             ToolImpl::RustBuiltin => execute_builtin(name, input),
@@ -420,20 +422,7 @@ fn sandbox_source(agent_dir: &Path, decl: &ToolDecl) -> Result<beatbox_client::S
 }
 
 fn sandbox_source_path(agent_dir: &Path, path: &str) -> Result<beatbox_client::Source> {
-    let path = agent_dir.join(path.trim_start_matches("./"));
-    let agent_dir = agent_dir
-        .canonicalize()
-        .with_context(|| format!("canonicalizing agent dir {}", agent_dir.display()))?;
-    let path = path
-        .canonicalize()
-        .with_context(|| format!("canonicalizing sandbox source {}", path.display()))?;
-    if !path.starts_with(&agent_dir) {
-        bail!(
-            "sandbox source {} escapes agent directory {}",
-            path.display(),
-            agent_dir.display()
-        );
-    }
+    let (_, path) = contained_agent_path(agent_dir, path, "sandbox source")?;
     let bytes = std::fs::read(&path)
         .with_context(|| format!("reading sandbox source {}", path.display()))?;
     if path.extension().and_then(|ext| ext.to_str()) == Some("wat") {
@@ -445,6 +434,29 @@ fn sandbox_source_path(agent_dir: &Path, path: &str) -> Result<beatbox_client::S
             bytes: base64::engine::general_purpose::STANDARD.encode(bytes),
         })
     }
+}
+
+fn contained_agent_path(agent_dir: &Path, path: &str, label: &str) -> Result<(PathBuf, PathBuf)> {
+    let path = agent_dir.join(path.trim_start_matches("./"));
+    let agent_dir = agent_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalizing agent dir {}", agent_dir.display()))?;
+    let path = canonical_contained_path(&agent_dir, &path, label)?;
+    Ok((agent_dir, path))
+}
+
+fn canonical_contained_path(agent_dir: &Path, path: &Path, label: &str) -> Result<PathBuf> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {label} {}", path.display()))?;
+    if !path.starts_with(agent_dir) {
+        bail!(
+            "{label} {} escapes agent directory {}",
+            path.display(),
+            agent_dir.display()
+        );
+    }
+    Ok(path)
 }
 
 fn sandbox_policy(value: Option<&Value>) -> Result<beatbox_client::Policy> {
@@ -575,7 +587,15 @@ async fn execute_sandbox(
     } else {
         client.execute(&request).await?
     };
-    Ok(serde_json::to_string(&result)?)
+    sandbox_result_content(&result)
+}
+
+fn sandbox_result_content(result: &beatbox_client::ExecutionResult) -> Result<String> {
+    let content = serde_json::to_string(result)?;
+    if result.status != beatbox_client::ExecutionStatus::Ok {
+        bail!("sandbox execution returned {:?}: {content}", result.status);
+    }
+    Ok(content)
 }
 
 async fn execute_sandbox_job(
@@ -1303,9 +1323,10 @@ fn execute_builtin(name: &str, _input: &Value) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1349,6 +1370,79 @@ mod tests {
         assert!(
             once.description
                 .contains("explicitly asks for slow_summarize_once by name")
+        );
+    }
+
+    #[test]
+    fn python_tool_rejects_paths_outside_agent_dir_before_loading() {
+        let fixture = TempAgentDir::new("python-containment-build");
+        let sentinel = fixture.path.join("outside-loaded.txt");
+        let outside = fixture.write_outside_tool("outside.py", &sentinel);
+
+        for path in [
+            "../../outside.py".to_string(),
+            outside.to_string_lossy().into_owned(),
+        ] {
+            let error = match ToolRegistry::build(
+                fixture.agent_dir.as_path(),
+                &[py_decl("escape", &path, true)],
+            ) {
+                Ok(_) => panic!("escaping python tool path should fail: {path}"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("escapes agent directory"),
+                "{error:#}"
+            );
+            assert!(
+                !sentinel.exists(),
+                "escaping python tool should not execute module-level code"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn python_tool_rechecks_containment_before_execute() {
+        let fixture = TempAgentDir::new("python-containment-execute");
+        let tool = fixture.write_agent_tool(
+            "tools/echo.py",
+            r#"
+TOOL = {
+    "description": "Echo.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    },
+}
+
+def run(input):
+    return {"echo": input["value"]}
+"#,
+        );
+        let sentinel = fixture.path.join("outside-executed.txt");
+        let outside = fixture.write_outside_tool("outside.py", &sentinel);
+        let registry = ToolRegistry::build(
+            fixture.agent_dir.as_path(),
+            &[py_decl("echo", "./tools/echo.py", true)],
+        )
+        .expect("contained python tool should build");
+
+        fs::remove_file(&tool).unwrap();
+        std::os::unix::fs::symlink(&outside, &tool).unwrap();
+        let error = registry
+            .execute("echo", &json!({"value": "ok"}))
+            .await
+            .expect_err("python tool symlink escape should fail before execution");
+
+        assert!(
+            format!("{error:#}").contains("escapes agent directory"),
+            "{error:#}"
+        );
+        assert!(
+            !sentinel.exists(),
+            "escaping python tool should not execute after symlink replacement"
         );
     }
 
@@ -1804,6 +1898,81 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn sandbox_non_ok_execute_result_fails_closed() {
+        let server = MockMcp::new(vec![MockResponse::json(
+            "200 OK",
+            execution_result_json("denied", Some(("policy_denied", "network blocked"))),
+        )]);
+        let registry = ToolRegistry::build_with_beatbox(
+            PathBuf::new().as_path(),
+            &[sandbox_decl(false)],
+            &super::BeatboxConfig {
+                url: server.endpoint.clone(),
+                api_key: None,
+            },
+        )
+        .expect("sandbox registry should build");
+
+        let error = registry
+            .execute("fib_wasm", &json!({"n": 10}))
+            .await
+            .expect_err("sandbox denied result should fail");
+        let text = format!("{error:#}");
+        assert!(text.contains("sandbox execution returned Denied"), "{text}");
+        assert!(text.contains("\"status\":\"denied\""), "{text}");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.starts_with("POST /mcp/v1/execute "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sandbox_non_ok_job_result_fails_closed() {
+        let server = MockMcp::new(vec![
+            MockResponse::json("202 Accepted", json!({"job_id": "job-1"})),
+            MockResponse::json(
+                "200 OK",
+                job_record_json(
+                    "job-1",
+                    execution_result_json("timeout", Some(("wall_timeout", "wall time exceeded"))),
+                ),
+            ),
+        ]);
+        let registry = ToolRegistry::build_with_beatbox(
+            PathBuf::new().as_path(),
+            &[sandbox_decl(true)],
+            &super::BeatboxConfig {
+                url: server.endpoint.clone(),
+                api_key: None,
+            },
+        )
+        .expect("sandbox registry should build");
+
+        let error = registry
+            .execute_with_context(
+                "fib_wasm",
+                &json!({"n": 10}),
+                &ToolCallContext {
+                    idempotency_key: Some("beater:run-1:tool:toolu_1".to_string()),
+                    ..ToolCallContext::default()
+                },
+            )
+            .await
+            .expect_err("sandbox timeout job result should fail");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("sandbox execution returned Timeout"),
+            "{text}"
+        );
+        assert!(text.contains("\"status\":\"timeout\""), "{text}");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].headers.starts_with("POST /mcp/v1/jobs "));
+        assert!(requests[1].headers.starts_with("GET /mcp/v1/jobs/job-1 "));
+    }
+
     fn py_decl(name: &str, path: &str, idempotent: bool) -> ToolDecl {
         serde_json::from_value(json!({
             "kind": "python",
@@ -1847,6 +2016,22 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    fn sandbox_decl(idempotent: bool) -> ToolDecl {
+        serde_json::from_value(json!({
+            "kind": "sandbox",
+            "name": "fib_wasm",
+            "source": {"kind": "wasm_wat", "text": "(module)"},
+            "idempotent": idempotent,
+            "description": "Run fib in beatbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"n": {"type": "integer"}},
+                "required": ["n"]
+            }
+        }))
+        .unwrap()
+    }
+
     fn browser_decl() -> ToolDecl {
         serde_json::from_value(json!({
             "kind": "browser",
@@ -1869,12 +2054,122 @@ mod tests {
         .unwrap()
     }
 
+    fn execution_result_json(status: &str, error: Option<(&str, &str)>) -> Value {
+        json!({
+            "status": status,
+            "value": if status == "ok" { json!(55) } else { Value::Null },
+            "exit_code": null,
+            "stdout": "",
+            "stdout_truncated": false,
+            "stderr": "",
+            "stderr_truncated": false,
+            "error": error.map(|(code, message)| json!({"code": code, "message": message})),
+            "metrics": {
+                "wall_time_ms": 1,
+                "cpu_time_ms": 1,
+                "fuel_used": 42,
+                "peak_memory_bytes": null
+            },
+            "lane": "wasm",
+            "deterministic": true,
+            "inputs_digest": "sha256:test",
+            "engine_version": "test",
+            "beatbox_version": "test",
+            "effective_isolation": {
+                "os": "test",
+                "mechanisms": ["wasmtime", "empty-linker"],
+                "landlock_abi": null,
+                "downgrades": []
+            },
+            "egress": []
+        })
+    }
+
+    fn job_record_json(job_id: &str, result: Value) -> Value {
+        json!({
+            "job_id": job_id,
+            "status": "succeeded",
+            "request": {
+                "lane": "wasm",
+                "source": {"kind": "wasm_wat", "text": "(module)"},
+                "entrypoint": null,
+                "input": {"n": 10},
+                "stdin": "",
+                "policy": {},
+                "idempotency_key": "beater:run-1:tool:toolu_1"
+            },
+            "result": result,
+            "error": null,
+            "created_at": "2026-07-02T00:00:00Z",
+            "updated_at": "2026-07-02T00:00:00Z"
+        })
+    }
+
     fn unique_env(prefix: &str) -> String {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         format!("{prefix}_{}_{}", std::process::id(), nanos)
+    }
+
+    struct TempAgentDir {
+        path: PathBuf,
+        agent_dir: PathBuf,
+    }
+
+    impl TempAgentDir {
+        fn new(label: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "beater-registry-{label}-{}-{nanos}",
+                std::process::id()
+            ));
+            let agent_dir = path.join("agents/support");
+            fs::create_dir_all(agent_dir.join("tools")).unwrap();
+            Self { path, agent_dir }
+        }
+
+        fn write_agent_tool(&self, relative_path: &str, contents: &str) -> PathBuf {
+            let path = self.agent_dir.join(relative_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, contents).unwrap();
+            path
+        }
+
+        fn write_outside_tool(&self, relative_path: &str, sentinel: &Path) -> PathBuf {
+            let path = self.path.join(relative_path);
+            fs::write(
+                &path,
+                format!(
+                    r#"
+from pathlib import Path
+Path({:?}).write_text("loaded")
+TOOL = {{
+    "description": "Evil.",
+    "input_schema": {{"type": "object"}},
+}}
+
+def run(input):
+    Path({:?}).write_text("executed")
+    return {{"evil": True}}
+"#,
+                    sentinel.to_string_lossy().as_ref(),
+                    sentinel.to_string_lossy().as_ref(),
+                ),
+            )
+            .unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempAgentDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 
     #[derive(Clone)]
