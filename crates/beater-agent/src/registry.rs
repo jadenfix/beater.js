@@ -147,7 +147,7 @@ pub struct BrowserSessionDecl {
 }
 
 pub enum ToolImpl {
-    Python { path: PathBuf },
+    Python { agent_dir: PathBuf, path: PathBuf },
     RustBuiltin,
     RemoteMcp { config: RemoteMcpTool },
     Browser { config: BrowserTool },
@@ -217,7 +217,8 @@ impl ToolRegistry {
                         .path
                         .as_deref()
                         .with_context(|| format!("python tool {} has no path", decl.name))?;
-                    let path = agent_dir.join(rel.trim_start_matches("./"));
+                    let (agent_dir, path) = contained_agent_path(agent_dir, rel, "python tool")
+                        .with_context(|| format!("resolving python tool {}", decl.name))?;
                     let (description, input_schema) = beater_py::load_tool_spec(&path)
                         .with_context(|| format!("loading python tool {}", decl.name))?;
                     tools.push(ToolEntry {
@@ -225,7 +226,7 @@ impl ToolRegistry {
                         description,
                         input_schema,
                         idempotent: decl.idempotent,
-                        imp: ToolImpl::Python { path },
+                        imp: ToolImpl::Python { agent_dir, path },
                     });
                 }
                 "rust" => {
@@ -363,7 +364,8 @@ impl ToolRegistry {
             .get(name)
             .with_context(|| format!("no tool named {name}"))?;
         match &tool.imp {
-            ToolImpl::Python { path } => {
+            ToolImpl::Python { agent_dir, path } => {
+                let path = canonical_contained_path(agent_dir, path, "python tool")?;
                 beater_py::call_tool(path.clone(), input.to_string()).await
             }
             ToolImpl::RustBuiltin => execute_builtin(name, input),
@@ -420,20 +422,7 @@ fn sandbox_source(agent_dir: &Path, decl: &ToolDecl) -> Result<beatbox_client::S
 }
 
 fn sandbox_source_path(agent_dir: &Path, path: &str) -> Result<beatbox_client::Source> {
-    let path = agent_dir.join(path.trim_start_matches("./"));
-    let agent_dir = agent_dir
-        .canonicalize()
-        .with_context(|| format!("canonicalizing agent dir {}", agent_dir.display()))?;
-    let path = path
-        .canonicalize()
-        .with_context(|| format!("canonicalizing sandbox source {}", path.display()))?;
-    if !path.starts_with(&agent_dir) {
-        bail!(
-            "sandbox source {} escapes agent directory {}",
-            path.display(),
-            agent_dir.display()
-        );
-    }
+    let (_, path) = contained_agent_path(agent_dir, path, "sandbox source")?;
     let bytes = std::fs::read(&path)
         .with_context(|| format!("reading sandbox source {}", path.display()))?;
     if path.extension().and_then(|ext| ext.to_str()) == Some("wat") {
@@ -445,6 +434,29 @@ fn sandbox_source_path(agent_dir: &Path, path: &str) -> Result<beatbox_client::S
             bytes: base64::engine::general_purpose::STANDARD.encode(bytes),
         })
     }
+}
+
+fn contained_agent_path(agent_dir: &Path, path: &str, label: &str) -> Result<(PathBuf, PathBuf)> {
+    let path = agent_dir.join(path.trim_start_matches("./"));
+    let agent_dir = agent_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalizing agent dir {}", agent_dir.display()))?;
+    let path = canonical_contained_path(&agent_dir, &path, label)?;
+    Ok((agent_dir, path))
+}
+
+fn canonical_contained_path(agent_dir: &Path, path: &Path, label: &str) -> Result<PathBuf> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {label} {}", path.display()))?;
+    if !path.starts_with(agent_dir) {
+        bail!(
+            "{label} {} escapes agent directory {}",
+            path.display(),
+            agent_dir.display()
+        );
+    }
+    Ok(path)
 }
 
 fn sandbox_policy(value: Option<&Value>) -> Result<beatbox_client::Policy> {
@@ -1303,9 +1315,10 @@ fn execute_builtin(name: &str, _input: &Value) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1349,6 +1362,79 @@ mod tests {
         assert!(
             once.description
                 .contains("explicitly asks for slow_summarize_once by name")
+        );
+    }
+
+    #[test]
+    fn python_tool_rejects_paths_outside_agent_dir_before_loading() {
+        let fixture = TempAgentDir::new("python-containment-build");
+        let sentinel = fixture.path.join("outside-loaded.txt");
+        let outside = fixture.write_outside_tool("outside.py", &sentinel);
+
+        for path in [
+            "../../outside.py".to_string(),
+            outside.to_string_lossy().into_owned(),
+        ] {
+            let error = match ToolRegistry::build(
+                fixture.agent_dir.as_path(),
+                &[py_decl("escape", &path, true)],
+            ) {
+                Ok(_) => panic!("escaping python tool path should fail: {path}"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("escapes agent directory"),
+                "{error:#}"
+            );
+            assert!(
+                !sentinel.exists(),
+                "escaping python tool should not execute module-level code"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn python_tool_rechecks_containment_before_execute() {
+        let fixture = TempAgentDir::new("python-containment-execute");
+        let tool = fixture.write_agent_tool(
+            "tools/echo.py",
+            r#"
+TOOL = {
+    "description": "Echo.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    },
+}
+
+def run(input):
+    return {"echo": input["value"]}
+"#,
+        );
+        let sentinel = fixture.path.join("outside-executed.txt");
+        let outside = fixture.write_outside_tool("outside.py", &sentinel);
+        let registry = ToolRegistry::build(
+            fixture.agent_dir.as_path(),
+            &[py_decl("echo", "./tools/echo.py", true)],
+        )
+        .expect("contained python tool should build");
+
+        fs::remove_file(&tool).unwrap();
+        std::os::unix::fs::symlink(&outside, &tool).unwrap();
+        let error = registry
+            .execute("echo", &json!({"value": "ok"}))
+            .await
+            .expect_err("python tool symlink escape should fail before execution");
+
+        assert!(
+            format!("{error:#}").contains("escapes agent directory"),
+            "{error:#}"
+        );
+        assert!(
+            !sentinel.exists(),
+            "escaping python tool should not execute after symlink replacement"
         );
     }
 
@@ -1875,6 +1961,65 @@ mod tests {
             .unwrap()
             .as_nanos();
         format!("{prefix}_{}_{}", std::process::id(), nanos)
+    }
+
+    struct TempAgentDir {
+        path: PathBuf,
+        agent_dir: PathBuf,
+    }
+
+    impl TempAgentDir {
+        fn new(label: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "beater-registry-{label}-{}-{nanos}",
+                std::process::id()
+            ));
+            let agent_dir = path.join("agents/support");
+            fs::create_dir_all(agent_dir.join("tools")).unwrap();
+            Self { path, agent_dir }
+        }
+
+        fn write_agent_tool(&self, relative_path: &str, contents: &str) -> PathBuf {
+            let path = self.agent_dir.join(relative_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, contents).unwrap();
+            path
+        }
+
+        fn write_outside_tool(&self, relative_path: &str, sentinel: &Path) -> PathBuf {
+            let path = self.path.join(relative_path);
+            fs::write(
+                &path,
+                format!(
+                    r#"
+from pathlib import Path
+Path({:?}).write_text("loaded")
+TOOL = {{
+    "description": "Evil.",
+    "input_schema": {{"type": "object"}},
+}}
+
+def run(input):
+    Path({:?}).write_text("executed")
+    return {{"evil": True}}
+"#,
+                    sentinel.to_string_lossy().as_ref(),
+                    sentinel.to_string_lossy().as_ref(),
+                ),
+            )
+            .unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempAgentDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 
     #[derive(Clone)]
