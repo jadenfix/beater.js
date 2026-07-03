@@ -300,24 +300,36 @@ async fn handle_well_known(State(state): State<DevState>) -> Response<Body> {
 
 async fn route_meta(state: &DevState, specifier: String) -> Option<RouteMeta> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    state
-        .worker_tx
-        .read()
-        .await
-        .send(WorkerMsg::RouteMeta {
-            specifier,
-            reply: reply_tx,
-        })
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        send_worker_msg(
+            &state.worker_tx,
+            WorkerMsg::RouteMeta {
+                specifier,
+                reply: reply_tx,
+            },
+        )
         .await
         .ok()?;
-    match tokio::time::timeout(REQUEST_TIMEOUT, reply_rx).await {
-        Ok(Ok(Ok(meta))) => meta,
-        Ok(Ok(Err(e))) => {
+        reply_rx.await.ok()
+    })
+    .await
+    .ok()??;
+
+    match result {
+        Ok(meta) => meta,
+        Err(e) => {
             tracing::warn!("route meta failed: {e}");
             None
         }
-        _ => None,
     }
+}
+
+async fn send_worker_msg(
+    worker_tx: &Arc<RwLock<mpsc::Sender<WorkerMsg>>>,
+    msg: WorkerMsg,
+) -> std::result::Result<(), mpsc::error::SendError<WorkerMsg>> {
+    let tx = worker_tx.read().await.clone();
+    tx.send(msg).await
 }
 
 // ---- route dispatch ---------------------------------------------------------
@@ -412,18 +424,17 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
         page,
         reply: reply_tx,
     };
-    state
-        .worker_tx
-        .read()
-        .await
-        .send(msg)
-        .await
-        .map_err(|_| anyhow::anyhow!("js worker is gone"))?;
 
-    let result = tokio::time::timeout(REQUEST_TIMEOUT, reply_rx)
-        .await
-        .map_err(|_| anyhow::anyhow!("route handler timed out after {REQUEST_TIMEOUT:?}"))?
-        .map_err(|_| anyhow::anyhow!("js worker dropped the request (reloading?)"))?;
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        send_worker_msg(&state.worker_tx, msg)
+            .await
+            .map_err(|_| anyhow::anyhow!("js worker is gone"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("js worker dropped the request (reloading?)"))
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("route handler timed out after {REQUEST_TIMEOUT:?}"))??;
 
     match result {
         Ok(route_resp) => route_response_to_http(&state, head, route_resp).await,
@@ -455,12 +466,11 @@ async fn route_response_to_http(
         }
         RouteBody::Stream { stream_id, rx } => {
             if head {
-                let _ = state
-                    .worker_tx
-                    .read()
-                    .await
-                    .send(WorkerMsg::CancelStream { stream_id })
-                    .await;
+                let _ = tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    send_worker_msg(&state.worker_tx, WorkerMsg::CancelStream { stream_id }),
+                )
+                .await;
                 drop(rx);
                 empty_unknown_len_body()
             } else {
@@ -537,22 +547,23 @@ async fn rsc_flight_response(
     .to_string();
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    state
-        .worker_tx
-        .read()
-        .await
-        .send(WorkerMsg::RscFlight {
-            specifier: specifier.to_string(),
-            request_json,
-            reply: reply_tx,
-        })
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        send_worker_msg(
+            &state.worker_tx,
+            WorkerMsg::RscFlight {
+                specifier: specifier.to_string(),
+                request_json,
+                reply: reply_tx,
+            },
+        )
         .await
         .map_err(|_| anyhow::anyhow!("js worker is gone"))?;
-
-    let result = tokio::time::timeout(REQUEST_TIMEOUT, reply_rx)
-        .await
-        .map_err(|_| anyhow::anyhow!("RSC flight stream timed out after {REQUEST_TIMEOUT:?}"))?
-        .map_err(|_| anyhow::anyhow!("js worker dropped the RSC flight request (reloading?)"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("js worker dropped the RSC flight request (reloading?)"))
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("RSC flight stream timed out after {REQUEST_TIMEOUT:?}"))??;
 
     match result {
         Ok(route_resp) => route_response_to_http(state, head, route_resp).await,
@@ -750,18 +761,21 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::{HeaderValue, Request, Response, StatusCode};
     use axum::routing::get;
     use axum::{Router, middleware};
+    use tokio::sync::{RwLock, mpsc};
     use tower::ServiceExt;
 
     use super::{
         apply_route_security_headers, client_module_response, client_module_route_path,
         crawlable_route_targets, find_client_module, find_rsc_server_module, route_response,
-        route_response_body, rsc_flight_route_path, secure_route_response, text_response,
-        with_route_security_headers,
+        route_response_body, rsc_flight_route_path, secure_route_response, send_worker_msg,
+        text_response, with_route_security_headers,
     };
     use crate::router::RouteTable;
     use crate::worker;
@@ -837,6 +851,53 @@ mod tests {
                 .unwrap_or_default()
                 .contains("script-src 'self'")
         );
+    }
+
+    #[tokio::test]
+    async fn worker_send_releases_reload_lock_while_channel_is_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(worker::WorkerMsg::CancelStream { stream_id: 1 })
+            .unwrap();
+        let worker_tx = Arc::new(RwLock::new(tx));
+
+        let blocked_send = tokio::spawn({
+            let worker_tx = Arc::clone(&worker_tx);
+            async move {
+                send_worker_msg(&worker_tx, worker::WorkerMsg::CancelStream { stream_id: 2 }).await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+        let mut guard = tokio::time::timeout(Duration::from_millis(100), worker_tx.write())
+            .await
+            .expect("blocked worker sends should not hold the reload write lock");
+        *guard = replacement_tx;
+        drop(guard);
+
+        match rx
+            .recv()
+            .await
+            .expect("initial message should remain queued")
+        {
+            worker::WorkerMsg::CancelStream { stream_id } => assert_eq!(stream_id, 1),
+            msg => panic!("unexpected worker message: {msg:?}"),
+        }
+
+        tokio::time::timeout(Duration::from_millis(100), blocked_send)
+            .await
+            .expect("blocked send should finish after receiver capacity frees")
+            .expect("send task should not panic")
+            .expect("send should succeed");
+
+        let queued = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("blocked message should be queued on the original channel")
+            .expect("blocked message should be sent");
+        match queued {
+            worker::WorkerMsg::CancelStream { stream_id } => assert_eq!(stream_id, 2),
+            msg => panic!("unexpected worker message: {msg:?}"),
+        }
     }
 
     #[test]
