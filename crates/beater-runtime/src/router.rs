@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteKind {
@@ -87,6 +87,25 @@ impl RouteTable {
                     kind,
                     pattern,
                 });
+            }
+        }
+        let mut routes_by_pattern: Vec<_> = routes.iter().collect();
+        routes_by_pattern.sort_by(|left, right| {
+            left.pattern
+                .cmp(&right.pattern)
+                .then_with(|| left.file.cmp(&right.file))
+        });
+        for pair in routes_by_pattern.windows(2) {
+            let [left, right] = pair else {
+                continue;
+            };
+            if left.pattern == right.pattern {
+                bail!(
+                    "duplicate route pattern {} maps to both {} and {}",
+                    left.pattern,
+                    left.file.display(),
+                    right.file.display()
+                );
             }
         }
         // static segments win over params at the same depth
@@ -271,6 +290,35 @@ mod tests {
 
         assert_eq!(route.pattern, "/users/settings");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn rejects_duplicate_patterns_across_api_and_page_routes() {
+        let app = TempDir::new("duplicate-api-page");
+        app.write("app/routes/about.ts", "export function GET() {}");
+        app.write("app/routes/about.tsx", "export default function About() {}");
+
+        let err = RouteTable::scan(app.path()).unwrap_err().to_string();
+
+        assert!(err.contains("duplicate route pattern /about"), "{err}");
+        assert!(err.contains("about.ts"), "{err}");
+        assert!(err.contains("about.tsx"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_patterns_across_file_and_index_routes() {
+        let app = TempDir::new("duplicate-index");
+        app.write("app/routes/users.tsx", "export default function Users() {}");
+        app.write(
+            "app/routes/users/index.tsx",
+            "export default function UsersIndex() {}",
+        );
+
+        let err = RouteTable::scan(app.path()).unwrap_err().to_string();
+
+        assert!(err.contains("duplicate route pattern /users"), "{err}");
+        assert!(err.contains("users.tsx"), "{err}");
+        assert!(err.contains("users/index.tsx"), "{err}");
     }
 
     #[test]
