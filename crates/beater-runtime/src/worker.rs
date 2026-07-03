@@ -480,3 +480,68 @@ fn format_core_error(err: CoreError) -> String {
         other => format!("{other}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime_with_bootstrap() -> JsRuntime {
+        let mut runtime = JsRuntime::new(RuntimeOptions {
+            module_loader: Some(Rc::new(BeaterModuleLoader)),
+            extensions: vec![beater_ext::init()],
+            ..Default::default()
+        });
+        runtime
+            .execute_script(
+                "beater:test-clear-text-encoder",
+                "globalThis.TextEncoder = undefined",
+            )
+            .expect("clear native TextEncoder");
+        runtime
+            .execute_script("beater:bootstrap", include_str!("bootstrap.js"))
+            .expect("bootstrap.js must evaluate");
+        runtime
+    }
+
+    #[test]
+    fn text_encoder_encode_into_reports_only_consumed_code_units() {
+        let mut runtime = runtime_with_bootstrap();
+        runtime
+            .execute_script(
+                "beater:text-encoder-encode-into",
+                r#"
+                const encoder = new TextEncoder();
+                const assert = (condition, message) => {
+                  if (!condition) throw new Error(message);
+                };
+
+                const ascii = new Uint8Array(2);
+                const asciiResult = encoder.encodeInto("abcd", ascii);
+                assert(asciiResult.read === 2, `ascii read ${asciiResult.read}`);
+                assert(asciiResult.written === 2, `ascii written ${asciiResult.written}`);
+                assert(ascii[0] === 97 && ascii[1] === 98, `ascii bytes ${Array.from(ascii)}`);
+
+                const piPartial = new Uint8Array(2);
+                const piPartialResult = encoder.encodeInto("a\u03c0", piPartial);
+                assert(piPartialResult.read === 1, `pi partial read ${piPartialResult.read}`);
+                assert(piPartialResult.written === 1, `pi partial written ${piPartialResult.written}`);
+                assert(piPartial[0] === 97 && piPartial[1] === 0, `pi partial bytes ${Array.from(piPartial)}`);
+
+                const emojiTooSmall = new Uint8Array(3);
+                const emojiTooSmallResult = encoder.encodeInto("\ud83d\ude00a", emojiTooSmall);
+                assert(emojiTooSmallResult.read === 0, `emoji small read ${emojiTooSmallResult.read}`);
+                assert(emojiTooSmallResult.written === 0, `emoji small written ${emojiTooSmallResult.written}`);
+
+                const emojiFits = new Uint8Array(5);
+                const emojiFitsResult = encoder.encodeInto("\ud83d\ude00a", emojiFits);
+                assert(emojiFitsResult.read === 3, `emoji fit read ${emojiFitsResult.read}`);
+                assert(emojiFitsResult.written === 5, `emoji fit written ${emojiFitsResult.written}`);
+                assert(
+                  Array.from(emojiFits).join(",") === "240,159,152,128,97",
+                  `emoji bytes ${Array.from(emojiFits)}`,
+                );
+                "#,
+            )
+            .expect("TextEncoder.encodeInto regression script");
+    }
+}

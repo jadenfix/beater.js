@@ -13,3 +13,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "beater-connect"
 path = "src/main.rs"
+
+[dev-dependencies]
+serde_json.workspace = true
