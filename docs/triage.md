@@ -176,3 +176,88 @@ filed. They map onto the same five families above.
 Updated totals: **35 open bug issues** across the backlog (29 original #25–#53, plus
 #56 and #73–#77 from this sweep). Severity still skews medium — the two Highs (#25,
 #26) remain the top of the "fix now" list.
+
+---
+
+## Swarm re-triage (independent double-review of all 35 open issues)
+
+A 70-agent swarm re-triaged every open issue: one agent triages an issue against
+the current-`main` code, then a **different** agent independently re-derives the
+verdict from the code before comparing — so no agent ever reviews its own work.
+
+**Integrity of this pass:** 70/70 agents completed, 0 errors. Triager and independent
+reviewer **agreed on 34 of 35** issues (the one split, #48, is a medium-vs-low nuance).
+
+### Headline results
+- **All 35 issues are confirmed real defects in current `main`.** Zero were refuted,
+  duplicated, or found already-fixed by either pass. The earlier hand sweeps hold up.
+- **Independent severity grade: 0 high · 28 medium · 7 low.** The swarm downgraded both
+  filed "high" issues to medium with high confidence:
+  - **#25** (unhandled-rejection blast radius) — medium: needs app route code to throw in
+    a *detached* promise; real cross-request stream abort, but no data loss / RCE.
+  - **#26** (resume marks failed runs completed) — medium: wrong-status/incomplete-output
+    on the *resume path only*; no crash, data loss, or money.
+- **#36** (Python path traversal → code exec) graded **low** by both agents: exploiting it
+  requires a hostile `agent.ts`, which the docs treat as trusted. Keeps its `security`
+  label; severity is conditional on that trust boundary.
+- **27 of 35 are quick wins** (confirmed + medium + S/M effort).
+- **8 carry security implications:** #35, #36, #37, #51, #74, #75, #76, #77.
+
+### Full matrix (severity = independent swarm grade; ✓ = triager/reviewer agreed; 🔒 = security)
+
+| Issue | Sev | Effort | Agree | Sec | Confirmed defect (one-line) |
+|---|---|---|---|---|---|
+| #25 | medium | S | ✓ |  | In the shared isolate, an exception thrown in a setTimeout/setInterval callback (or any stray rejected promise) … |
+| #26 | medium | S | ✓ |  | On resume, a run whose last journaled llm_call ended in refusal/max_tokens/pause_turn (no client tool_use blocks… |
+| #27 | medium | S | ✓ |  | HEAD requests to API routes forward the raw "HEAD" method to the isolate, so any route exporting only GET throws… |
+| #28 | medium | S | ✓ |  | The RwLock read guard on worker_tx is held across the bounded-channel `send().await`, so a wedged JS worker (ful… |
+| #29 | medium | M | ✓ |  | The 30s REQUEST_TIMEOUT only abandons the reply channel and never terminates V8 execution, so a hung route handl… |
+| #30 | medium | M | ✓ |  | The dev hot-reloader rescans routes and swaps the isolate but never rebuilds the MCP tool registry or agents lis… |
+| #31 | medium | S | ✓ |  | URL path segments are matched and captured raw (no percent-decoding), so dynamic [param] routes receive encoded … |
+| #32 | medium | S | ✓ |  | On hot reload the old worker's WorkerMsg channel closes and worker_main breaks out of its loop immediately even … |
+| #33 | medium | M | ✓ |  | A client disconnecting mid-stream while the React render is stalled leaks the WorkerState stream/JS reader forev… |
+| #34 | medium | M | ✓ |  | When no streams are active, worker_main blocks on rx.recv().await and never polls the JsRuntime event loop, so f… |
+| #35 | medium | M | ✓ | 🔒 | The MCP /mcp tools/call handler invokes side-effecting tools via execute_with_context with no journal row, viola… |
+| #36 | low | S | ✓ | 🔒 | Python tool paths in registry.rs are joined onto agent_dir with only a cosmetic trim_start_matches("./") and no … |
+| #37 | medium | M | ✓ | 🔒 | Python tool execution has no timeout and is cancellation-unsafe: hung/cancelled calls leak or permanently hold t… |
+| #38 | medium | S | ✓ |  | The /mcp tools/call path reuses the caller's non-unique JSON-RPC request id as tool_use_id, which becomes the ou… |
+| #39 | medium | S | ✓ |  | execute_sandbox returns Ok(serialized result) without inspecting result.status, so sandbox Timeout/Error/Oom/Kil… |
+| #40 | medium | S | ✓ |  | The Anthropic client is built with reqwest::Client::new() (no timeout) and its create_message retry loop only re… |
+| #41 | medium | S | ✓ |  | In resume_async, a failed dangling-tool re-run or an unknown/removed tool name propagates via `?` instead of bei… |
+| #42 | medium | M | ✓ |  | Journal step-seq allocation is a non-atomic MAX(seq)+1 read followed by a separate INSERT, the SQLite connection… |
+| #43 | medium | M | ✓ |  | openapi_json emits a separate top-level path key per resource and per action, so operations sharing a path (e.g.… |
+| #44 | medium | S | ✓ |  | m2-live-gate.sh backgrounds a live `beater agent run` but installs no EXIT trap, so any `fail`/set -e exit betwe… |
+| #45 | medium | S | ✓ |  | sql_count() maps any sqlite3 error to 0, so the resume-safety assert_count_equals checks that expect 0 pass vacu… |
+| #46 | low | S | ✓ |  | beater-connect discovery documents (beater_manifest_json, agent_card_json, openapi_json) unconditionally adverti… |
+| #47 | low | S | ✓ |  | The module-level delayedByRequest map in the hello example only deletes an entry during the post-suspense re-ren… |
+| #48 | low | M | ✗ |  | Dev server has four confirmed HTTP-semantics defects: oversized bodies return 500 instead of 413, non-UTF-8 requ… |
+| #49 | low | S | ✓ |  | Two dev-server nits: the file-watcher keeper thread parks with a bare std::thread::park() (a spurious wakeup dro… |
+| #50 | low | M | ✓ |  | Three latent runtime correctness bugs: encodeInto over-reports `read`, stream-id uses saturating_add (id collisi… |
+| #51 | low | M | ✓ | 🔒 | Five confirmed MCP/crawl hardening defects: token-length timing leak in constant_time_eq, non-object JSON-RPC bo… |
+| #52 | medium | M | ✓ |  | Five confirmed agent-stack correctness defects: connect/DNS failures on non-idempotent remote MCP tools wrongly … |
+| #53 | low | M | ✓ |  | Six independent test/CI-hardening defects: fixed SSR-gate port with no liveness check, vendor.sh's leftover-impo… |
+| #56 | medium | M | ✓ |  | The npm-compat export resolver lacks wildcard (`./*`) subpath support and silently drops array-form export targe… |
+| #73 | medium | M | ✓ |  | A remote_mcp 2xx response with a malformed/id-mismatched JSON-RPC body is classified Fatal and returned as a ret… |
+| #74 | medium | M | ✓ | 🔒 | Three request/response correctness defects in beater-runtime: handler-supplied content-length is trusted verbati… |
+| #75 | medium | M | ✓ | 🔒 | Crawl/agent-discovery surfaces are inconsistent and leaky: API routes get published in sitemap.xml/llms.txt, def… |
+| #76 | medium | M | ✓ | 🔒 | SSR/RSC stream bodies use an unbounded mpsc channel while the ReadableStream controller reports a constant desir… |
+| #77 | medium | M | ✓ | 🔒 | Resource::public(false) is honored only by sitemap_xml; llms.txt, openapi.json, mcp catalog, agent-card, and res… |
+
+### The one disagreement — #48
+Both agents confirmed all four sub-defects. Triager rated **medium**; the independent
+reviewer argued **low** because the entire surface is the dev server (small real blast
+radius: no security, no crash, no persistent data loss; the binary-body and route-
+precedence items are self-revealing in dev). Resolution: **low-medium** — treat as low
+unless `beater` gains a production serve path, at which point 413/binary-body/`Allow`
+matter more.
+
+### Recommended relabels (from this pass)
+- **#25 high → medium**, **#26 high → medium** — applied (unanimous, high-confidence).
+- **#36** — keep `security`; severity is low *given* the trusted-`agent.ts` boundary.
+- **#48** — low (per reviewer's blast-radius argument).
+
+### Bottom line
+The backlog is 100% real and skews medium. The "fix now" set is unchanged in spirit but
+re-anchored: **#26 + #41 + #39 + #73** (the resume/tool "response ≠ success" durability
+family — the product thesis), **#25** (isolate blast radius), **#44 + #45** (paid-agent
+orphan / vacuous gate), then the 27 quick wins by subsystem.
