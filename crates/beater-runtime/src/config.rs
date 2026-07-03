@@ -156,7 +156,10 @@ fn resolve_public_base_url(
     env_base_url: Option<&str>,
     config_base_url: Option<&str>,
 ) -> Result<String> {
-    let raw = base_url_override.or(env_base_url).or(config_base_url);
+    let raw = base_url_override
+        .and_then(non_empty_str)
+        .or_else(|| env_base_url.and_then(non_empty_str))
+        .or(config_base_url);
     match raw {
         Some(value) => normalize_base_url(value),
         None => Ok(default_base_url(host, port)),
@@ -257,6 +260,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, "https://config.example");
+    }
+
+    #[test]
+    fn public_base_url_ignores_empty_override_and_env_values() {
+        let host = "127.0.0.1".parse().unwrap();
+
+        let resolved = resolve_public_base_url(
+            host,
+            3000,
+            Some(" "),
+            Some(""),
+            Some("https://config.example"),
+        )
+        .unwrap();
+        assert_eq!(resolved, "https://config.example");
+
+        let resolved = resolve_public_base_url(
+            host,
+            3000,
+            Some(""),
+            Some(" https://env.example/// "),
+            Some("https://config.example"),
+        )
+        .unwrap();
+        assert_eq!(resolved, "https://env.example");
+
+        let resolved = resolve_public_base_url(host, 3000, None, Some(" "), None).unwrap();
+        assert_eq!(resolved, "http://127.0.0.1:3000");
     }
 
     #[test]

@@ -362,7 +362,8 @@
   // API routes export per-method handlers (GET, POST, ...) or a default.
   globalThis.__beaterDispatch = async (specifier, method, request) => {
     const mod = await import(specifier);
-    const handler = mod[method] ?? mod.default;
+    const fallbackGet = method === "HEAD" ? mod.GET : undefined;
+    const handler = mod[method] ?? fallbackGet ?? mod.default;
     if (typeof handler !== "function") {
       throw new Error(
         `route module does not export a ${method} handler or default: ${specifier}`,

@@ -617,34 +617,14 @@ type PageRequest = {
   path: string;
 };
 
-type DelayRecord = {
-  ready: boolean;
-  promise: Promise<void>;
-};
+const DELAYED_SUBTREE_MS = 450;
 
-const delayedByRequest = new Map<string, DelayRecord>();
-
-function waitForDelayedSubtree(requestId: string) {
-  let record = delayedByRequest.get(requestId);
-  if (!record) {
-    record = {
-      ready: false,
-      promise: Promise.resolve(),
-    };
-    record.promise = new Promise((resolve) => {
-      setTimeout(() => {
-        record!.ready = true;
-        resolve();
-      }, 450);
-    });
-    delayedByRequest.set(requestId, record);
-  }
-  if (!record.ready) throw record.promise;
+function delay(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-function DelayedStreamingSubtree({ requestId }: { requestId: string }) {
-  waitForDelayedSubtree(requestId);
-  delayedByRequest.delete(requestId);
+async function DelayedStreamingSubtree() {
+  await delay(DELAYED_SUBTREE_MS);
   return (
     <p id="stream-delayed" data-stream-marker="delayed">
       Suspense-delayed subtree flushed after the shell.
@@ -695,7 +675,7 @@ export default function Home({ request }: { request: PageRequest }) {
                     </p>
                   }
                 >
-                  <DelayedStreamingSubtree requestId={request.id} />
+                  <DelayedStreamingSubtree />
                 </Suspense>
               </div>
 

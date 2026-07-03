@@ -422,17 +422,7 @@ async fn route_response_to_http(
     head: bool,
     route_resp: worker::RouteResponse,
 ) -> Result<Response<Body>> {
-    let uses_chunked_body = matches!(
-        &route_resp.body,
-        RouteBody::Chunks(_) | RouteBody::Stream { .. }
-    );
-    let mut builder = Response::builder().status(route_resp.status);
-    for (k, v) in &route_resp.headers {
-        if uses_chunked_body && k.eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        builder = builder.header(k, v);
-    }
+    let builder = route_response_builder(route_resp.status, &route_resp.headers, &route_resp.body);
     let body = match route_resp.body {
         RouteBody::Full(body) => {
             if head {
@@ -464,6 +454,28 @@ async fn route_response_to_http(
         }
     };
     Ok(builder.body(body)?)
+}
+
+fn route_response_builder(
+    status: u16,
+    headers: &HashMap<String, String>,
+    body: &RouteBody,
+) -> axum::http::response::Builder {
+    let full_body_len = match body {
+        RouteBody::Full(body) => Some(body.len()),
+        RouteBody::Chunks(_) | RouteBody::Stream { .. } => None,
+    };
+    let mut builder = Response::builder().status(status);
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        builder = builder.header(k, v);
+    }
+    if let Some(len) = full_body_len {
+        builder = builder.header("content-length", len.to_string());
+    }
+    builder
 }
 
 async fn rsc_flight_response(
@@ -643,14 +655,7 @@ fn route_response(route_resp: worker::RouteResponse) -> Result<Response<Body>, a
         headers,
         body,
     } = route_resp;
-    let uses_chunked_body = matches!(&body, RouteBody::Chunks(_) | RouteBody::Stream { .. });
-    let mut builder = Response::builder().status(status);
-    for (k, v) in &headers {
-        if uses_chunked_body && k.eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        builder = builder.header(k, v);
-    }
+    let builder = route_response_builder(status, &headers, &body);
     builder.body(route_body(body))
 }
 
@@ -992,9 +997,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_response_preserves_content_length_for_plain_body() {
+    async fn route_response_derives_content_length_for_plain_body() {
         let mut headers = HashMap::new();
-        headers.insert("content-length".to_string(), "10".to_string());
+        headers.insert("content-length".to_string(), "999".to_string());
 
         let response = route_response(worker::RouteResponse {
             status: 200,
@@ -1004,5 +1009,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.headers().get("content-length").unwrap(), "10");
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"plain body");
     }
 }

@@ -303,6 +303,7 @@ dependencies = [
  "tokio-stream",
  "toml",
  "tracing",
+ "uuid",
  "walkdir",
 ]
 

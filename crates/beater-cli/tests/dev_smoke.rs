@@ -53,6 +53,10 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
     assert!(health.contains("\"ok\":true"), "{health}");
     assert!(health.contains("\"runtime\":\"beater.js\""), "{health}");
 
+    let head_health = http_request(port, "HEAD", "/api/health", None).expect("HEAD /api/health");
+    assert!(head_health.starts_with("HTTP/1.1 200"), "{head_health}");
+    assert!(!head_health.contains("\"ok\":true"), "{head_health}");
+
     let home = http_request(port, "GET", "/", None).expect("GET /");
     assert!(home.starts_with("HTTP/1.1 200"), "{home}");
     assert!(home.contains("content-type: text/html"), "{home}");
