@@ -269,6 +269,9 @@ dependencies = [
 [[package]]
 name = "beater-connect"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "beater-py"
@@ -302,7 +305,9 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
+ "tower",
  "tracing",
+ "uuid",
  "walkdir",
 ]
 

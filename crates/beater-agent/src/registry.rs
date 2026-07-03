@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub const DEFAULT_BEATBOX_URL: &str = "http://127.0.0.1:7300";
+const DEFAULT_PYTHON_TIMEOUT_MS: u64 = 10_000;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct BeatboxConfig {
@@ -147,10 +148,18 @@ pub struct BrowserSessionDecl {
 }
 
 pub enum ToolImpl {
-    Python { path: PathBuf },
+    Python {
+        agent_dir: PathBuf,
+        path: PathBuf,
+        timeout: Duration,
+    },
     RustBuiltin,
-    RemoteMcp { config: RemoteMcpTool },
-    Browser { config: BrowserTool },
+    RemoteMcp {
+        config: RemoteMcpTool,
+    },
+    Browser {
+        config: BrowserTool,
+    },
     Sandbox(Box<SandboxTool>),
 }
 
@@ -213,11 +222,13 @@ impl ToolRegistry {
         for decl in decls {
             match decl.kind.as_str() {
                 "python" => {
+                    let timeout = python_timeout(decl)?;
                     let rel = decl
                         .path
                         .as_deref()
                         .with_context(|| format!("python tool {} has no path", decl.name))?;
-                    let path = agent_dir.join(rel.trim_start_matches("./"));
+                    let (agent_dir, path) = contained_agent_path(agent_dir, rel, "python tool")
+                        .with_context(|| format!("resolving python tool {}", decl.name))?;
                     let (description, input_schema) = beater_py::load_tool_spec(&path)
                         .with_context(|| format!("loading python tool {}", decl.name))?;
                     tools.push(ToolEntry {
@@ -225,7 +236,11 @@ impl ToolRegistry {
                         description,
                         input_schema,
                         idempotent: decl.idempotent,
-                        imp: ToolImpl::Python { path },
+                        imp: ToolImpl::Python {
+                            agent_dir,
+                            path,
+                            timeout,
+                        },
                     });
                 }
                 "rust" => {
@@ -363,8 +378,13 @@ impl ToolRegistry {
             .get(name)
             .with_context(|| format!("no tool named {name}"))?;
         match &tool.imp {
-            ToolImpl::Python { path } => {
-                beater_py::call_tool(path.clone(), input.to_string()).await
+            ToolImpl::Python {
+                agent_dir,
+                path,
+                timeout,
+            } => {
+                let path = canonical_contained_path(agent_dir, path, "python tool")?;
+                beater_py::call_tool_with_timeout(path.clone(), input.to_string(), *timeout).await
             }
             ToolImpl::RustBuiltin => execute_builtin(name, input),
             ToolImpl::RemoteMcp { config } => config.execute(input, context).await,
@@ -383,6 +403,16 @@ impl ToolRegistry {
             }
         }
     }
+}
+
+fn python_timeout(decl: &ToolDecl) -> Result<Duration> {
+    let timeout_ms = decl.timeout_ms.unwrap_or(DEFAULT_PYTHON_TIMEOUT_MS);
+    ensure!(
+        timeout_ms > 0,
+        "python tool {} timeoutMs must be greater than 0",
+        decl.name
+    );
+    Ok(Duration::from_millis(timeout_ms))
 }
 
 fn sandbox_source(agent_dir: &Path, decl: &ToolDecl) -> Result<beatbox_client::Source> {
@@ -420,20 +450,7 @@ fn sandbox_source(agent_dir: &Path, decl: &ToolDecl) -> Result<beatbox_client::S
 }
 
 fn sandbox_source_path(agent_dir: &Path, path: &str) -> Result<beatbox_client::Source> {
-    let path = agent_dir.join(path.trim_start_matches("./"));
-    let agent_dir = agent_dir
-        .canonicalize()
-        .with_context(|| format!("canonicalizing agent dir {}", agent_dir.display()))?;
-    let path = path
-        .canonicalize()
-        .with_context(|| format!("canonicalizing sandbox source {}", path.display()))?;
-    if !path.starts_with(&agent_dir) {
-        bail!(
-            "sandbox source {} escapes agent directory {}",
-            path.display(),
-            agent_dir.display()
-        );
-    }
+    let (_, path) = contained_agent_path(agent_dir, path, "sandbox source")?;
     let bytes = std::fs::read(&path)
         .with_context(|| format!("reading sandbox source {}", path.display()))?;
     if path.extension().and_then(|ext| ext.to_str()) == Some("wat") {
@@ -445,6 +462,29 @@ fn sandbox_source_path(agent_dir: &Path, path: &str) -> Result<beatbox_client::S
             bytes: base64::engine::general_purpose::STANDARD.encode(bytes),
         })
     }
+}
+
+fn contained_agent_path(agent_dir: &Path, path: &str, label: &str) -> Result<(PathBuf, PathBuf)> {
+    let path = agent_dir.join(path.trim_start_matches("./"));
+    let agent_dir = agent_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalizing agent dir {}", agent_dir.display()))?;
+    let path = canonical_contained_path(&agent_dir, &path, label)?;
+    Ok((agent_dir, path))
+}
+
+fn canonical_contained_path(agent_dir: &Path, path: &Path, label: &str) -> Result<PathBuf> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {label} {}", path.display()))?;
+    if !path.starts_with(agent_dir) {
+        bail!(
+            "{label} {} escapes agent directory {}",
+            path.display(),
+            agent_dir.display()
+        );
+    }
+    Ok(path)
 }
 
 fn sandbox_policy(value: Option<&Value>) -> Result<beatbox_client::Policy> {
@@ -575,7 +615,15 @@ async fn execute_sandbox(
     } else {
         client.execute(&request).await?
     };
-    Ok(serde_json::to_string(&result)?)
+    sandbox_result_content(&result)
+}
+
+fn sandbox_result_content(result: &beatbox_client::ExecutionResult) -> Result<String> {
+    let content = serde_json::to_string(result)?;
+    if result.status != beatbox_client::ExecutionStatus::Ok {
+        bail!("sandbox execution returned {:?}: {content}", result.status);
+    }
+    Ok(content)
 }
 
 async fn execute_sandbox_job(
@@ -677,6 +725,7 @@ enum IdempotencyKeySource {
 enum RemoteAttempt {
     Retryable(anyhow::Error),
     ProviderFailure(anyhow::Error),
+    AmbiguousSuccess(anyhow::Error),
     Fatal(anyhow::Error),
 }
 
@@ -982,9 +1031,13 @@ impl RemoteMcpTool {
                 {
                     return Err(ToolNeedsReview::remote_ambiguous(&self.remote_tool, error).into());
                 }
+                Err(RemoteAttempt::AmbiguousSuccess(error)) if !self.idempotent => {
+                    return Err(ToolNeedsReview::remote_ambiguous(&self.remote_tool, error).into());
+                }
                 Err(
                     RemoteAttempt::Retryable(error)
                     | RemoteAttempt::ProviderFailure(error)
+                    | RemoteAttempt::AmbiguousSuccess(error)
                     | RemoteAttempt::Fatal(error),
                 ) => {
                     return Err(error);
@@ -1018,10 +1071,14 @@ impl RemoteMcpTool {
     }
 
     fn idempotency_key(&self, context: &ToolCallContext) -> Option<String> {
-        match self.retry.idempotency_key {
-            Some(IdempotencyKeySource::ToolUseId) => context.tool_use_id.clone(),
-            None => None,
-        }
+        context.idempotency_key.clone().or_else(|| {
+            self.retry
+                .idempotency_key
+                .as_ref()
+                .and_then(|source| match source {
+                    IdempotencyKeySource::ToolUseId => context.tool_use_id.clone(),
+                })
+        })
     }
 
     async fn send_once(
@@ -1083,20 +1140,20 @@ impl RemoteMcpTool {
             )));
         }
         let message: Value = serde_json::from_str(&text).map_err(|error| {
-            RemoteAttempt::Fatal(anyhow!(
+            RemoteAttempt::AmbiguousSuccess(anyhow!(
                 "remote MCP tool {} returned invalid JSON: {error}: {text}",
                 self.remote_tool
             ))
         })?;
         if message["jsonrpc"] != "2.0" {
-            return Err(RemoteAttempt::Fatal(anyhow!(
+            return Err(RemoteAttempt::AmbiguousSuccess(anyhow!(
                 "remote MCP tool {} response has invalid jsonrpc version: {}",
                 self.remote_tool,
                 message["jsonrpc"]
             )));
         }
         if message["id"] != id {
-            return Err(RemoteAttempt::Fatal(anyhow!(
+            return Err(RemoteAttempt::AmbiguousSuccess(anyhow!(
                 "remote MCP tool {} response id {} did not match request id {id:?}",
                 self.remote_tool,
                 message["id"]
@@ -1109,7 +1166,7 @@ impl RemoteMcpTool {
             )));
         }
         let result = message.get("result").ok_or_else(|| {
-            RemoteAttempt::Fatal(anyhow!(
+            RemoteAttempt::AmbiguousSuccess(anyhow!(
                 "remote MCP tool {} response has no result",
                 self.remote_tool
             ))
@@ -1121,7 +1178,7 @@ impl RemoteMcpTool {
                 mcp_content_text(result)
             )));
         }
-        mcp_result_to_string(result).map_err(RemoteAttempt::Fatal)
+        mcp_result_to_string(result).map_err(RemoteAttempt::AmbiguousSuccess)
     }
 }
 
@@ -1303,9 +1360,10 @@ fn execute_builtin(name: &str, _input: &Value) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1313,7 +1371,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        BrowserSessionGuard, ToolCallContext, ToolDecl, ToolNeedsReview, ToolRegistry,
+        BrowserSessionGuard, ToolCallContext, ToolDecl, ToolImpl, ToolNeedsReview, ToolRegistry,
         browser_session_active_for_tests, browser_session_count_for_tests,
     };
 
@@ -1350,6 +1408,108 @@ mod tests {
             once.description
                 .contains("explicitly asks for slow_summarize_once by name")
         );
+    }
+
+    #[test]
+    fn python_tool_rejects_paths_outside_agent_dir_before_loading() {
+        let fixture = TempAgentDir::new("python-containment-build");
+        let sentinel = fixture.path.join("outside-loaded.txt");
+        let outside = fixture.write_outside_tool("outside.py", &sentinel);
+
+        for path in [
+            "../../outside.py".to_string(),
+            outside.to_string_lossy().into_owned(),
+        ] {
+            let error = match ToolRegistry::build(
+                fixture.agent_dir.as_path(),
+                &[py_decl("escape", &path, true)],
+            ) {
+                Ok(_) => panic!("escaping python tool path should fail: {path}"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("escapes agent directory"),
+                "{error:#}"
+            );
+            assert!(
+                !sentinel.exists(),
+                "escaping python tool should not execute module-level code"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn python_tool_rechecks_containment_before_execute() {
+        let fixture = TempAgentDir::new("python-containment-execute");
+        let tool = fixture.write_agent_tool(
+            "tools/echo.py",
+            r#"
+TOOL = {
+    "description": "Echo.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    },
+}
+
+def run(input):
+    return {"echo": input["value"]}
+"#,
+        );
+        let sentinel = fixture.path.join("outside-executed.txt");
+        let outside = fixture.write_outside_tool("outside.py", &sentinel);
+        let registry = ToolRegistry::build(
+            fixture.agent_dir.as_path(),
+            &[py_decl("echo", "./tools/echo.py", true)],
+        )
+        .expect("contained python tool should build");
+
+        fs::remove_file(&tool).unwrap();
+        std::os::unix::fs::symlink(&outside, &tool).unwrap();
+        let error = registry
+            .execute("echo", &json!({"value": "ok"}))
+            .await
+            .expect_err("python tool symlink escape should fail before execution");
+
+        assert!(
+            format!("{error:#}").contains("escapes agent directory"),
+            "{error:#}"
+        );
+        assert!(
+            !sentinel.exists(),
+            "escaping python tool should not execute after symlink replacement"
+        );
+    }
+
+    #[test]
+    fn python_tool_timeout_ms_is_configured() {
+        let agent_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/hello/agents/support");
+        let mut decl = py_decl("slow_summarize", "./tools/slow_summarize.py", true);
+        decl.timeout_ms = Some(1234);
+        let registry =
+            ToolRegistry::build(&agent_dir, &[decl]).expect("python registry should build");
+        let slow = registry.get("slow_summarize").expect("slow_summarize");
+        match &slow.imp {
+            ToolImpl::Python { timeout, .. } => {
+                assert_eq!(*timeout, Duration::from_millis(1234));
+            }
+            _ => panic!("slow_summarize should be a python tool"),
+        }
+    }
+
+    #[test]
+    fn python_tool_timeout_ms_rejects_zero() {
+        let mut decl = py_decl("sleep", "./tools/missing.py", true);
+        decl.timeout_ms = Some(0);
+        let error = match ToolRegistry::build(PathBuf::new().as_path(), &[decl]) {
+            Ok(_) => panic!("zero python timeout should fail"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("timeoutMs"), "{error:#}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1709,6 +1869,88 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn remote_mcp_non_idempotent_malformed_success_needs_review() {
+        for response in [
+            MockResponse::text("200 OK", "{not json"),
+            MockResponse::json(
+                "200 OK",
+                json!({
+                    "jsonrpc": "1.0",
+                    "id": "toolu_malformed",
+                    "result": {
+                        "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                        "isError": false
+                    }
+                }),
+            ),
+            MockResponse::json(
+                "200 OK",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "wrong-id",
+                    "result": {
+                        "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                        "isError": false
+                    }
+                }),
+            ),
+            MockResponse::json("200 OK", json!({"jsonrpc": "2.0", "id": "toolu_malformed"})),
+        ] {
+            let server = MockMcp::new(vec![response]);
+            let registry = ToolRegistry::build(
+                PathBuf::new().as_path(),
+                &[remote_decl(&server.endpoint, None, None, false)],
+            )
+            .expect("remote MCP registry should build");
+
+            let error = registry
+                .execute_with_context(
+                    "crm.lookup",
+                    &json!({"email": "a@example.com"}),
+                    &ToolCallContext {
+                        tool_use_id: Some("toolu_malformed".to_string()),
+                        ..ToolCallContext::default()
+                    },
+                )
+                .await
+                .expect_err("malformed HTTP 200 should need review for non-idempotent tools");
+            assert!(
+                error.downcast_ref::<ToolNeedsReview>().is_some(),
+                "{error:#}"
+            );
+            assert_eq!(server.requests().len(), 1);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_mcp_fatal_client_errors_do_not_need_review() {
+        let server = MockMcp::new(vec![MockResponse::text("400 Bad Request", "{not json")]);
+        let registry = ToolRegistry::build(
+            PathBuf::new().as_path(),
+            &[remote_decl(&server.endpoint, None, None, false)],
+        )
+        .expect("remote MCP registry should build");
+
+        let error = registry
+            .execute_with_context(
+                "crm.lookup",
+                &json!({"email": "a@example.com"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_bad_request".to_string()),
+                    ..ToolCallContext::default()
+                },
+            )
+            .await
+            .expect_err("HTTP 400 should remain fatal");
+        assert!(
+            error.downcast_ref::<ToolNeedsReview>().is_none(),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains("HTTP 400"), "{error:#}");
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn remote_mcp_retries_server_errors_with_tool_use_id() {
         let server = MockMcp::new(vec![
             MockResponse::json(
@@ -1769,6 +2011,94 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn remote_mcp_sends_journaled_idempotency_key_for_idempotent_tools() {
+        let server = MockMcp::new(vec![MockResponse::json(
+            "200 OK",
+            json!({
+                "jsonrpc": "2.0",
+                "id": "toolu_journaled",
+                "result": {
+                    "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                    "isError": false
+                }
+            }),
+        )]);
+        let registry = ToolRegistry::build(
+            PathBuf::new().as_path(),
+            &[remote_decl(&server.endpoint, None, None, true)],
+        )
+        .expect("remote MCP registry should build");
+
+        registry
+            .execute_with_context(
+                "crm.lookup",
+                &json!({"email": "a@example.com"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_journaled".to_string()),
+                    idempotency_key: Some("beater:run-1:tool:toolu_journaled".to_string()),
+                },
+            )
+            .await
+            .expect("idempotent remote MCP call should succeed");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        let headers = requests[0].headers.to_ascii_lowercase();
+        assert!(
+            headers.contains("idempotency-key: beater:run-1:tool:toolu_journaled"),
+            "{}",
+            requests[0].headers
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_mcp_prefers_journaled_idempotency_key_over_tool_use_id_header() {
+        let server = MockMcp::new(vec![MockResponse::json(
+            "200 OK",
+            json!({
+                "jsonrpc": "2.0",
+                "id": "toolu_raw",
+                "result": {
+                    "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                    "isError": false
+                }
+            }),
+        )]);
+        let mut decl = remote_decl(&server.endpoint, None, None, true);
+        decl.retry = Some(
+            serde_json::from_value(json!({
+                "attempts": 1,
+                "idempotencyKey": "tool_use_id"
+            }))
+            .unwrap(),
+        );
+        let registry = ToolRegistry::build(PathBuf::new().as_path(), &[decl])
+            .expect("remote MCP registry should build");
+
+        registry
+            .execute_with_context(
+                "crm.lookup",
+                &json!({"email": "a@example.com"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_raw".to_string()),
+                    idempotency_key: Some("beater:run-1:tool:toolu_raw".to_string()),
+                },
+            )
+            .await
+            .expect("idempotent remote MCP call should succeed");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        let headers = requests[0].headers.to_ascii_lowercase();
+        assert!(
+            headers.contains("idempotency-key: beater:run-1:tool:toolu_raw"),
+            "{}",
+            requests[0].headers
+        );
+        assert!(!headers.contains("idempotency-key: toolu_raw"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn remote_mcp_rejects_mismatched_jsonrpc_id() {
         let server = MockMcp::new(vec![MockResponse::json(
             "200 OK",
@@ -1802,6 +2132,81 @@ mod tests {
             format!("{error:#}").contains("did not match request id"),
             "{error:#}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sandbox_non_ok_execute_result_fails_closed() {
+        let server = MockMcp::new(vec![MockResponse::json(
+            "200 OK",
+            execution_result_json("denied", Some(("policy_denied", "network blocked"))),
+        )]);
+        let registry = ToolRegistry::build_with_beatbox(
+            PathBuf::new().as_path(),
+            &[sandbox_decl(false)],
+            &super::BeatboxConfig {
+                url: server.endpoint.clone(),
+                api_key: None,
+            },
+        )
+        .expect("sandbox registry should build");
+
+        let error = registry
+            .execute("fib_wasm", &json!({"n": 10}))
+            .await
+            .expect_err("sandbox denied result should fail");
+        let text = format!("{error:#}");
+        assert!(text.contains("sandbox execution returned Denied"), "{text}");
+        assert!(text.contains("\"status\":\"denied\""), "{text}");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.starts_with("POST /mcp/v1/execute "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sandbox_non_ok_job_result_fails_closed() {
+        let server = MockMcp::new(vec![
+            MockResponse::json("202 Accepted", json!({"job_id": "job-1"})),
+            MockResponse::json(
+                "200 OK",
+                job_record_json(
+                    "job-1",
+                    execution_result_json("timeout", Some(("wall_timeout", "wall time exceeded"))),
+                ),
+            ),
+        ]);
+        let registry = ToolRegistry::build_with_beatbox(
+            PathBuf::new().as_path(),
+            &[sandbox_decl(true)],
+            &super::BeatboxConfig {
+                url: server.endpoint.clone(),
+                api_key: None,
+            },
+        )
+        .expect("sandbox registry should build");
+
+        let error = registry
+            .execute_with_context(
+                "fib_wasm",
+                &json!({"n": 10}),
+                &ToolCallContext {
+                    idempotency_key: Some("beater:run-1:tool:toolu_1".to_string()),
+                    ..ToolCallContext::default()
+                },
+            )
+            .await
+            .expect_err("sandbox timeout job result should fail");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("sandbox execution returned Timeout"),
+            "{text}"
+        );
+        assert!(text.contains("\"status\":\"timeout\""), "{text}");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].headers.starts_with("POST /mcp/v1/jobs "));
+        assert!(requests[1].headers.starts_with("GET /mcp/v1/jobs/job-1 "));
     }
 
     fn py_decl(name: &str, path: &str, idempotent: bool) -> ToolDecl {
@@ -1847,6 +2252,22 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    fn sandbox_decl(idempotent: bool) -> ToolDecl {
+        serde_json::from_value(json!({
+            "kind": "sandbox",
+            "name": "fib_wasm",
+            "source": {"kind": "wasm_wat", "text": "(module)"},
+            "idempotent": idempotent,
+            "description": "Run fib in beatbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"n": {"type": "integer"}},
+                "required": ["n"]
+            }
+        }))
+        .unwrap()
+    }
+
     fn browser_decl() -> ToolDecl {
         serde_json::from_value(json!({
             "kind": "browser",
@@ -1869,12 +2290,122 @@ mod tests {
         .unwrap()
     }
 
+    fn execution_result_json(status: &str, error: Option<(&str, &str)>) -> Value {
+        json!({
+            "status": status,
+            "value": if status == "ok" { json!(55) } else { Value::Null },
+            "exit_code": null,
+            "stdout": "",
+            "stdout_truncated": false,
+            "stderr": "",
+            "stderr_truncated": false,
+            "error": error.map(|(code, message)| json!({"code": code, "message": message})),
+            "metrics": {
+                "wall_time_ms": 1,
+                "cpu_time_ms": 1,
+                "fuel_used": 42,
+                "peak_memory_bytes": null
+            },
+            "lane": "wasm",
+            "deterministic": true,
+            "inputs_digest": "sha256:test",
+            "engine_version": "test",
+            "beatbox_version": "test",
+            "effective_isolation": {
+                "os": "test",
+                "mechanisms": ["wasmtime", "empty-linker"],
+                "landlock_abi": null,
+                "downgrades": []
+            },
+            "egress": []
+        })
+    }
+
+    fn job_record_json(job_id: &str, result: Value) -> Value {
+        json!({
+            "job_id": job_id,
+            "status": "succeeded",
+            "request": {
+                "lane": "wasm",
+                "source": {"kind": "wasm_wat", "text": "(module)"},
+                "entrypoint": null,
+                "input": {"n": 10},
+                "stdin": "",
+                "policy": {},
+                "idempotency_key": "beater:run-1:tool:toolu_1"
+            },
+            "result": result,
+            "error": null,
+            "created_at": "2026-07-02T00:00:00Z",
+            "updated_at": "2026-07-02T00:00:00Z"
+        })
+    }
+
     fn unique_env(prefix: &str) -> String {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         format!("{prefix}_{}_{}", std::process::id(), nanos)
+    }
+
+    struct TempAgentDir {
+        path: PathBuf,
+        agent_dir: PathBuf,
+    }
+
+    impl TempAgentDir {
+        fn new(label: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "beater-registry-{label}-{}-{nanos}",
+                std::process::id()
+            ));
+            let agent_dir = path.join("agents/support");
+            fs::create_dir_all(agent_dir.join("tools")).unwrap();
+            Self { path, agent_dir }
+        }
+
+        fn write_agent_tool(&self, relative_path: &str, contents: &str) -> PathBuf {
+            let path = self.agent_dir.join(relative_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, contents).unwrap();
+            path
+        }
+
+        fn write_outside_tool(&self, relative_path: &str, sentinel: &Path) -> PathBuf {
+            let path = self.path.join(relative_path);
+            fs::write(
+                &path,
+                format!(
+                    r#"
+from pathlib import Path
+Path({:?}).write_text("loaded")
+TOOL = {{
+    "description": "Evil.",
+    "input_schema": {{"type": "object"}},
+}}
+
+def run(input):
+    Path({:?}).write_text("executed")
+    return {{"evil": True}}
+"#,
+                    sentinel.to_string_lossy().as_ref(),
+                    sentinel.to_string_lossy().as_ref(),
+                ),
+            )
+            .unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempAgentDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 
     #[derive(Clone)]
@@ -1892,6 +2423,15 @@ mod tests {
 
     impl MockResponse {
         fn json(status: &'static str, body: Value) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+                delay: Duration::ZERO,
+                headers: Vec::new(),
+            }
+        }
+
+        fn text(status: &'static str, body: &str) -> Self {
             Self {
                 status,
                 body: body.to_string(),

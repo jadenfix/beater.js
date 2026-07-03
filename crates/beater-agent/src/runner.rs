@@ -21,6 +21,11 @@ struct Ctx {
     run_id: String,
 }
 
+pub struct JournaledToolCall {
+    pub seq: i64,
+    pub context: ToolCallContext,
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -136,75 +141,119 @@ async fn resume_async(
                 .context("journaled llm_call request has no messages")?
                 .clone();
             messages.push(json!({"role": "assistant", "content": content}));
+            let stop_reason = response["stop_reason"].as_str().unwrap_or_default();
 
-            let tool_uses: Vec<Value> = content
-                .as_array()
-                .map(|blocks| {
-                    blocks
-                        .iter()
-                        .filter(|b| b["type"] == "tool_use")
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-            if tool_uses.is_empty() {
+            if stop_reason == "end_turn" {
                 // The last response needed no tools; the run actually finished.
                 ctx.journal.set_run_status(run_id, "completed")?;
                 println!("run {run_id} was already finished — marked completed");
                 return Ok(());
             }
-
-            // Fill in tool results: journaled ones verbatim; dangling ones
-            // re-run ONLY if the tool is declared idempotent (§5 rule 4).
-            let mut tool_results = Vec::new();
-            for tu in &tool_uses {
-                let (id, name) = (
-                    tu["id"].as_str().unwrap_or_default(),
-                    tu["name"].as_str().unwrap_or_default(),
+            if stop_reason == "pause_turn" {
+                // Server-side pause: assistant turn is already appended; ask
+                // the model to continue from exactly the journaled state.
+                messages
+            } else if stop_reason != "tool_use" {
+                ctx.journal.set_run_status(run_id, "failed")?;
+                if stop_reason == "refusal" {
+                    bail!(
+                        "run {run_id} failed before resume: model refused: {}",
+                        response["stop_details"]
+                    );
+                }
+                bail!(
+                    "run {run_id} failed before resume: unexpected stop_reason {stop_reason:?} — raise max_tokens or inspect the journal"
                 );
-                let done = steps.iter().find(|s| {
-                    s.kind == "tool_call"
-                        && s.status == "completed"
-                        && s.tool_use_id.as_deref() == Some(id)
-                });
-                let content = match done {
-                    Some(s) => s
-                        .result
-                        .as_ref()
-                        .and_then(|r| r["content"].as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    None => {
-                        let tool = ctx
-                            .registry
-                            .get(name)
-                            .with_context(|| format!("no tool {name}"))?;
-                        if !tool.idempotent {
-                            ctx.journal.set_run_status(run_id, "needs_review")?;
-                            println!(
-                                "run {run_id} needs review: tool {name} ({id}) may have executed \
-                                 before the crash and is not declared idempotent — not re-running"
-                            );
-                            return Ok(());
-                        }
-                        let prior_attempts = steps
+            } else {
+                let tool_uses: Vec<Value> = content
+                    .as_array()
+                    .map(|blocks| {
+                        blocks
                             .iter()
-                            .filter(|s| s.tool_use_id.as_deref() == Some(id))
-                            .map(|s| s.attempt)
-                            .max()
-                            .unwrap_or(0);
-                        println!(
-                            "resuming: re-running interrupted tool {name} (attempt {})",
-                            prior_attempts + 1
-                        );
-                        execute_tool_step(ctx, name, id, &tu["input"], prior_attempts + 1).await?
-                    }
-                };
-                tool_results
-                    .push(json!({"type": "tool_result", "tool_use_id": id, "content": content}));
+                            .filter(|b| b["type"] == "tool_use")
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if tool_uses.is_empty() {
+                    ctx.journal.set_run_status(run_id, "failed")?;
+                    bail!(
+                        "run {run_id} failed before resume: stop_reason \"tool_use\" had no tool_use blocks"
+                    );
+                }
+
+                // Fill in tool results: journaled ones verbatim; dangling ones
+                // re-run ONLY if the tool is declared idempotent (§5 rule 4).
+                let mut tool_results = Vec::new();
+                for tu in &tool_uses {
+                    let (id, name) = (
+                        tu["id"].as_str().unwrap_or_default(),
+                        tu["name"].as_str().unwrap_or_default(),
+                    );
+                    let done = steps.iter().find(|s| {
+                        s.kind == "tool_call"
+                            && s.status == "completed"
+                            && s.tool_use_id.as_deref() == Some(id)
+                    });
+                    let tool_result = match done {
+                        Some(s) => {
+                            let content = s
+                                .result
+                                .as_ref()
+                                .and_then(|r| r["content"].as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            json!({"type": "tool_result", "tool_use_id": id, "content": content})
+                        }
+                        None => {
+                            if let Some(tool) = ctx.registry.get(name)
+                                && !tool.idempotent
+                            {
+                                ctx.journal.set_run_status(run_id, "needs_review")?;
+                                println!(
+                                    "run {run_id} needs review: tool {name} ({id}) may have executed \
+                                     before the crash and is not declared idempotent — not re-running"
+                                );
+                                return Ok(());
+                            }
+                            let prior_attempts = steps
+                                .iter()
+                                .filter(|s| s.tool_use_id.as_deref() == Some(id))
+                                .map(|s| s.attempt)
+                                .max()
+                                .unwrap_or(0);
+                            println!(
+                                "resuming: re-running interrupted tool {name} (attempt {})",
+                                prior_attempts + 1
+                            );
+                            match execute_tool_step(ctx, name, id, &tu["input"], prior_attempts + 1)
+                                .await
+                            {
+                                Ok(content) => {
+                                    json!({"type": "tool_result", "tool_use_id": id, "content": content})
+                                }
+                                Err(e) if e.downcast_ref::<ToolNeedsReview>().is_some() => {
+                                    println!("← needs review: {e:#}");
+                                    ctx.journal.set_run_status(run_id, "needs_review")?;
+                                    return Ok(());
+                                }
+                                Err(e) => {
+                                    println!("← tool error: {e:#}");
+                                    json!({
+                                        "type": "tool_result",
+                                        "tool_use_id": id,
+                                        "content": format!("Error: {e:#}"),
+                                        "is_error": true,
+                                    })
+                                }
+                            }
+                        }
+                    };
+                    tool_results.push(tool_result);
+                }
+                messages.push(json!({"role": "user", "content": tool_results}));
+                messages
             }
-            messages.push(json!({"role": "user", "content": tool_results}));
-            messages
         }
     };
 
@@ -320,14 +369,15 @@ async fn agent_loop(ctx: &Ctx, mut messages: Vec<Value>) -> Result<()> {
 }
 
 /// Journal-wrapped tool execution: started row committed before the tool runs.
-async fn execute_tool_step(
-    ctx: &Ctx,
+pub fn start_journaled_tool_call(
+    journal: &Journal,
+    run_id: &str,
     name: &str,
     tool_use_id: &str,
     input: &Value,
     attempt: i64,
-) -> Result<String> {
-    let idempotency_key = tool_idempotency_key(&ctx.run_id, tool_use_id);
+    idempotency_key: Option<String>,
+) -> Result<JournaledToolCall> {
     let request = match &idempotency_key {
         Some(key) => json!({
             "name": name,
@@ -337,30 +387,69 @@ async fn execute_tool_step(
         }),
         None => json!({"name": name, "input": input, "tool_use_id": tool_use_id}),
     };
-    let seq = ctx.journal.start_step(
-        &ctx.run_id,
+    let seq = journal.start_step(
+        run_id,
         "tool_call",
         &request,
         Some(name),
         Some(tool_use_id),
         attempt,
     )?;
-    let tool_context = ToolCallContext {
-        tool_use_id: Some(tool_use_id.to_string()),
+    Ok(JournaledToolCall {
+        seq,
+        context: ToolCallContext {
+            tool_use_id: Some(tool_use_id.to_string()),
+            idempotency_key,
+        },
+    })
+}
+
+pub fn complete_journaled_tool_call(
+    journal: &Journal,
+    run_id: &str,
+    seq: i64,
+    result: &str,
+) -> Result<()> {
+    journal.complete_step(run_id, seq, &json!({"content": result}))
+}
+
+pub fn fail_journaled_tool_call(
+    journal: &Journal,
+    run_id: &str,
+    seq: i64,
+    error: &str,
+) -> Result<()> {
+    journal.fail_step(run_id, seq, error)
+}
+
+async fn execute_tool_step(
+    ctx: &Ctx,
+    name: &str,
+    tool_use_id: &str,
+    input: &Value,
+    attempt: i64,
+) -> Result<String> {
+    let idempotency_key = tool_idempotency_key(&ctx.run_id, tool_use_id);
+    let call = start_journaled_tool_call(
+        &ctx.journal,
+        &ctx.run_id,
+        name,
+        tool_use_id,
+        input,
+        attempt,
         idempotency_key,
-    };
+    )?;
     match ctx
         .registry
-        .execute_with_context(name, input, &tool_context)
+        .execute_with_context(name, input, &call.context)
         .await
     {
         Ok(result) => {
-            ctx.journal
-                .complete_step(&ctx.run_id, seq, &json!({"content": result}))?;
+            complete_journaled_tool_call(&ctx.journal, &ctx.run_id, call.seq, &result)?;
             Ok(result)
         }
         Err(e) => {
-            ctx.journal.fail_step(&ctx.run_id, seq, &format!("{e:#}"))?;
+            fail_journaled_tool_call(&ctx.journal, &ctx.run_id, call.seq, &format!("{e:#}"))?;
             Err(e)
         }
     }
@@ -725,6 +814,30 @@ def run(input):
             .unwrap();
     }
 
+    fn seed_completed_llm_run(app: &TempApp, status: &str, response: Value) {
+        let journal = Journal::open(app.path()).unwrap();
+        journal
+            .create_run("run-1", "support", "continue previous response")
+            .unwrap();
+        let llm = journal
+            .start_step(
+                "run-1",
+                "llm_call",
+                &json!({
+                    "messages": [{
+                        "role": "user",
+                        "content": "continue previous response",
+                    }],
+                }),
+                None,
+                None,
+                1,
+            )
+            .unwrap();
+        journal.complete_step("run-1", llm, &response).unwrap();
+        journal.set_run_status("run-1", status).unwrap();
+    }
+
     fn execution_result_json(value: i64) -> Value {
         json!({
             "status": "ok",
@@ -823,6 +936,97 @@ def run(input):
     }
 
     #[test]
+    fn resume_turns_failed_idempotent_tool_rerun_into_error_result() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("idempotent-error");
+        seed_interrupted_tool_run_for(&app, "echo", json!({"missing": "value"}));
+        let server = MockAnthropic::new(vec![json!({
+            "content": [{"type": "text", "text": "handled tool error"}],
+            "stop_reason": "end_turn",
+        })]);
+        let _env = EnvGuard::set(&server.base_url);
+
+        resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(config(true))
+        })
+        .unwrap();
+        let requests = server.join();
+
+        assert_eq!(requests.len(), 1);
+        let body: Value = serde_json::from_str(&requests[0]).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let tool_result = &messages.last().unwrap()["content"][0];
+        assert_eq!(tool_result["tool_use_id"], "toolu_1");
+        assert_eq!(tool_result["is_error"], true);
+        assert!(
+            tool_result["content"].as_str().unwrap().contains("Error:"),
+            "{tool_result}"
+        );
+
+        let journal = Journal::open(app.path()).unwrap();
+        assert_eq!(journal.run("run-1").unwrap().status, "completed");
+        let tool_steps: Vec<_> = journal
+            .steps("run-1")
+            .unwrap()
+            .into_iter()
+            .filter(|step| {
+                step.kind == "tool_call" && step.tool_use_id.as_deref() == Some("toolu_1")
+            })
+            .collect();
+        assert_eq!(tool_steps.len(), 2);
+        assert_eq!(tool_steps[0].status, "started");
+        assert_eq!(tool_steps[1].status, "failed");
+        assert_eq!(tool_steps[1].attempt, 2);
+    }
+
+    #[test]
+    fn resume_turns_removed_tool_rerun_into_error_result() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("removed-tool");
+        seed_interrupted_tool_run_for(&app, "old.echo", json!({"value": "ok"}));
+        let server = MockAnthropic::new(vec![json!({
+            "content": [{"type": "text", "text": "handled missing tool"}],
+            "stop_reason": "end_turn",
+        })]);
+        let _env = EnvGuard::set(&server.base_url);
+
+        resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(config(true))
+        })
+        .unwrap();
+        let requests = server.join();
+
+        assert_eq!(requests.len(), 1);
+        let body: Value = serde_json::from_str(&requests[0]).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let tool_result = &messages.last().unwrap()["content"][0];
+        assert_eq!(tool_result["tool_use_id"], "toolu_1");
+        assert_eq!(tool_result["is_error"], true);
+        assert!(
+            tool_result["content"]
+                .as_str()
+                .unwrap()
+                .contains("no tool named old.echo"),
+            "{tool_result}"
+        );
+
+        let journal = Journal::open(app.path()).unwrap();
+        assert_eq!(journal.run("run-1").unwrap().status, "completed");
+        let tool_steps: Vec<_> = journal
+            .steps("run-1")
+            .unwrap()
+            .into_iter()
+            .filter(|step| step.kind == "tool_call")
+            .collect();
+        assert_eq!(tool_steps.len(), 2);
+        assert_eq!(tool_steps[0].tool_name.as_deref(), Some("old.echo"));
+        assert_eq!(tool_steps[0].status, "started");
+        assert_eq!(tool_steps[1].tool_name.as_deref(), Some("old.echo"));
+        assert_eq!(tool_steps[1].status, "failed");
+        assert_eq!(tool_steps[1].attempt, 2);
+    }
+
+    #[test]
     fn run_completes_browser_tool_through_agent_loop() {
         let _env_lock = ENV_LOCK.lock().unwrap();
         let app = TempApp::new("browser-tool");
@@ -905,6 +1109,145 @@ def run(input):
         assert_eq!(tool_steps.len(), 1);
         assert_eq!(tool_steps[0].status, "started");
         assert_eq!(tool_steps[0].attempt, 1);
+    }
+
+    #[test]
+    fn resume_preserves_failed_refusal_instead_of_marking_completed() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("refusal-stop");
+        seed_completed_llm_run(
+            &app,
+            "failed",
+            json!({
+                "content": [{"type": "text", "text": "I can't help with that."}],
+                "stop_reason": "refusal",
+                "stop_details": {"reason": "safety"},
+            }),
+        );
+        let _env = EnvGuard::set("http://127.0.0.1:9");
+
+        let err = resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(config(true))
+        })
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("model refused"));
+        let journal = Journal::open(app.path()).unwrap();
+        assert_eq!(journal.run("run-1").unwrap().status, "failed");
+        assert_eq!(journal.steps("run-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resume_marks_running_max_tokens_failed_and_does_not_run_truncated_tools() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("max-tokens-stop");
+        seed_completed_llm_run(
+            &app,
+            "running",
+            json!({
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_truncated",
+                    "name": "echo",
+                    "input": {"value": "possibly truncated"},
+                }],
+                "stop_reason": "max_tokens",
+            }),
+        );
+        let _env = EnvGuard::set("http://127.0.0.1:9");
+
+        let err = resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(config(true))
+        })
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("unexpected stop_reason \"max_tokens\""));
+        let journal = Journal::open(app.path()).unwrap();
+        assert_eq!(journal.run("run-1").unwrap().status, "failed");
+        let steps = journal.steps("run-1").unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].kind, "llm_call");
+    }
+
+    #[test]
+    fn resume_marks_completed_end_turn_finished_without_reissuing_llm() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("end-turn-stop");
+        seed_completed_llm_run(
+            &app,
+            "running",
+            json!({
+                "content": [{"type": "text", "text": "already done"}],
+                "stop_reason": "end_turn",
+            }),
+        );
+        let _env = EnvGuard::set("http://127.0.0.1:9");
+
+        resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(config(true))
+        })
+        .unwrap();
+
+        let journal = Journal::open(app.path()).unwrap();
+        assert_eq!(journal.run("run-1").unwrap().status, "completed");
+        assert_eq!(journal.steps("run-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resume_reissues_pause_turn_instead_of_marking_completed() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("pause-turn-stop");
+        seed_completed_llm_run(
+            &app,
+            "running",
+            json!({
+                "content": [{
+                    "type": "server_tool_use",
+                    "id": "srvu_1",
+                    "name": "web_search",
+                    "input": {"query": "beater"},
+                }],
+                "stop_reason": "pause_turn",
+            }),
+        );
+        let server = MockAnthropic::new(vec![json!({
+            "content": [{"type": "text", "text": "continued"}],
+            "stop_reason": "end_turn",
+        })]);
+        let _env = EnvGuard::set(&server.base_url);
+
+        resume(app.path(), "run-1", None, BeatboxConfig::default(), |_| {
+            Ok(config(true))
+        })
+        .unwrap();
+        let requests = server.join();
+
+        assert_eq!(requests.len(), 1);
+        let body: Value = serde_json::from_str(&requests[0]).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(
+            messages[1]["content"],
+            json!([{
+                "type": "server_tool_use",
+                "id": "srvu_1",
+                "name": "web_search",
+                "input": {"query": "beater"},
+            }])
+        );
+
+        let journal = Journal::open(app.path()).unwrap();
+        assert_eq!(journal.run("run-1").unwrap().status, "completed");
+        assert_eq!(
+            journal
+                .steps("run-1")
+                .unwrap()
+                .iter()
+                .filter(|step| step.kind == "llm_call")
+                .count(),
+            2
+        );
     }
 
     #[test]

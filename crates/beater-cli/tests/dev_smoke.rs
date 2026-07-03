@@ -53,6 +53,10 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
     assert!(health.contains("\"ok\":true"), "{health}");
     assert!(health.contains("\"runtime\":\"beater.js\""), "{health}");
 
+    let head_health = http_request(port, "HEAD", "/api/health", None).expect("HEAD /api/health");
+    assert!(head_health.starts_with("HTTP/1.1 200"), "{head_health}");
+    assert!(!head_health.contains("\"ok\":true"), "{head_health}");
+
     let home = http_request(port, "GET", "/", None).expect("GET /");
     assert!(home.starts_with("HTTP/1.1 200"), "{home}");
     assert!(home.contains("content-type: text/html"), "{home}");
@@ -142,6 +146,8 @@ fn dev_server_refuses_remote_mcp_without_bearer_token() {
         .arg("0.0.0.0")
         .arg("--port")
         .arg(port.to_string())
+        .arg("--base-url")
+        .arg("https://hello.example.test")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("BEATER_BASE_URL")
         .env_remove("BEATER_MCP_TOKEN")
@@ -299,13 +305,25 @@ export function GET() {
     let doctor = Command::new(&beater)
         .arg("doctor")
         .arg(&app)
+        .env_remove("BEATER_BASE_URL")
+        .env_remove("BEATBOX_URL")
+        .env_remove("BEATBOX_API_KEY")
         .output()
         .expect("run doctor on scaffolded app");
-    assert!(doctor.status.success());
+    assert!(!doctor.status.success());
+    let doctor_stdout = String::from_utf8_lossy(&doctor.stdout);
     assert!(
-        String::from_utf8_lossy(&doctor.stdout).contains("app:     my-app"),
-        "stdout:\n{}",
-        String::from_utf8_lossy(&doctor.stdout)
+        doctor_stdout.contains("app:     my-app"),
+        "stdout:\n{doctor_stdout}"
+    );
+    assert!(
+        doctor_stdout.contains("venv:    MISMATCH"),
+        "stdout:\n{doctor_stdout}"
+    );
+    assert!(
+        String::from_utf8_lossy(&doctor.stderr).contains("doctor found problems"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&doctor.stderr)
     );
 
     let overwrite = Command::new(&beater)
@@ -351,6 +369,278 @@ export function GET() {
 }
 
 #[test]
+fn build_creates_runnable_bundle_and_refuses_unsafe_output() {
+    let port = free_port();
+    let workspace = workspace();
+    let beater = beater_bin(&workspace);
+    let temp = temp_dir("build-bundle");
+    let app = temp.path.join("my-app");
+    let bundle = temp.path.join("bundle");
+
+    let scaffold = Command::new(&beater)
+        .arg("new")
+        .arg(&app)
+        .output()
+        .expect("run beater new");
+    assert!(
+        scaffold.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&scaffold.stdout),
+        String::from_utf8_lossy(&scaffold.stderr)
+    );
+    std::fs::create_dir_all(app.join(".beater")).expect("create runtime state dir");
+    std::fs::write(app.join(".beater/journal.db"), "runtime state").expect("write runtime state");
+    std::fs::write(app.join(".env"), "BEATER_SECRET=not-for-bundles").expect("write .env");
+    std::fs::write(
+        app.join(".env.production.local"),
+        "BEATER_SECRET=also-not-for-bundles",
+    )
+    .expect("write env variant");
+    std::fs::write(
+        app.join(".npmrc"),
+        "//registry.example.test/:_authToken=secret",
+    )
+    .expect("write .npmrc");
+
+    let build = Command::new(&beater)
+        .arg("build")
+        .arg(&app)
+        .arg("--out")
+        .arg(&bundle)
+        .output()
+        .expect("run beater build");
+    assert!(
+        build.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let dirty_output = Command::new(&beater)
+        .arg("build")
+        .arg(&app)
+        .arg("--out")
+        .arg(&bundle)
+        .output()
+        .expect("run beater build over bundle");
+    assert!(!dirty_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&dirty_output.stderr).contains("build output is not empty"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&dirty_output.stderr)
+    );
+
+    let unsafe_output = Command::new(&beater)
+        .arg("build")
+        .arg(&app)
+        .arg("--out")
+        .arg(app.join("dist"))
+        .output()
+        .expect("run beater build inside app");
+    assert!(!unsafe_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&unsafe_output.stderr).contains("outside the app directory"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&unsafe_output.stderr)
+    );
+
+    let not_bundle = temp.path.join("not-bundle");
+    std::fs::create_dir_all(&not_bundle).expect("create non-bundle dir");
+    std::fs::write(not_bundle.join("keep.txt"), "do not delete").expect("write non-bundle file");
+    let force_non_bundle = Command::new(&beater)
+        .arg("build")
+        .arg(&app)
+        .arg("--out")
+        .arg(&not_bundle)
+        .arg("--force")
+        .output()
+        .expect("run beater build --force over non-bundle");
+    assert!(!force_non_bundle.status.success());
+    assert!(
+        String::from_utf8_lossy(&force_non_bundle.stderr).contains("without a beater-build.json"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&force_non_bundle.stderr)
+    );
+    assert!(
+        not_bundle.join("keep.txt").is_file(),
+        "--force should not remove non-bundle directories"
+    );
+
+    #[cfg(unix)]
+    {
+        let link_target = temp.path.join("link-target");
+        std::fs::create_dir_all(&link_target).expect("create link target");
+        let output_link = temp.path.join("bundle-link");
+        std::os::unix::fs::symlink(&link_target, &output_link).expect("create output symlink");
+        let symlink_output = Command::new(&beater)
+            .arg("build")
+            .arg(&app)
+            .arg("--out")
+            .arg(&output_link)
+            .arg("--force")
+            .output()
+            .expect("run beater build over output symlink");
+        assert!(!symlink_output.status.success());
+        assert!(
+            String::from_utf8_lossy(&symlink_output.stderr).contains("must not be a symlink"),
+            "stderr:\n{}",
+            String::from_utf8_lossy(&symlink_output.stderr)
+        );
+        assert!(
+            link_target.is_dir(),
+            "output symlink target should not be removed"
+        );
+    }
+
+    let rebuild = Command::new(&beater)
+        .arg("build")
+        .arg(&app)
+        .arg("--out")
+        .arg(&bundle)
+        .arg("--force")
+        .output()
+        .expect("run beater build --force");
+    assert!(
+        rebuild.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&rebuild.stdout),
+        String::from_utf8_lossy(&rebuild.stderr)
+    );
+
+    #[cfg(unix)]
+    {
+        let preserved = bundle.join("preserved.txt");
+        std::fs::write(&preserved, "old valid bundle").expect("write preserved bundle marker");
+        let outside = temp.path.join("force-outside.txt");
+        std::fs::write(&outside, "outside").expect("write outside file for force failure");
+        let app_link = app.join("force-outside-link");
+        std::os::unix::fs::symlink(&outside, &app_link).expect("create app symlink");
+        let failed_force_rebuild = Command::new(&beater)
+            .arg("build")
+            .arg(&app)
+            .arg("--out")
+            .arg(&bundle)
+            .arg("--force")
+            .output()
+            .expect("run failed beater build --force");
+        assert!(!failed_force_rebuild.status.success());
+        assert!(
+            String::from_utf8_lossy(&failed_force_rebuild.stderr).contains("cannot bundle symlink"),
+            "stderr:\n{}",
+            String::from_utf8_lossy(&failed_force_rebuild.stderr)
+        );
+        std::fs::remove_file(app_link).expect("remove force app symlink");
+        assert!(
+            preserved.is_file(),
+            "failed --force rebuild should preserve existing bundle"
+        );
+        std::fs::remove_file(preserved).expect("remove preserved marker");
+    }
+
+    for relative_path in [
+        "bin/beater",
+        "app/beater.toml",
+        "app/app/routes/index.tsx",
+        "app/agents/support/agent.ts",
+        "run.sh",
+        "Dockerfile",
+        "beater-build.json",
+        "README.md",
+        ".dockerignore",
+    ] {
+        assert!(
+            bundle.join(relative_path).is_file(),
+            "missing bundle file {relative_path}"
+        );
+    }
+    assert!(
+        !bundle.join("app/.beater/journal.db").exists(),
+        "runtime state should not be copied into build bundle"
+    );
+    assert!(
+        !bundle.join("app/.env").exists(),
+        "local env files should not be copied into build bundle"
+    );
+    assert!(
+        !bundle.join("app/.env.production.local").exists(),
+        "local env variants should not be copied into build bundle"
+    );
+    assert!(
+        !bundle.join("app/.npmrc").exists(),
+        "local npm credentials should not be copied into build bundle"
+    );
+    let manifest =
+        std::fs::read_to_string(bundle.join("beater-build.json")).expect("read build manifest");
+    assert!(manifest.contains("\"app\": \"my-app\""), "{manifest}");
+    let dockerfile = std::fs::read_to_string(bundle.join("Dockerfile")).expect("read Dockerfile");
+    assert!(dockerfile.contains("FROM python:3.11-slim"), "{dockerfile}");
+    assert!(dockerfile.contains("BEATER_HOST=0.0.0.0"), "{dockerfile}");
+    assert!(dockerfile.contains("USER beater"), "{dockerfile}");
+    let dockerignore =
+        std::fs::read_to_string(bundle.join(".dockerignore")).expect("read .dockerignore");
+    assert!(dockerignore.contains(".env.*"), "{dockerignore}");
+
+    #[cfg(unix)]
+    {
+        let outside = temp.path.join("outside.txt");
+        std::fs::write(&outside, "outside").expect("write outside file");
+        let app_link = app.join("outside-link");
+        let symlink_app_bundle = temp.path.join("symlink-app-bundle");
+        std::os::unix::fs::symlink(&outside, &app_link).expect("create app symlink");
+        let symlink_app = Command::new(&beater)
+            .arg("build")
+            .arg(&app)
+            .arg("--out")
+            .arg(&symlink_app_bundle)
+            .output()
+            .expect("run beater build with app symlink");
+        assert!(!symlink_app.status.success());
+        assert!(
+            String::from_utf8_lossy(&symlink_app.stderr).contains("cannot bundle symlink"),
+            "stderr:\n{}",
+            String::from_utf8_lossy(&symlink_app.stderr)
+        );
+        std::fs::remove_file(app_link).expect("remove app symlink");
+        assert!(
+            !symlink_app_bundle.exists(),
+            "failed builds should clean up staging output"
+        );
+        let retry_after_failed_build = Command::new(&beater)
+            .arg("build")
+            .arg(&app)
+            .arg("--out")
+            .arg(&symlink_app_bundle)
+            .output()
+            .expect("retry beater build after failed staging build");
+        assert!(
+            retry_after_failed_build.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&retry_after_failed_build.stdout),
+            String::from_utf8_lossy(&retry_after_failed_build.stderr)
+        );
+    }
+
+    let child = Command::new(bundle.join("run.sh"))
+        .env("BEATER_HOST", "127.0.0.1")
+        .env("BEATER_PORT", port.to_string())
+        .env_remove("PORT")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("BEATER_BASE_URL")
+        .env_remove("BEATER_MCP_TOKEN")
+        .env_remove("BEATER_MCP_TRUSTED_ORIGINS")
+        .env_remove("BEATER_ALLOW_UNAUTHENTICATED_REMOTE")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn build bundle");
+    let _child = ChildGuard { child };
+
+    let health = wait_for_http(port, "GET", "/api/health", None);
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+    assert!(health.contains("\"runtime\":\"beater.js\""), "{health}");
+}
+
+#[test]
 fn dev_server_requires_mcp_bearer_token_when_configured() {
     let port = free_port();
     let workspace = workspace();
@@ -387,7 +677,7 @@ fn dev_server_requires_mcp_bearer_token_when_configured() {
     );
     assert!(manifest.contains("\"required\":true"), "{manifest}");
     assert!(
-        manifest.contains("\"trustedOrigins\":[\"https://ops.example.test\"]"),
+        !manifest.contains("https://ops.example.test") && !manifest.contains("trustedOrigins"),
         "{manifest}"
     );
 
@@ -487,10 +777,24 @@ fn dev_server_requires_mcp_bearer_token_when_configured() {
 #[test]
 fn doctor_reports_python_v8_and_venv_diagnostics() {
     let workspace = workspace();
-    let app = workspace.join("examples/hello");
+    let temp = temp_dir("doctor-ok");
+    let app = temp.path.join("app");
+    std::fs::create_dir_all(&app).expect("create doctor app");
+    std::fs::write(
+        app.join("beater.toml"),
+        r#"
+[app]
+name = "doctor-ok"
+port = 31234
+"#,
+    )
+    .expect("write doctor app config");
     let output = Command::new(beater_bin(&workspace))
         .arg("doctor")
         .arg(&app)
+        .env_remove("BEATER_BASE_URL")
+        .env_remove("BEATBOX_URL")
+        .env_remove("BEATBOX_API_KEY")
         .output()
         .expect("run beater doctor");
 
@@ -503,6 +807,25 @@ fn doctor_reports_python_v8_and_venv_diagnostics() {
     assert!(stdout.contains("beatbox:"), "{stdout}");
     assert!(stdout.contains("mcp:"), "{stdout}");
     assert!(stdout.contains("v8:"), "{stdout}");
+}
+
+#[test]
+fn doctor_exits_nonzero_when_diagnostics_fail() {
+    let workspace = workspace();
+    let temp = temp_dir("doctor-missing-app");
+    let missing_app = temp.path.join("missing");
+    let output = Command::new(beater_bin(&workspace))
+        .arg("doctor")
+        .arg(&missing_app)
+        .output()
+        .expect("run beater doctor on missing app");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("beater doctor"), "{stdout}");
+    assert!(stdout.contains("app:     UNAVAILABLE"), "{stdout}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("doctor found problems"), "{stderr}");
 }
 
 fn workspace() -> PathBuf {

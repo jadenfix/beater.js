@@ -4,12 +4,18 @@
   const ops = core.ops;
 
   function fmt(x) {
-    if (typeof x === "string") return x;
-    if (x instanceof Error) return x.stack ?? String(x);
     try {
-      return JSON.stringify(x);
-    } catch {
+      if (typeof x === "string") return x;
+      if (x instanceof Error) return x.stack ?? String(x);
+      try {
+        const json = JSON.stringify(x);
+        if (json !== undefined) return json;
+      } catch {
+        // Fall back to String below.
+      }
       return String(x);
+    } catch {
+      return "<unprintable>";
     }
   }
 
@@ -21,28 +27,53 @@
     debug: (...args) => core.print(args.map(fmt).join(" ") + "\n", false),
   };
 
+  core.setUnhandledPromiseRejectionHandler((_promise, reason) => {
+    try {
+      console.error("Unhandled promise rejection:", reason);
+    } catch {
+      core.print("Unhandled promise rejection: <unprintable>\n", true);
+    }
+    return true;
+  });
+
+  function reportAsyncError(error) {
+    try {
+      console.error("Uncaught async callback error:", error);
+    } catch {
+      core.print("Uncaught async callback error: <unprintable>\n", true);
+    }
+  }
+
+  function callTimerCallback(cb, args) {
+    try {
+      cb(...args);
+    } catch (error) {
+      reportAsyncError(error);
+    }
+  }
+
   let nextTimerId = 1;
-  const cancelledTimers = new Set();
+  const activeTimers = new Set();
   globalThis.setTimeout = (cb, ms = 0, ...args) => {
     const id = nextTimerId++;
+    activeTimers.add(id);
     ops.op_beater_sleep(ms).then(() => {
-      if (!cancelledTimers.delete(id)) cb(...args);
+      if (!activeTimers.delete(id)) return;
+      callTimerCallback(cb, args);
     });
     return id;
   };
   globalThis.clearTimeout = (id) => {
-    cancelledTimers.add(id);
+    activeTimers.delete(id);
   };
   globalThis.setInterval = (cb, ms = 0, ...args) => {
     const id = nextTimerId++;
+    activeTimers.add(id);
     (async () => {
       while (true) {
         await ops.op_beater_sleep(ms);
-        if (cancelledTimers.has(id)) {
-          cancelledTimers.delete(id);
-          return;
-        }
-        cb(...args);
+        if (!activeTimers.has(id)) return;
+        callTimerCallback(cb, args);
       }
     })();
     return id;
@@ -58,6 +89,18 @@
   // Minimal UTF-8 TextEncoder — enough for React SSR and stream chunk
   // encoding. Full web API fidelity comes with the npm-compat era.
   if (!globalThis.TextEncoder) {
+    const utf8Bytes = (c) => {
+      if (c < 0x80) return [c];
+      if (c < 0x800) return [0xc0 | (c >> 6), 0x80 | (c & 63)];
+      if (c < 0x10000)
+        return [0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63)];
+      return [
+        0xf0 | (c >> 18),
+        0x80 | ((c >> 12) & 63),
+        0x80 | ((c >> 6) & 63),
+        0x80 | (c & 63),
+      ];
+    };
     globalThis.TextEncoder = class TextEncoder {
       get encoding() {
         return "utf-8";
@@ -67,25 +110,24 @@
         for (let i = 0; i < input.length; i++) {
           let c = input.codePointAt(i);
           if (c > 0xffff) i++;
-          if (c < 0x80) out.push(c);
-          else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-          else if (c < 0x10000)
-            out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-          else
-            out.push(
-              0xf0 | (c >> 18),
-              0x80 | ((c >> 12) & 63),
-              0x80 | ((c >> 6) & 63),
-              0x80 | (c & 63),
-            );
+          out.push(...utf8Bytes(c));
         }
         return new Uint8Array(out);
       }
       encodeInto(src, dest) {
-        const bytes = this.encode(src);
-        const written = Math.min(bytes.length, dest.length);
-        dest.set(bytes.subarray(0, written));
-        return { read: src.length, written };
+        let read = 0;
+        let written = 0;
+        for (let i = 0; i < src.length; ) {
+          const c = src.codePointAt(i);
+          const units = c > 0xffff ? 2 : 1;
+          const bytes = utf8Bytes(c);
+          if (written + bytes.length > dest.length) break;
+          dest.set(bytes, written);
+          written += bytes.length;
+          i += units;
+          read = i;
+        }
+        return { read, written };
       }
     };
   }
@@ -99,9 +141,10 @@
         this._error = null;
         this._locked = false;
         this._pulling = false;
+        const stream = this;
         this._controller = {
           get desiredSize() {
-            return 1;
+            return Math.max(0, 1 - stream._queue.length);
           },
           enqueue: (chunk) => {
             if (this._closed || this._error) return;
@@ -193,8 +236,8 @@
     return flightEncoder.encode(`${kind}${JSON.stringify(payload)}\n`);
   }
 
-  function writeFlightFrame(stream_id, kind, payload) {
-    return ops.op_beater_stream_chunk(stream_id, flightFrame(kind, payload));
+  async function writeFlightFrame(stream_id, kind, payload) {
+    return await ops.op_beater_stream_chunk(stream_id, flightFrame(kind, payload));
   }
 
   async function cancelReader(reader) {
@@ -222,7 +265,7 @@
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (!ops.op_beater_stream_chunk(stream_id, streamChunkBytes(value))) {
+        if (!(await ops.op_beater_stream_chunk(stream_id, streamChunkBytes(value)))) {
           await cancelReader(reader);
           return;
         }
@@ -246,16 +289,16 @@
         const { done, value } = await reader.read();
         if (done) break;
         const bytes = Array.from(streamChunkBytes(value));
-        if (bytes.length && !writeFlightFrame(stream_id, "H", bytes)) {
+        if (bytes.length && !(await writeFlightFrame(stream_id, "H", bytes))) {
           await cancelReader(reader);
           return;
         }
       }
-      writeFlightFrame(stream_id, "E", { ok: true });
+      await writeFlightFrame(stream_id, "E", { ok: true });
       ops.op_beater_stream_end(stream_id);
     } catch (error) {
       if (activeStreams.get(stream_id) === reader) {
-        writeFlightFrame(stream_id, "E", { ok: false, error: fmt(error) });
+        await writeFlightFrame(stream_id, "E", { ok: false, error: fmt(error) });
         ops.op_beater_stream_end(stream_id);
       }
     } finally {
@@ -312,10 +355,12 @@
     if (typeof ReactDOMServer.renderToReadableStream !== "function") {
       throw new Error("react-dom/server renderToReadableStream is unavailable");
     }
-    writeFlightFrame(stream_id, "B", {
+    if (!(await writeFlightFrame(stream_id, "B", {
       protocol: "beater-flight",
       version: 0,
-    });
+    }))) {
+      throw new Error("RSC flight stream closed before bootstrap frame");
+    }
     const stream = await ReactDOMServer.renderToReadableStream(
       React.createElement(Component, { request }),
       {
@@ -362,7 +407,8 @@
   // API routes export per-method handlers (GET, POST, ...) or a default.
   globalThis.__beaterDispatch = async (specifier, method, request) => {
     const mod = await import(specifier);
-    const handler = mod[method] ?? mod.default;
+    const fallbackGet = method === "HEAD" ? mod.GET : undefined;
+    const handler = mod[method] ?? fallbackGet ?? mod.default;
     if (typeof handler !== "function") {
       throw new Error(
         `route module does not export a ${method} handler or default: ${specifier}`,

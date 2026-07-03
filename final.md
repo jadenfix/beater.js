@@ -70,7 +70,8 @@ The work below is not just about matching Node/Next request handling. The end st
 - [x] Add RSC flight protocol over the same chunk channel.
 - [x] Add npm/node-compat adoption wedge.
 - [ ] Add isolate pool behind the existing worker protocol.
-- [ ] Add `beater build` deploy story.
+- [x] Add `beater build` runnable host-bundle foundation.
+- [ ] Prove the deploy story with a Linux container image and `docker run` cold-start gate.
 
 **Likely touched files:** `crates/beater-runtime/**`, `crates/beater-cli/**`, `examples/hello/app/**`, `README.md`, `ARCHITECTURE.md`, `final.md`, and focused scripts under `scripts/**`.
 
@@ -93,18 +94,26 @@ The work below is not just about matching Node/Next request handling. The end st
 |---|---|
 | One binary, three runtimes | `beater doctor` reports embedded V8 14.9 + embedded CPython 3.11 (`sys.executable` = the beater binary) |
 | TS routes in embedded V8 | `curl /api/health` returns JSON from a `.ts` handler; live edit hot-reloads in ~1s (fresh isolate) |
+| URL path decoding | router tests prove percent-encoded static segments match routes, dynamic params decode UTF-8 path segments, and malformed escapes, `%2F`, and `%00` are rejected |
 | Source-mapped errors | broken route returns a stack pointing at `boom.ts:8:9` (original TS line) |
 | React 19 SSR | `curl /` returns server-rendered HTML from `index.tsx`; vendored ESM, no Node/npm anywhere |
 | MCP server (2025-11-25) | official MCP inspector completes initialize + tools/list + tools/call; bogus Origin → 403; GET → 405; bearer-token mode returns 401 without `Authorization`; trusted remote browser origins get preflight/CORS support |
+| MCP tools/call idempotency isolation | runtime tests prove repeated `/mcp tools/call` requests with JSON-RPC id `1` generate unique `beater:mcp:<uuid>` remote tool ids and matching idempotency keys |
 | Python-over-MCP | `summarize_numbers` (a `.py` file) executes in embedded CPython when called by an external MCP client |
+| Python tool path containment | registry tests reject relative and absolute Python tool paths outside the agent directory before loading, then re-check containment before execute after symlink replacement |
 | Agent Access Layer | /robots.txt, /sitemap.xml, /llms.txt, /.well-known/beater.json generated from the route table; `export const agent = {crawl: false}` excludes a route from sitemap + llms.txt; remote deployments can override the advertised public base URL |
 | Agent config pipeline | `agent.ts` (via `beater:agent` shim) evaluates in a one-shot isolate → JSON config → Rust registry; Python TOOL metadata loads through embedded CPython |
 | Durability machinery (code) | SQLite journal with started/completed/failed lifecycle + attempts; resume logic for dangling LLM calls and idempotent-only tool re-runs; `needs_review` parking |
+| Anthropic network hardening | the Messages client has a request timeout; focused tests prove stalled requests and truncated successful responses retry, while truncated non-retryable API errors do not |
+| Resume stop_reason safety | `resume_preserves_failed_refusal_instead_of_marking_completed`, `resume_marks_running_max_tokens_failed_and_does_not_run_truncated_tools`, `resume_marks_completed_end_turn_finished_without_reissuing_llm`, and `resume_reissues_pause_turn_instead_of_marking_completed` prove resume no longer turns refusal/max_tokens/pause_turn journal states into false completions |
 | M2 crash/resume fixtures | `slow_summarize.py` and `slow_summarize_once.py` are declared from `examples/hello/agents/support/agent.ts`; `scripts/m2-live-gate.sh` drives A3-A5 once `ANTHROPIC_API_KEY` is present and writes raw transcripts plus `evidence.md` |
+| M2 live gate harness safety | `scripts/m2-live-gate-self-test.sh` proves cleanup kills tracked background runs, untracked PIDs survive cleanup, and strict journal count queries fail instead of passing expected-zero assertions on SQLite errors |
 | Streaming SSR | `scripts/streaming-ssr-gate.sh` starts `beater dev`, reads the raw HTTP socket, and proved shell marker at 0.026s before Suspense-delayed marker at 0.489s while `/api/health` returned in 0.002s |
 | Client hydration | `/_beater/client/index.js` serves `app/routes/index.client.ts`; the hello page loads it as a module and `scripts/client-hydration-gate.cjs` verifies the counter increments in a browser |
 | RSC transport foundation | `/_beater/rsc/index.flight` serves `app/routes/index.server.tsx` as `text/x-component` frames over the worker stream channel; `scripts/rsc-flight-gate.cjs` verifies the browser renders the server island and the client counter still hydrates |
 | npm/node-compat wedge | `scripts/npm-compat-gate.sh` scaffolds a temp app, installs `zod@4.4.3`, adds a route importing `import { z } from "zod"`, and verifies `/api/zod` returns the parsed payload |
+| OpenAPI path grouping | `beater-connect` tests parse generated OpenAPI and prove resources plus multiple actions sharing one path emit a single `paths` key with all methods preserved |
+| npm/node-compat wedge | `scripts/npm-compat-gate.sh` scaffolds a temp app, installs `zod@4.4.3`, adds a route importing `import { z } from "zod"`, and verifies `/api/zod` returns the parsed payload; loader unit tests cover server-side export conditions and wildcard subpath exports |
 
 ---
 
@@ -224,6 +233,13 @@ Phase C progress so far:
 - Route-scoped server components can now live beside page routes as `*.server.tsx` files and stream `text/x-component` flight frames from `/_beater/rsc/<route>.flight`; this proves the transport and browser island path, not full official React Flight manifests.
 - Server routes can now import local ESM packages from `node_modules` with bare specifiers. This is the adoption wedge for real integrations and shared validation libraries without adding a Node sidecar; CommonJS, Node built-ins, install hooks, and client dependency bundling remain broader compatibility work.
 - Hot reload now aborts still-active SSR/RSC stream bodies if the old worker channel closes, so clients see a stream error instead of a cleanly truncated 200 response.
+- Worker sends now clone the current isolate channel before awaiting bounded-queue capacity, so a wedged worker cannot hold the hot-reload sender lock while the reloader tries to swap in a fresh isolate.
+- `beater build --out <dir>` now emits a runnable host-platform bundle with `bin/beater`, copied app assets, `run.sh`, `beater-build.json`, `.dockerignore`, and a non-root Dockerfile. Runtime state and common local credential files are excluded; symlinked app files and symlinked outputs are refused. `build_creates_runnable_bundle_and_refuses_unsafe_output` starts the generated launcher and hits `/api/health`; the Docker cold-start gate remains open.
+- Dropping an SSR/RSC response body before it reaches EOF now sends `CancelStream` to the owning worker, so disconnected clients do not leave stalled stream state registered indefinitely.
+- SSR/RSC stream chunks now cross from the isolate to the HTTP body through a bounded async channel, the local `ReadableStream` shim exposes queue pressure through `desiredSize`, and stale timer clears no longer accumulate cancellation ids in long-lived workers.
+- Remote MCP tools now treat malformed JSON-RPC bodies after HTTP 2xx as ambiguous for non-idempotent calls, and send the journaled `ToolCallContext.idempotency_key` as the provider-facing idempotency header.
+- Agent resume now converts failed idempotent tool re-runs and removed-tool lookups into `is_error` tool results, while still parking genuinely non-idempotent interrupted tools for review.
+- Direct `/mcp tools/call` requests now create synthetic MCP journal runs, commit a `tool_call` started row before executing side-effecting tools, and finish the row/run as completed, failed, or `needs_review` before returning the MCP tool result.
 
 | # | Item | Done when |
 |---|---|---|
@@ -237,7 +253,7 @@ Phase C progress so far:
 | 8 | **MCP consume + sessions** — use remote MCP servers as tool sources; add session/auth plumbing for remote management; adopt the next MCP spec when released | an agent uses a third-party MCP server's tool via config only, with scoped credentials and resumable error handling |
 | 9 | **Agentic browsing** — reuse beater-agents' CDP/Playwright crates as a tool provider | an agent completes a real browsing task from a pyTool-style declaration, with browser sessions cleaned up after crashes |
 | 10 | **defineAction** — one definition → HTML form + MCP tool + OpenAPI + crawler metadata (§6b end state) | a form posts for humans AND appears in tools/list with auth + confirm semantics |
-| 11 | **Deploy story** — `beater build` → single container (binary + assets + venv) | `docker run` of the built image serves the app cold in <1s |
+| 11 | **Deploy story** — `beater build` → single container (binary + assets + venv) | **partial:** host-platform bundle exists and is locally boot-tested through `run.sh`; done requires `docker run` of a target-OS image serving the app cold in <1s |
 | 12 | **Observability** — OTLP out of the agent loop into beater-agents | a run's trace appears in the beater-agents dashboard |
 | 13 | **Free-threaded Python** — pyo3 on 3.14t once ML wheels are reliable | two Python tools execute truly in parallel under load |
 | 14 | **C++ tools** — via cxx on the Rust builtin path | a C++ function is callable as a tool with schema |
@@ -250,4 +266,4 @@ Phase C progress so far:
 
 - **To be e2e done (MVP):** install `ANTHROPIC_API_KEY`, run `scripts/m2-live-gate.sh`, preserve the emitted `evidence.md` + raw logs, then flip README.md/ARCHITECTURE.md/final.md from pending to done. Everything else is already built and verified.
 - **To ship v0.1:** tests + CI, portable Python config, isolate-pool-or-documented-limits, `beater new`.
-- **To kill Node/Next:** pay off punts 1–5 and 11 first, while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.
+- **To kill Node/Next:** pay off punts 1–5 and finish the remaining Docker proof for 11, while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.

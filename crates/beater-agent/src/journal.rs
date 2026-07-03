@@ -3,9 +3,12 @@
 //! rebuilds state from completed steps and re-runs only what's safe.
 
 use std::path::Path;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use anyhow::{Context, Result, ensure};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+
+const JOURNAL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Journal {
     conn: Connection,
@@ -43,7 +46,17 @@ impl Journal {
     pub fn open(app_dir: &Path) -> Result<Self> {
         let dir = app_dir.join(".beater");
         std::fs::create_dir_all(&dir)?;
-        let conn = Connection::open(dir.join("journal.db"))?;
+        let mut conn = Connection::open(dir.join("journal.db"))?;
+        conn.busy_timeout(JOURNAL_BUSY_TIMEOUT)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        let journal_mode: String =
+            conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        ensure!(
+            journal_mode.eq_ignore_ascii_case("wal"),
+            "failed to enable WAL journal mode: got {journal_mode}"
+        );
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.set_transaction_behavior(TransactionBehavior::Immediate);
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS runs(
                id TEXT PRIMARY KEY, agent TEXT NOT NULL, status TEXT NOT NULL,
@@ -129,16 +142,18 @@ impl Journal {
         tool_use_id: Option<&str>,
         attempt: i64,
     ) -> Result<i64> {
-        let seq: i64 = self.conn.query_row(
+        let tx = self.conn.unchecked_transaction()?;
+        let seq: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM steps WHERE run_id = ?1",
             params![run_id],
             |r| r.get(0),
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO steps(run_id, seq, kind, status, request, tool_name, tool_use_id, attempt, started_at)
              VALUES(?1, ?2, ?3, 'started', ?4, ?5, ?6, ?7, ?8)",
             params![run_id, seq, kind, request.to_string(), tool_name, tool_use_id, attempt, now()],
         )?;
+        tx.commit()?;
         Ok(seq)
     }
 
@@ -207,8 +222,11 @@ impl Journal {
 mod tests {
     use super::Journal;
     use serde_json::json;
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     struct TempDir {
         path: PathBuf,
@@ -283,6 +301,70 @@ mod tests {
         assert_eq!(steps[1].tool_use_id.as_deref(), Some("toolu_1"));
         assert_eq!(steps[1].attempt, 2);
         assert_eq!(steps[1].result.as_ref().unwrap()["error"], "boom");
+    }
+
+    #[test]
+    fn open_configures_wal_and_busy_timeout() {
+        let app = TempDir::new("pragma");
+        let journal = Journal::open(app.path()).unwrap();
+
+        let journal_mode: String = journal
+            .conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        let busy_timeout_ms: i64 = journal
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(busy_timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn concurrent_start_step_allocates_unique_sequences() {
+        let app = TempDir::new("concurrent-start-step");
+        let journal = Journal::open(app.path()).unwrap();
+        journal.create_run("run-1", "support", "hello").unwrap();
+
+        let workers = 8;
+        let barrier = Arc::new(Barrier::new(workers));
+        let app_path = Arc::new(app.path().to_path_buf());
+        let handles = (0..workers)
+            .map(|worker| {
+                let barrier = Arc::clone(&barrier);
+                let app_path = Arc::clone(&app_path);
+                thread::spawn(move || {
+                    let tool_use_id = format!("toolu_{worker}");
+                    barrier.wait();
+                    let journal = Journal::open(&app_path).unwrap();
+                    journal
+                        .start_step(
+                            "run-1",
+                            "tool_call",
+                            &json!({"worker": worker}),
+                            Some("echo"),
+                            Some(&tool_use_id),
+                            1,
+                        )
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let seqs = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<BTreeSet<_>>();
+        let expected = (1..=workers as i64).collect::<BTreeSet<_>>();
+        assert_eq!(seqs, expected);
+
+        let steps = Journal::open(app.path()).unwrap().steps("run-1").unwrap();
+        assert_eq!(steps.len(), workers);
+        for (index, step) in steps.iter().enumerate() {
+            assert_eq!(step.seq, index as i64 + 1);
+            assert_eq!(step.status, "started");
+        }
     }
 
     #[test]

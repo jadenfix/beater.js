@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Run the live M2 gate from final.md: happy path, idempotent crash/resume,
 # and non-idempotent needs_review. Requires a real Anthropic API key.
-set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
 
 APP="${BEATER_APP:-examples/hello}"
 BIN="${BEATER_BIN:-./target/debug/beater}"
@@ -21,6 +19,7 @@ A4_CRASHED_TOOL_USE_ID=""
 A5_RUN_ID=""
 A5_CRASHED_SEQ=""
 A5_CRASHED_TOOL_USE_ID=""
+CLEANUP_PIDS=()
 
 fail() {
   echo "error: $*" >&2
@@ -36,7 +35,47 @@ sql() {
 }
 
 sql_count() {
-  sqlite3 "$JOURNAL" "$1" 2>/dev/null || printf '0\n'
+  local query="$1"
+  local output
+  if ! output="$(sqlite3 "$JOURNAL" "$query" 2>&1)"; then
+    fail "sqlite count query failed: $output; query=$query"
+  fi
+  printf '%s\n' "$output"
+}
+
+try_sql_count() {
+  sqlite3 "$JOURNAL" "$1" 2>/dev/null
+}
+
+track_pid() {
+  CLEANUP_PIDS+=("$1")
+}
+
+untrack_pid() {
+  local remove="$1"
+  local pid
+  local remaining=()
+  for pid in "${CLEANUP_PIDS[@]}"; do
+    if [[ "$pid" != "$remove" ]]; then
+      remaining+=("$pid")
+    fi
+  done
+  CLEANUP_PIDS=()
+  if (( ${#remaining[@]} > 0 )); then
+    CLEANUP_PIDS=("${remaining[@]}")
+  fi
+}
+
+cleanup() {
+  local pid
+  if (( ${#CLEANUP_PIDS[@]} == 0 )); then
+    return 0
+  fi
+  for pid in "${CLEANUP_PIDS[@]}"; do
+    kill -0 "$pid" 2>/dev/null || continue
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
 }
 
 run_status() {
@@ -99,8 +138,11 @@ wait_for_started_tool() {
   local deadline=$((SECONDS + 180))
   local count
   while (( SECONDS < deadline )); do
-    count="$(sql_count "SELECT COUNT(*) FROM steps WHERE run_id='$run_id' AND kind='tool_call' AND status='started' AND tool_name='$tool'")"
-    count="${count:-0}"
+    if count="$(try_sql_count "SELECT COUNT(*) FROM steps WHERE run_id='$run_id' AND kind='tool_call' AND status='started' AND tool_name='$tool'")"; then
+      count="${count:-0}"
+    else
+      count=0
+    fi
     if (( count >= 1 )); then
       return 0
     fi
@@ -188,6 +230,7 @@ run_crash_resume() {
   echo "== $gate crash/resume: $tool =="
   "$BIN" agent run --app "$APP" support "$prompt" >"$log" 2>&1 &
   local pid=$!
+  track_pid "$pid"
 
   local run_id
   run_id="$(wait_for_run_id "$log" "$pid")"
@@ -200,8 +243,9 @@ run_crash_resume() {
   crashed_tool_use_id="$(sql "SELECT tool_use_id FROM steps WHERE run_id='$run_id' AND seq=$crashed_seq")"
   [[ -n "$crashed_tool_use_id" ]] || fail "could not capture crashed $tool tool_use_id for $run_id"
 
-  kill -9 "$pid"
+  kill -9 "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  untrack_pid "$pid"
 
   "$BIN" agent runs --app "$APP" | tee "$runs_before_log"
   "$BIN" agent resume --app "$APP" "$run_id" | tee "$resume_log"
@@ -286,34 +330,44 @@ Messages API base: \`${ANTHROPIC_BASE_URL:-https://api.anthropic.com}\`
 EOF
 }
 
-need sqlite3
-need sed
-need grep
-need tee
-need find
+main() {
+  set -euo pipefail
+  cd "$ROOT"
+  trap cleanup EXIT
 
-[[ -x "$BIN" ]] || fail "missing executable $BIN; run: cargo build -p beater-cli"
-[[ -n "${ANTHROPIC_API_KEY:-}" ]] || fail "ANTHROPIC_API_KEY is not set"
-[[ -d "$APP" ]] || fail "missing app directory: $APP"
-if [[ -d "$OUT" ]] && find "$OUT" -mindepth 1 -print -quit | grep -q .; then
-  fail "output directory already contains files: $OUT"
+  need sqlite3
+  need sed
+  need grep
+  need tee
+  need find
+
+  [[ -x "$BIN" ]] || fail "missing executable $BIN; run: cargo build -p beater-cli"
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || fail "ANTHROPIC_API_KEY is not set"
+  [[ -d "$APP" ]] || fail "missing app directory: $APP"
+  if [[ -d "$OUT" ]] && find "$OUT" -mindepth 1 -print -quit | grep -q .; then
+    fail "output directory already contains files: $OUT"
+  fi
+
+  mkdir -p "$OUT"
+  echo "writing transcripts to $OUT"
+
+  run_happy_path
+  run_crash_resume \
+    "a4" \
+    "slow_summarize" \
+    "use slow_summarize by name on numbers 3,1,4,1,5; do not use summarize_numbers" \
+    "completed"
+  run_crash_resume \
+    "a5" \
+    "slow_summarize_once" \
+    "use slow_summarize_once by name on numbers 3,1,4,1,5; do not use summarize_numbers" \
+    "needs_review"
+
+  write_evidence
+  echo "wrote evidence manifest to $EVIDENCE"
+  echo "M2 live gate passed"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-mkdir -p "$OUT"
-echo "writing transcripts to $OUT"
-
-run_happy_path
-run_crash_resume \
-  "a4" \
-  "slow_summarize" \
-  "use slow_summarize by name on numbers 3,1,4,1,5; do not use summarize_numbers" \
-  "completed"
-run_crash_resume \
-  "a5" \
-  "slow_summarize_once" \
-  "use slow_summarize_once by name on numbers 3,1,4,1,5; do not use summarize_numbers" \
-  "needs_review"
-
-write_evidence
-echo "wrote evidence manifest to $EVIDENCE"
-echo "M2 live gate passed"

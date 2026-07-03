@@ -156,9 +156,15 @@ fn resolve_public_base_url(
     env_base_url: Option<&str>,
     config_base_url: Option<&str>,
 ) -> Result<String> {
-    let raw = base_url_override.or(env_base_url).or(config_base_url);
+    let raw = base_url_override
+        .and_then(non_empty_str)
+        .or_else(|| env_base_url.and_then(non_empty_str))
+        .or(config_base_url);
     match raw {
         Some(value) => normalize_base_url(value),
+        None if host_is_unspecified(host) => bail!(
+            "binding {host} requires an explicit public base URL; set --base-url, {BASE_URL_ENV}, or [app].base_url"
+        ),
         None => Ok(default_base_url(host, port)),
     }
 }
@@ -191,13 +197,20 @@ fn default_base_url(host: std::net::IpAddr, port: u16) -> String {
     }
 }
 
+fn host_is_unspecified(host: std::net::IpAddr) -> bool {
+    match host {
+        std::net::IpAddr::V4(host) => host.is_unspecified(),
+        std::net::IpAddr::V6(host) => host.is_unspecified(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        default_base_url, normalize_base_url, resolve_beatbox_config_with_env,
+        BASE_URL_ENV, default_base_url, normalize_base_url, resolve_beatbox_config_with_env,
         resolve_public_base_url,
     };
-    use std::net::{IpAddr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn base_url_normalization_trims_trailing_slashes() {
@@ -257,6 +270,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, "https://config.example");
+    }
+
+    #[test]
+    fn public_base_url_requires_explicit_url_for_unspecified_hosts() {
+        for host in [
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        ] {
+            let error = resolve_public_base_url(host, 3000, None, None, None).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("--base-url"), "{message}");
+            assert!(message.contains(BASE_URL_ENV), "{message}");
+            assert!(message.contains("[app].base_url"), "{message}");
+
+            let resolved =
+                resolve_public_base_url(host, 3000, Some("https://public.example"), None, None)
+                    .unwrap();
+            assert_eq!(resolved, "https://public.example");
+        }
+    }
+
+    #[test]
+    fn public_base_url_ignores_empty_override_and_env_values() {
+        let host = "127.0.0.1".parse().unwrap();
+
+        let resolved = resolve_public_base_url(
+            host,
+            3000,
+            Some(" "),
+            Some(""),
+            Some("https://config.example"),
+        )
+        .unwrap();
+        assert_eq!(resolved, "https://config.example");
+
+        let resolved = resolve_public_base_url(
+            host,
+            3000,
+            Some(""),
+            Some(" https://env.example/// "),
+            Some("https://config.example"),
+        )
+        .unwrap();
+        assert_eq!(resolved, "https://env.example");
+
+        let resolved = resolve_public_base_url(host, 3000, None, Some(" "), None).unwrap();
+        assert_eq!(resolved, "http://127.0.0.1:3000");
     }
 
     #[test]

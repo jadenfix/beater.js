@@ -2,6 +2,7 @@
 //! driven by a current-thread tokio runtime. The host talks to it over an
 //! mpsc channel — the protocol is already pool-shaped for N workers later.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::rc::Rc;
@@ -18,6 +19,11 @@ use tokio::sync::{mpsc, oneshot};
 use crate::loader::BeaterModuleLoader;
 
 const WORKER_SHUTDOWN_STREAM_ERROR: &str = "js worker shut down before stream completed";
+const STREAM_CHUNK_QUEUE_CAPACITY: usize = 16;
+
+type StreamItem = Result<Bytes, io::Error>;
+type StreamSender = mpsc::Sender<StreamItem>;
+type StreamReceiver = mpsc::Receiver<StreamItem>;
 
 #[derive(Debug)]
 pub enum WorkerMsg {
@@ -69,7 +75,7 @@ pub enum RouteBody {
     Chunks(Vec<String>),
     Stream {
         stream_id: u32,
-        rx: mpsc::UnboundedReceiver<Result<Bytes, io::Error>>,
+        rx: mpsc::Receiver<Result<Bytes, io::Error>>,
     },
 }
 
@@ -93,7 +99,7 @@ struct JsPageStream {
 
 #[derive(Default)]
 struct WorkerState {
-    streams: HashMap<u32, mpsc::UnboundedSender<Result<Bytes, io::Error>>>,
+    streams: HashMap<u32, StreamSender>,
 }
 
 #[op2(async(lazy), fast)]
@@ -101,14 +107,27 @@ async fn op_beater_sleep(ms: f64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms.max(0.0) as u64)).await;
 }
 
-#[op2(fast)]
-fn op_beater_stream_chunk(state: &mut OpState, stream_id: u32, #[buffer] chunk: &[u8]) -> bool {
-    let worker_state = state.borrow_mut::<WorkerState>();
-    let Some(tx) = worker_state.streams.get(&stream_id).cloned() else {
+#[op2(async(lazy), fast)]
+async fn op_beater_stream_chunk(
+    state: Rc<RefCell<OpState>>,
+    stream_id: u32,
+    #[buffer(copy)] chunk: Vec<u8>,
+) -> bool {
+    let Some(tx) = state
+        .borrow()
+        .borrow::<WorkerState>()
+        .streams
+        .get(&stream_id)
+        .cloned()
+    else {
         return false;
     };
-    if tx.send(Ok(Bytes::copy_from_slice(chunk))).is_err() {
-        worker_state.streams.remove(&stream_id);
+    if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
+        state
+            .borrow_mut()
+            .borrow_mut::<WorkerState>()
+            .streams
+            .remove(&stream_id);
         return false;
     }
     true
@@ -122,7 +141,7 @@ fn op_beater_stream_end(state: &mut OpState, stream_id: u32) {
 #[op2(fast)]
 fn op_beater_stream_error(state: &mut OpState, stream_id: u32, #[string] error: String) {
     if let Some(tx) = state.borrow_mut::<WorkerState>().streams.remove(&stream_id) {
-        let _ = tx.send(Err(io::Error::other(error)));
+        enqueue_stream_error(tx, error);
     }
 }
 
@@ -261,12 +280,30 @@ fn fail_active_streams(runtime: &mut JsRuntime, error: String) {
         std::mem::take(&mut op_state.borrow_mut::<WorkerState>().streams)
     };
     for (_, tx) in streams {
-        let _ = tx.send(Err(io::Error::other(error.clone())));
+        enqueue_stream_error(tx, error.clone());
     }
 }
 
 fn fail_active_streams_for_shutdown(runtime: &mut JsRuntime) {
     fail_active_streams(runtime, WORKER_SHUTDOWN_STREAM_ERROR.to_string());
+}
+
+fn enqueue_stream_error(tx: StreamSender, error: String) {
+    let item = Err(io::Error::other(error));
+    match tx.try_send(item) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(item)) => {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = tx.send(item).await;
+                });
+            }
+        }
+    }
+}
+
+fn stream_body_channel() -> (StreamSender, StreamReceiver) {
+    mpsc::channel(STREAM_CHUNK_QUEUE_CAPACITY)
 }
 
 async fn dispatch_api(
@@ -312,7 +349,7 @@ async fn dispatch_page_stream(
     stream_id: u32,
     reply: oneshot::Sender<Result<RouteResponse, String>>,
 ) {
-    let (body_tx, body_rx) = mpsc::unbounded_channel();
+    let (body_tx, body_rx) = stream_body_channel();
     register_page_stream(runtime, stream_id, body_tx);
 
     let page_stream = match prepare_page_stream(runtime, specifier, request_json, stream_id).await {
@@ -344,7 +381,7 @@ async fn dispatch_rsc_flight_stream(
     stream_id: u32,
     reply: oneshot::Sender<Result<RouteResponse, String>>,
 ) {
-    let (body_tx, body_rx) = mpsc::unbounded_channel();
+    let (body_tx, body_rx) = stream_body_channel();
     register_page_stream(runtime, stream_id, body_tx);
 
     let flight_stream =
@@ -370,11 +407,7 @@ async fn dispatch_rsc_flight_stream(
     }
 }
 
-fn register_page_stream(
-    runtime: &mut JsRuntime,
-    stream_id: u32,
-    tx: mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-) {
+fn register_page_stream(runtime: &mut JsRuntime, stream_id: u32, tx: StreamSender) {
     runtime
         .op_state()
         .borrow_mut()
@@ -492,12 +525,287 @@ fn format_core_error(err: CoreError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use deno_core::{JsRuntime, RuntimeOptions};
+    use super::*;
 
-    use super::{
-        WORKER_SHUTDOWN_STREAM_ERROR, active_streams, beater_ext, fail_active_streams_for_shutdown,
-        register_page_stream,
-    };
+    fn runtime_with_bootstrap() -> JsRuntime {
+        let mut runtime = JsRuntime::new(RuntimeOptions {
+            module_loader: Some(Rc::new(BeaterModuleLoader)),
+            extensions: vec![beater_ext::init()],
+            ..Default::default()
+        });
+        runtime
+            .execute_script(
+                "beater:test-clear-web-shims",
+                "globalThis.TextEncoder = undefined; globalThis.ReadableStream = undefined",
+            )
+            .expect("clear native TextEncoder");
+        runtime
+            .execute_script("beater:bootstrap", include_str!("bootstrap.js"))
+            .expect("bootstrap.js must evaluate");
+        runtime
+    }
+
+    fn eval_bool(runtime: &mut JsRuntime, source: &'static str) -> bool {
+        let global = runtime
+            .execute_script("beater:test-bool", source)
+            .expect("boolean test expression should evaluate");
+        deno_core::scope!(scope, runtime);
+        let local = v8::Local::new(scope, global);
+        deno_core::serde_v8::from_v8(scope, local).expect("test expression should return bool")
+    }
+
+    #[test]
+    fn stream_body_channel_is_bounded() {
+        let (tx, _rx) = stream_body_channel();
+        for _ in 0..STREAM_CHUNK_QUEUE_CAPACITY {
+            tx.try_send(Ok(Bytes::new()))
+                .expect("stream channel should accept capacity-sized burst");
+        }
+
+        assert!(matches!(
+            tx.try_send(Ok(Bytes::new())),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn readable_stream_desired_size_tracks_queue_depth() {
+        let mut runtime = runtime_with_bootstrap();
+        let promise = runtime
+            .execute_script(
+                "beater:readable-stream-desired-size",
+                r#"
+                (async () => {
+                const assert = (condition, message) => {
+                  if (!condition) throw new Error(message);
+                };
+                let controller;
+                const stream = new ReadableStream({
+                  start(c) {
+                    controller = c;
+                  },
+                });
+                await Promise.resolve();
+
+                assert(controller.desiredSize === 1, `initial desiredSize ${controller.desiredSize}`);
+                controller.enqueue("a");
+                assert(controller.desiredSize === 0, `queued desiredSize ${controller.desiredSize}`);
+
+                const reader = stream.getReader();
+                reader.read();
+                assert(controller.desiredSize === 1, `drained desiredSize ${controller.desiredSize}`);
+
+                controller.enqueue("b");
+                assert(controller.desiredSize === 0, `requeued desiredSize ${controller.desiredSize}`);
+                })()
+                "#,
+            )
+            .expect("ReadableStream desiredSize regression script");
+        let resolved = runtime.resolve(promise);
+        runtime
+            .with_event_loop_promise(resolved, PollEventLoopOptions::default())
+            .await
+            .expect("ReadableStream desiredSize regression should pass");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_chunk_op_waits_for_bounded_channel_capacity() {
+        let mut runtime = runtime_with_bootstrap();
+        let (tx, mut rx) = stream_body_channel();
+        for _ in 0..STREAM_CHUNK_QUEUE_CAPACITY {
+            tx.try_send(Ok(Bytes::from_static(b"queued")))
+                .expect("test stream channel should fill");
+        }
+        runtime
+            .op_state()
+            .borrow_mut()
+            .borrow_mut::<WorkerState>()
+            .streams
+            .insert(42, tx);
+
+        runtime
+            .execute_script(
+                "beater:bounded-stream-send",
+                r#"
+                globalThis.__beaterChunkSent = false;
+                Deno.core.ops.op_beater_stream_chunk(42, new Uint8Array([9]))
+                  .then((ok) => { globalThis.__beaterChunkSent = ok; });
+                "#,
+            )
+            .expect("schedule bounded stream send");
+
+        for _ in 0..3 {
+            poll_event_loop_once(&mut runtime).expect("pending stream send should not fail");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(!eval_bool(&mut runtime, "globalThis.__beaterChunkSent"));
+
+        rx.recv()
+            .await
+            .expect("free one slot in the bounded stream channel")
+            .expect("queued stream item should be ok");
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while !eval_bool(&mut runtime, "globalThis.__beaterChunkSent") {
+                poll_event_loop_once(&mut runtime).expect("bounded stream send should complete");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("stream send should wait until receiver capacity is available");
+
+        let mut saw_backpressured_chunk = false;
+        for _ in 0..STREAM_CHUNK_QUEUE_CAPACITY {
+            let chunk = rx
+                .recv()
+                .await
+                .expect("bounded channel should be refilled")
+                .expect("stream item should be ok");
+            if chunk == Bytes::from_static(&[9]) {
+                saw_backpressured_chunk = true;
+            }
+        }
+        assert!(saw_backpressured_chunk);
+    }
+
+    #[test]
+    fn text_encoder_encode_into_reports_only_consumed_code_units() {
+        let mut runtime = runtime_with_bootstrap();
+        runtime
+            .execute_script(
+                "beater:text-encoder-encode-into",
+                r#"
+                const encoder = new TextEncoder();
+                const assert = (condition, message) => {
+                  if (!condition) throw new Error(message);
+                };
+
+                const ascii = new Uint8Array(2);
+                const asciiResult = encoder.encodeInto("abcd", ascii);
+                assert(asciiResult.read === 2, `ascii read ${asciiResult.read}`);
+                assert(asciiResult.written === 2, `ascii written ${asciiResult.written}`);
+                assert(ascii[0] === 97 && ascii[1] === 98, `ascii bytes ${Array.from(ascii)}`);
+
+                const piPartial = new Uint8Array(2);
+                const piPartialResult = encoder.encodeInto("a\u03c0", piPartial);
+                assert(piPartialResult.read === 1, `pi partial read ${piPartialResult.read}`);
+                assert(piPartialResult.written === 1, `pi partial written ${piPartialResult.written}`);
+                assert(piPartial[0] === 97 && piPartial[1] === 0, `pi partial bytes ${Array.from(piPartial)}`);
+
+                const emojiTooSmall = new Uint8Array(3);
+                const emojiTooSmallResult = encoder.encodeInto("\ud83d\ude00a", emojiTooSmall);
+                assert(emojiTooSmallResult.read === 0, `emoji small read ${emojiTooSmallResult.read}`);
+                assert(emojiTooSmallResult.written === 0, `emoji small written ${emojiTooSmallResult.written}`);
+
+                const emojiFits = new Uint8Array(5);
+                const emojiFitsResult = encoder.encodeInto("\ud83d\ude00a", emojiFits);
+                assert(emojiFitsResult.read === 3, `emoji fit read ${emojiFitsResult.read}`);
+                assert(emojiFitsResult.written === 5, `emoji fit written ${emojiFitsResult.written}`);
+                assert(
+                  Array.from(emojiFits).join(",") === "240,159,152,128,97",
+                  `emoji bytes ${Array.from(emojiFits)}`,
+                );
+                "#,
+            )
+            .expect("TextEncoder.encodeInto regression script");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unhandled_rejections_are_reported_without_poisoning_the_runtime() {
+        let mut runtime = runtime_with_bootstrap();
+        runtime
+            .execute_script(
+                "beater:unhandled-rejection",
+                "Promise.reject(new Error('stray rejection'));",
+            )
+            .expect("schedule unhandled rejection");
+        runtime
+            .run_event_loop(Default::default())
+            .await
+            .expect("handled unhandled rejection should not fail the event loop");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unprintable_unhandled_rejections_are_still_handled() {
+        let mut runtime = runtime_with_bootstrap();
+        runtime
+            .execute_script(
+                "beater:unprintable-rejection",
+                r#"
+                const badObject = {
+                  toJSON() { throw new Error("toJSON exploded"); },
+                  [Symbol.toPrimitive]() { throw new Error("toPrimitive exploded"); },
+                  toString() { throw new Error("toString exploded"); },
+                };
+                Promise.reject(badObject);
+
+                const badError = new Error("bad stack");
+                Object.defineProperty(badError, "stack", {
+                  get() { throw new Error("stack exploded"); },
+                });
+                Promise.reject(badError);
+                "#,
+            )
+            .expect("schedule unprintable rejection");
+        runtime
+            .run_event_loop(Default::default())
+            .await
+            .expect("unprintable rejection should not fail the event loop");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn throwing_timer_callbacks_are_reported_without_rejecting_timer_promises() {
+        let mut runtime = runtime_with_bootstrap();
+        runtime
+            .execute_script(
+                "beater:throwing-timer",
+                "setTimeout(() => { throw new Error('timer boom'); }, 0);",
+            )
+            .expect("schedule throwing timer");
+        runtime
+            .run_event_loop(Default::default())
+            .await
+            .expect("throwing timer callback should not fail the event loop");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clearing_stale_timer_ids_does_not_block_live_timers() {
+        let mut runtime = runtime_with_bootstrap();
+        let promise = runtime
+            .execute_script(
+                "beater:stale-timer-clears",
+                r#"
+                (async () => {
+                  let fired = 0;
+                  clearTimeout(1);
+                  const first = setTimeout(() => { fired += 1; }, 0);
+                  await Deno.core.ops.op_beater_sleep(1);
+                  if (fired !== 1) throw new Error(`first timer fired ${fired} times`);
+
+                  clearTimeout(first);
+                  for (let id = 10_000; id < 11_000; id += 1) clearTimeout(id);
+
+                  const second = setTimeout(() => { fired += 1; }, 0);
+                  await Deno.core.ops.op_beater_sleep(1);
+                  if (fired !== 2) throw new Error(`second timer fired ${fired} times`);
+
+                  clearInterval(3);
+                  const interval = setInterval(() => {
+                    fired += 1;
+                    clearInterval(interval);
+                  }, 0);
+                  await Deno.core.ops.op_beater_sleep(1);
+                  if (fired !== 3) throw new Error(`interval fired ${fired} times`);
+                })()
+                "#,
+            )
+            .expect("schedule stale timer clear regression");
+        let resolved = runtime.resolve(promise);
+        runtime
+            .with_event_loop_promise(resolved, PollEventLoopOptions::default())
+            .await
+            .expect("stale timer clears should not block live timers");
+    }
 
     #[test]
     fn shutdown_failure_aborts_active_streams() {
@@ -505,7 +813,7 @@ mod tests {
             extensions: vec![beater_ext::init()],
             ..Default::default()
         });
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         register_page_stream(&mut runtime, 7, tx);
 
         assert!(active_streams(&runtime));
@@ -520,4 +828,5 @@ mod tests {
         assert_eq!(err.to_string(), WORKER_SHUTDOWN_STREAM_ERROR);
         assert!(rx.try_recv().is_err());
     }
+
 }
