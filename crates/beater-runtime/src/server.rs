@@ -4,10 +4,13 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -18,7 +21,7 @@ use axum::middleware;
 use axum::routing::{Router, get, post};
 use beater_agent::ToolRegistry;
 use bytes::Bytes;
-use futures_util::stream;
+use futures_util::{Stream, stream};
 use serde_json::json;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -328,8 +331,14 @@ async fn send_worker_msg(
     worker_tx: &Arc<RwLock<mpsc::Sender<WorkerMsg>>>,
     msg: WorkerMsg,
 ) -> std::result::Result<(), mpsc::error::SendError<WorkerMsg>> {
-    let tx = worker_tx.read().await.clone();
+    let tx = clone_worker_tx(worker_tx).await;
     tx.send(msg).await
+}
+
+async fn clone_worker_tx(
+    worker_tx: &Arc<RwLock<mpsc::Sender<WorkerMsg>>>,
+) -> mpsc::Sender<WorkerMsg> {
+    worker_tx.read().await.clone()
 }
 
 // ---- route dispatch ---------------------------------------------------------
@@ -425,8 +434,12 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
         reply: reply_tx,
     };
 
+    let worker_tx = clone_worker_tx(&state.worker_tx).await;
+    let send_tx = worker_tx.clone();
+    let cancel_tx = worker_tx.downgrade();
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        send_worker_msg(&state.worker_tx, msg)
+        send_tx
+            .send(msg)
             .await
             .map_err(|_| anyhow::anyhow!("js worker is gone"))?;
         reply_rx
@@ -437,14 +450,14 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
     .map_err(|_| anyhow::anyhow!("route handler timed out after {REQUEST_TIMEOUT:?}"))??;
 
     match result {
-        Ok(route_resp) => route_response_to_http(&state, head, route_resp).await,
+        Ok(route_resp) => route_response_to_http(cancel_tx, head, route_resp).await,
         // JS error: readable, source-mapped stack in the dev response
         Err(stack) => Ok(text_response(StatusCode::INTERNAL_SERVER_ERROR, stack)),
     }
 }
 
 async fn route_response_to_http(
-    state: &DevState,
+    cancel_tx: mpsc::WeakSender<WorkerMsg>,
     head: bool,
     route_resp: worker::RouteResponse,
 ) -> Result<Response<Body>> {
@@ -466,15 +479,11 @@ async fn route_response_to_http(
         }
         RouteBody::Stream { stream_id, rx } => {
             if head {
-                let _ = tokio::time::timeout(
-                    REQUEST_TIMEOUT,
-                    send_worker_msg(&state.worker_tx, WorkerMsg::CancelStream { stream_id }),
-                )
-                .await;
+                enqueue_stream_cancel(&cancel_tx, stream_id);
                 drop(rx);
                 empty_unknown_len_body()
             } else {
-                Body::from_stream(UnboundedReceiverStream::new(rx))
+                Body::from_stream(cancel_on_drop_body_stream(stream_id, rx, cancel_tx))
             }
         }
     };
@@ -547,17 +556,18 @@ async fn rsc_flight_response(
     .to_string();
 
     let (reply_tx, reply_rx) = oneshot::channel();
+    let worker_tx = clone_worker_tx(&state.worker_tx).await;
+    let send_tx = worker_tx.clone();
+    let cancel_tx = worker_tx.downgrade();
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        send_worker_msg(
-            &state.worker_tx,
-            WorkerMsg::RscFlight {
+        send_tx
+            .send(WorkerMsg::RscFlight {
                 specifier: specifier.to_string(),
                 request_json,
                 reply: reply_tx,
-            },
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("js worker is gone"))?;
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("js worker is gone"))?;
         reply_rx
             .await
             .map_err(|_| anyhow::anyhow!("js worker dropped the RSC flight request (reloading?)"))
@@ -566,7 +576,7 @@ async fn rsc_flight_response(
     .map_err(|_| anyhow::anyhow!("RSC flight stream timed out after {REQUEST_TIMEOUT:?}"))??;
 
     match result {
-        Ok(route_resp) => route_response_to_http(state, head, route_resp).await,
+        Ok(route_resp) => route_response_to_http(cancel_tx, head, route_resp).await,
         Err(stack) => Ok(text_response(StatusCode::INTERNAL_SERVER_ERROR, stack)),
     }
 }
@@ -748,6 +758,66 @@ fn empty_unknown_len_body() -> Body {
     Body::from_stream(stream::empty::<Result<Bytes, Infallible>>())
 }
 
+fn cancel_on_drop_body_stream(
+    stream_id: u32,
+    rx: mpsc::UnboundedReceiver<Result<Bytes, io::Error>>,
+    cancel_tx: mpsc::WeakSender<WorkerMsg>,
+) -> CancelOnDropStream {
+    CancelOnDropStream {
+        inner: UnboundedReceiverStream::new(rx),
+        cancel_tx,
+        stream_id,
+        completed: false,
+    }
+}
+
+struct CancelOnDropStream {
+    inner: UnboundedReceiverStream<Result<Bytes, io::Error>>,
+    cancel_tx: mpsc::WeakSender<WorkerMsg>,
+    stream_id: u32,
+    completed: bool,
+}
+
+impl Stream for CancelOnDropStream {
+    type Item = Result<Bytes, io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(None) => {
+                self.completed = true;
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
+impl Drop for CancelOnDropStream {
+    fn drop(&mut self) {
+        if !self.completed {
+            enqueue_stream_cancel(&self.cancel_tx, self.stream_id);
+        }
+    }
+}
+
+fn enqueue_stream_cancel(cancel_tx: &mpsc::WeakSender<WorkerMsg>, stream_id: u32) {
+    let Some(cancel_tx) = cancel_tx.upgrade() else {
+        return;
+    };
+    let msg = WorkerMsg::CancelStream { stream_id };
+    match cancel_tx.try_send(msg) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(msg)) => {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let cancel_tx = cancel_tx.clone();
+                handle.spawn(async move {
+                    let _ = cancel_tx.send(msg).await;
+                });
+            }
+        }
+    }
+}
+
 fn text_response(status: StatusCode, body: String) -> Response<Body> {
     Response::builder()
         .status(status)
@@ -768,14 +838,15 @@ mod tests {
     use axum::http::{HeaderValue, Request, Response, StatusCode};
     use axum::routing::get;
     use axum::{Router, middleware};
+    use futures_util::StreamExt;
     use tokio::sync::{RwLock, mpsc};
     use tower::ServiceExt;
 
     use super::{
-        apply_route_security_headers, client_module_response, client_module_route_path,
-        crawlable_route_targets, find_client_module, find_rsc_server_module, route_response,
-        route_response_body, rsc_flight_route_path, secure_route_response, send_worker_msg,
-        text_response, with_route_security_headers,
+        apply_route_security_headers, cancel_on_drop_body_stream, client_module_response,
+        client_module_route_path, crawlable_route_targets, find_client_module,
+        find_rsc_server_module, route_response, route_response_body, rsc_flight_route_path,
+        secure_route_response, send_worker_msg, text_response, with_route_security_headers,
     };
     use crate::router::RouteTable;
     use crate::worker;
@@ -961,6 +1032,79 @@ mod tests {
             response.headers().get("x-frame-options"),
             Some(&HeaderValue::from_static("DENY"))
         );
+    }
+
+    #[tokio::test]
+    async fn stream_body_drop_sends_cancel_stream() {
+        let (_body_tx, body_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+
+        let stream = cancel_on_drop_body_stream(7, body_rx, cancel_tx.downgrade());
+        drop(stream);
+
+        match cancel_rx
+            .try_recv()
+            .expect("body drop should enqueue stream cancellation")
+        {
+            worker::WorkerMsg::CancelStream { stream_id } => assert_eq!(stream_id, 7),
+            msg => panic!("unexpected worker message: {msg:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_body_drop_waits_for_cancel_capacity_when_queue_is_full() {
+        let (_body_tx, body_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+        cancel_tx
+            .try_send(worker::WorkerMsg::RouteMeta {
+                specifier: "file:///queued.ts".to_string(),
+                reply: tokio::sync::oneshot::channel().0,
+            })
+            .unwrap();
+
+        let stream = cancel_on_drop_body_stream(9, body_rx, cancel_tx.downgrade());
+        drop(stream);
+
+        let queued = cancel_rx
+            .recv()
+            .await
+            .expect("placeholder should be queued");
+        assert!(matches!(queued, worker::WorkerMsg::RouteMeta { .. }));
+
+        let cancel = tokio::time::timeout(Duration::from_millis(100), cancel_rx.recv())
+            .await
+            .expect("drop cancellation should wait for channel capacity")
+            .expect("cancel message should be sent");
+        match cancel {
+            worker::WorkerMsg::CancelStream { stream_id } => assert_eq!(stream_id, 9),
+            msg => panic!("unexpected worker message: {msg:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_stream_body_does_not_send_cancel_stream() {
+        let (body_tx, body_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+        drop(body_tx);
+
+        let mut stream = cancel_on_drop_body_stream(8, body_rx, cancel_tx.downgrade());
+        assert!(stream.next().await.is_none());
+        drop(stream);
+
+        assert!(cancel_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_body_drop_without_live_owner_sender_is_noop() {
+        let (_body_tx, body_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+        let weak_cancel_tx = cancel_tx.downgrade();
+        drop(cancel_tx);
+
+        let stream = cancel_on_drop_body_stream(10, body_rx, weak_cancel_tx);
+        drop(stream);
+
+        assert!(cancel_rx.try_recv().is_err());
     }
 
     struct TempDir {

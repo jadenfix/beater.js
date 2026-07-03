@@ -234,6 +234,7 @@ Phase C progress so far:
 - Server routes can now import local ESM packages from `node_modules` with bare specifiers. This is the adoption wedge for real integrations and shared validation libraries without adding a Node sidecar; CommonJS, Node built-ins, install hooks, and client dependency bundling remain broader compatibility work.
 - Worker sends now clone the current isolate channel before awaiting bounded-queue capacity, so a wedged worker cannot hold the hot-reload sender lock while the reloader tries to swap in a fresh isolate.
 - `beater build --out <dir>` now emits a runnable host-platform bundle with `bin/beater`, copied app assets, `run.sh`, `beater-build.json`, `.dockerignore`, and a non-root Dockerfile. Runtime state and common local credential files are excluded; symlinked app files and symlinked outputs are refused. `build_creates_runnable_bundle_and_refuses_unsafe_output` starts the generated launcher and hits `/api/health`; the Docker cold-start gate remains open.
+- Dropping an SSR/RSC response body before it reaches EOF now sends `CancelStream` to the owning worker, so disconnected clients do not leave stalled stream state registered indefinitely.
 
 | # | Item | Done when |
 |---|---|---|
