@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub const DEFAULT_BEATBOX_URL: &str = "http://127.0.0.1:7300";
+const DEFAULT_PYTHON_TIMEOUT_MS: u64 = 10_000;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct BeatboxConfig {
@@ -147,10 +148,18 @@ pub struct BrowserSessionDecl {
 }
 
 pub enum ToolImpl {
-    Python { agent_dir: PathBuf, path: PathBuf },
+    Python {
+        agent_dir: PathBuf,
+        path: PathBuf,
+        timeout: Duration,
+    },
     RustBuiltin,
-    RemoteMcp { config: RemoteMcpTool },
-    Browser { config: BrowserTool },
+    RemoteMcp {
+        config: RemoteMcpTool,
+    },
+    Browser {
+        config: BrowserTool,
+    },
     Sandbox(Box<SandboxTool>),
 }
 
@@ -213,6 +222,7 @@ impl ToolRegistry {
         for decl in decls {
             match decl.kind.as_str() {
                 "python" => {
+                    let timeout = python_timeout(decl)?;
                     let rel = decl
                         .path
                         .as_deref()
@@ -226,7 +236,11 @@ impl ToolRegistry {
                         description,
                         input_schema,
                         idempotent: decl.idempotent,
-                        imp: ToolImpl::Python { agent_dir, path },
+                        imp: ToolImpl::Python {
+                            agent_dir,
+                            path,
+                            timeout,
+                        },
                     });
                 }
                 "rust" => {
@@ -364,9 +378,13 @@ impl ToolRegistry {
             .get(name)
             .with_context(|| format!("no tool named {name}"))?;
         match &tool.imp {
-            ToolImpl::Python { agent_dir, path } => {
+            ToolImpl::Python {
+                agent_dir,
+                path,
+                timeout,
+            } => {
                 let path = canonical_contained_path(agent_dir, path, "python tool")?;
-                beater_py::call_tool(path.clone(), input.to_string()).await
+                beater_py::call_tool_with_timeout(path.clone(), input.to_string(), *timeout).await
             }
             ToolImpl::RustBuiltin => execute_builtin(name, input),
             ToolImpl::RemoteMcp { config } => config.execute(input, context).await,
@@ -385,6 +403,16 @@ impl ToolRegistry {
             }
         }
     }
+}
+
+fn python_timeout(decl: &ToolDecl) -> Result<Duration> {
+    let timeout_ms = decl.timeout_ms.unwrap_or(DEFAULT_PYTHON_TIMEOUT_MS);
+    ensure!(
+        timeout_ms > 0,
+        "python tool {} timeoutMs must be greater than 0",
+        decl.name
+    );
+    Ok(Duration::from_millis(timeout_ms))
 }
 
 fn sandbox_source(agent_dir: &Path, decl: &ToolDecl) -> Result<beatbox_client::Source> {
@@ -1334,7 +1362,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        BrowserSessionGuard, ToolCallContext, ToolDecl, ToolNeedsReview, ToolRegistry,
+        BrowserSessionGuard, ToolCallContext, ToolDecl, ToolImpl, ToolNeedsReview, ToolRegistry,
         browser_session_active_for_tests, browser_session_count_for_tests,
     };
 
@@ -1444,6 +1472,35 @@ def run(input):
             !sentinel.exists(),
             "escaping python tool should not execute after symlink replacement"
         );
+    }
+
+    #[test]
+    fn python_tool_timeout_ms_is_configured() {
+        let agent_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/hello/agents/support");
+        let mut decl = py_decl("slow_summarize", "./tools/slow_summarize.py", true);
+        decl.timeout_ms = Some(1234);
+        let registry =
+            ToolRegistry::build(&agent_dir, &[decl]).expect("python registry should build");
+        let slow = registry.get("slow_summarize").expect("slow_summarize");
+        match &slow.imp {
+            ToolImpl::Python { timeout, .. } => {
+                assert_eq!(*timeout, Duration::from_millis(1234));
+            }
+            _ => panic!("slow_summarize should be a python tool"),
+        }
+    }
+
+    #[test]
+    fn python_tool_timeout_ms_rejects_zero() {
+        let mut decl = py_decl("sleep", "./tools/missing.py", true);
+        decl.timeout_ms = Some(0);
+        let error = match ToolRegistry::build(PathBuf::new().as_path(), &[decl]) {
+            Ok(_) => panic!("zero python timeout should fail"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("timeoutMs"), "{error:#}");
     }
 
     #[tokio::test(flavor = "current_thread")]
