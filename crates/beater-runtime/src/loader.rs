@@ -231,6 +231,24 @@ fn resolve_package_export(
             if let Some(value) = map.get(export_key) {
                 return resolve_export_target(package_dir, value);
             }
+            let mut best_pattern: Option<(&String, &Value, String)> = None;
+            for (key, value) in map {
+                let Some(pattern_match) = export_pattern_match(key, export_key) else {
+                    continue;
+                };
+                let is_better = match &best_pattern {
+                    Some((best_key, _, _)) => {
+                        export_pattern_specificity(key) > export_pattern_specificity(best_key)
+                    }
+                    None => true,
+                };
+                if is_better {
+                    best_pattern = Some((key, value, pattern_match));
+                }
+            }
+            if let Some((_, value, pattern_match)) = best_pattern {
+                return resolve_export_target_with_match(package_dir, value, Some(&pattern_match));
+            }
             if export_key == "."
                 && map.keys().all(|key| !key.starts_with('.'))
                 && let Some(target) = resolve_export_target(package_dir, exports)?
@@ -244,12 +262,25 @@ fn resolve_package_export(
 }
 
 fn resolve_export_target(package_dir: &Path, value: &Value) -> anyhow::Result<Option<PathBuf>> {
+    resolve_export_target_with_match(package_dir, value, None)
+}
+
+fn resolve_export_target_with_match(
+    package_dir: &Path,
+    value: &Value,
+    pattern_match: Option<&str>,
+) -> anyhow::Result<Option<PathBuf>> {
     match value {
-        Value::String(target) => resolve_package_relative(package_dir, target).map(Some),
+        Value::String(target) => {
+            let target =
+                pattern_match.map_or_else(|| target.to_string(), |m| target.replace('*', m));
+            resolve_package_relative(package_dir, &target).map(Some)
+        }
         Value::Object(map) => {
             for (condition, target) in map {
                 if is_active_export_condition(condition)
-                    && let Some(resolved) = resolve_export_target(package_dir, target)?
+                    && let Some(resolved) =
+                        resolve_export_target_with_match(package_dir, target, pattern_match)?
                 {
                     return Ok(Some(resolved));
                 }
@@ -258,6 +289,31 @@ fn resolve_export_target(package_dir: &Path, value: &Value) -> anyhow::Result<Op
         }
         _ => Ok(None),
     }
+}
+
+fn export_pattern_match(pattern: &str, export_key: &str) -> Option<String> {
+    if !pattern.starts_with("./") {
+        return None;
+    }
+    let (prefix, suffix) = pattern.split_once('*')?;
+    if suffix.contains('*') {
+        return None;
+    }
+    if !export_key.starts_with(prefix) || !export_key.ends_with(suffix) {
+        return None;
+    }
+    let match_end = export_key.len().checked_sub(suffix.len())?;
+    if match_end <= prefix.len() {
+        return None;
+    }
+    Some(export_key[prefix.len()..match_end].to_string())
+}
+
+fn export_pattern_specificity(pattern: &str) -> (usize, usize, usize) {
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return (pattern.len(), 0, pattern.len());
+    };
+    (prefix.len(), suffix.len(), pattern.len())
 }
 
 fn is_active_export_condition(condition: &str) -> bool {
@@ -788,6 +844,161 @@ mod tests {
             with_browser,
             ModuleSpecifier::from_file_path(app.path().join("node_modules/with-browser/import.js"))
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn package_import_resolves_wildcard_subpath_exports() {
+        let app = TempDir::new("package-wildcard-exports");
+        app.write(
+            "app/routes/api/schema.ts",
+            "import add from 'fixture/features/add';\nimport exact from 'fixture/features/exact';\n",
+        );
+        app.write(
+            "node_modules/fixture/package.json",
+            r#"{
+  "name": "fixture",
+  "type": "module",
+  "exports": {
+    "./features/exact": "./exact.js",
+    "./*": "./dist/*.js"
+  }
+}"#,
+        );
+        app.write(
+            "node_modules/fixture/dist/features/add.js",
+            "export default 'wildcard';\n",
+        );
+        app.write("node_modules/fixture/exact.js", "export default 'exact';\n");
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/schema.ts")).unwrap();
+
+        let wildcard = resolve_package_import("fixture/features/add", referrer.as_str())
+            .unwrap()
+            .unwrap();
+        let exact = resolve_package_import("fixture/features/exact", referrer.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            wildcard,
+            ModuleSpecifier::from_file_path(
+                app.path().join("node_modules/fixture/dist/features/add.js")
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            exact,
+            ModuleSpecifier::from_file_path(app.path().join("node_modules/fixture/exact.js"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn package_import_applies_conditions_to_wildcard_exports() {
+        let app = TempDir::new("package-wildcard-condition");
+        app.write(
+            "app/routes/api/schema.ts",
+            "import feature from 'fixture/features/math';\n",
+        );
+        app.write(
+            "node_modules/fixture/package.json",
+            r#"{
+  "name": "fixture",
+  "type": "module",
+  "exports": {
+    "./features/*": {
+      "browser": "./browser/*.js",
+      "node": "./server/*.js",
+      "default": "./default/*.js"
+    }
+  }
+}"#,
+        );
+        app.write(
+            "node_modules/fixture/browser/math.js",
+            "export default 'browser';\n",
+        );
+        app.write(
+            "node_modules/fixture/server/math.js",
+            "export default 'node';\n",
+        );
+        app.write(
+            "node_modules/fixture/default/math.js",
+            "export default 'default';\n",
+        );
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/schema.ts")).unwrap();
+
+        let resolved = resolve_package_import("fixture/features/math", referrer.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            resolved,
+            ModuleSpecifier::from_file_path(app.path().join("node_modules/fixture/server/math.js"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn package_import_rejects_wildcard_export_target_escape() {
+        let app = TempDir::new("package-wildcard-escape");
+        app.write(
+            "app/routes/api/schema.ts",
+            "import value from 'fixture/private';\n",
+        );
+        app.write(
+            "node_modules/fixture/package.json",
+            r#"{
+  "name": "fixture",
+  "type": "module",
+  "exports": {
+    "./*": "./../*.js"
+  }
+}"#,
+        );
+        app.write("node_modules/private.js", "export default 'outside';\n");
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/schema.ts")).unwrap();
+
+        let error = resolve_package_import("fixture/private", referrer.as_str()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("points outside its package"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn package_import_rejects_empty_wildcard_export_match() {
+        let app = TempDir::new("package-wildcard-empty");
+        app.write(
+            "app/routes/api/schema.ts",
+            "import value from 'fixture/features/';\n",
+        );
+        app.write(
+            "node_modules/fixture/package.json",
+            r#"{
+  "name": "fixture",
+  "type": "module",
+  "exports": {
+    "./features/*": "./dist/*.js"
+  }
+}"#,
+        );
+        app.write(
+            "node_modules/fixture/dist/.js",
+            "export default 'hidden';\n",
+        );
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/schema.ts")).unwrap();
+
+        let error = resolve_package_import("fixture/features/", referrer.as_str()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("does not export ./features/"),
+            "{error:#}"
         );
     }
 
