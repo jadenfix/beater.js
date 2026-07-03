@@ -478,13 +478,7 @@ impl ConnectApp {
         .ok();
         writeln!(out, "  \"paths\": {{").ok();
 
-        let mut path_rows = Vec::new();
-        for resource in &self.resources {
-            path_rows.push(self.resource_path_json(resource));
-        }
-        for action in &self.actions {
-            path_rows.push(self.action_path_json(action));
-        }
+        let path_rows = self.openapi_path_rows();
         writeln!(out, "{}", path_rows.join(",\n")).ok();
         writeln!(out, "  }},").ok();
         writeln!(out, "  \"components\": {{").ok();
@@ -762,17 +756,38 @@ impl ConnectApp {
         out
     }
 
-    fn resource_path_json(&self, resource: &Resource) -> String {
+    fn openapi_path_rows(&self) -> Vec<String> {
+        let mut paths = Vec::new();
+        for resource in &self.resources {
+            push_openapi_operation(
+                &mut paths,
+                &resource.path,
+                "get",
+                self.resource_operation_json(resource),
+            );
+        }
+        for action in &self.actions {
+            let method = action.method.to_ascii_lowercase();
+            push_openapi_operation(
+                &mut paths,
+                &action.path,
+                &method,
+                self.action_operation_json(action),
+            );
+        }
+        paths.into_iter().map(OpenApiPathItem::into_json).collect()
+    }
+
+    fn resource_operation_json(&self, resource: &Resource) -> String {
         format!(
-            "    \"{}\": {{\n      \"get\": {{\n        \"operationId\": \"read_{}\",\n        \"summary\": \"Read {}\",\n        \"description\": \"{}\",\n        \"responses\": {{\n          \"200\": {{ \"description\": \"Resource content\" }}\n        }}\n      }}\n    }}",
-            json_escape(&resource.path),
+            "      \"get\": {{\n        \"operationId\": \"read_{}\",\n        \"summary\": \"Read {}\",\n        \"description\": \"{}\",\n        \"responses\": {{\n          \"200\": {{ \"description\": \"Resource content\" }}\n        }}\n      }}",
             json_escape(&resource.id),
             json_escape(&resource.title),
             json_escape(&resource.description)
         )
     }
 
-    fn action_path_json(&self, action: &Action) -> String {
+    fn action_operation_json(&self, action: &Action) -> String {
         let method = action.method.to_ascii_lowercase();
         let security = match action.auth {
             Auth::Public => "[]".to_string(),
@@ -787,8 +802,7 @@ impl ConnectApp {
             ""
         };
         format!(
-            "    \"{}\": {{\n      \"{}\": {{\n        \"operationId\": \"{}\",\n        \"summary\": \"{}\",\n        \"description\": \"{}\",\n        \"security\": {},{}\n        \"x-beater-connect\": {{\n          \"sideEffect\": \"{}\",\n          \"confirm\": {},\n          \"dryRun\": {},\n          \"idempotencyRequired\": {}\n        }},\n        \"requestBody\": {{\n          \"required\": true,\n          \"content\": {{\n            \"application/json\": {{\n              \"schema\": {}\n            }}\n          }}\n        }},\n        \"responses\": {{\n          \"200\": {{ \"description\": \"Action result\" }}\n        }}\n      }}\n    }}",
-            json_escape(&action.path),
+            "      \"{}\": {{\n        \"operationId\": \"{}\",\n        \"summary\": \"{}\",\n        \"description\": \"{}\",\n        \"security\": {},{}\n        \"x-beater-connect\": {{\n          \"sideEffect\": \"{}\",\n          \"confirm\": {},\n          \"dryRun\": {},\n          \"idempotencyRequired\": {}\n        }},\n        \"requestBody\": {{\n          \"required\": true,\n          \"content\": {{\n            \"application/json\": {{\n              \"schema\": {}\n            }}\n          }}\n        }},\n        \"responses\": {{\n          \"200\": {{ \"description\": \"Action result\" }}\n        }}\n      }}",
             json_escape(&method),
             json_escape(&action.id),
             json_escape(&action.title),
@@ -828,6 +842,59 @@ impl ConnectApp {
         }
         write!(out, "{pad}}}").ok();
         out
+    }
+}
+
+struct OpenApiPathItem {
+    path: String,
+    operations: Vec<(String, String)>,
+}
+
+impl OpenApiPathItem {
+    fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            operations: Vec::new(),
+        }
+    }
+
+    fn push_operation(&mut self, method: &str, operation_json: String) {
+        if let Some((_, existing)) = self
+            .operations
+            .iter_mut()
+            .find(|(existing_method, _)| existing_method == method)
+        {
+            *existing = operation_json;
+        } else {
+            self.operations.push((method.to_string(), operation_json));
+        }
+    }
+
+    fn into_json(self) -> String {
+        format!(
+            "    \"{}\": {{\n{}\n    }}",
+            json_escape(&self.path),
+            self.operations
+                .into_iter()
+                .map(|(_, operation)| operation)
+                .collect::<Vec<_>>()
+                .join(",\n")
+        )
+    }
+}
+
+fn push_openapi_operation(
+    paths: &mut Vec<OpenApiPathItem>,
+    path: &str,
+    method: &str,
+    operation_json: String,
+) {
+    if let Some(item) = paths.iter_mut().find(|item| item.path == path) {
+        item.push_operation(method, operation_json);
+    } else {
+        let mut item = OpenApiPathItem::new(path);
+        item.push_operation(method, operation_json);
+        paths.push(item);
     }
 }
 
@@ -1011,6 +1078,77 @@ mod tests {
         let openapi = demo_app().openapi_json();
         assert!(openapi.contains("\"Idempotency-Key\""));
         assert!(openapi.contains("\"idempotencyRequired\": true"));
+    }
+
+    #[test]
+    fn openapi_groups_resource_and_actions_by_path() {
+        let app = ConnectApp::new("Store", "Store API", "https://example.com")
+            .resource(Resource::new(
+                "items",
+                "Items",
+                "List items.",
+                "/items",
+                "/items.md",
+            ))
+            .action(Action::new(
+                "create_item",
+                "Create item",
+                "Create an item.",
+                "POST",
+                "/items",
+                SideEffect::Write,
+            ))
+            .action(Action::new(
+                "delete_item",
+                "Delete item",
+                "Delete an item.",
+                "DELETE",
+                "/items",
+                SideEffect::Delete,
+            ));
+
+        let openapi = app.openapi_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&openapi).expect("openapi should be valid JSON");
+        let paths = parsed["paths"]
+            .as_object()
+            .expect("openapi paths should be an object");
+        let item = paths.get("/items").expect("/items path should be present");
+
+        assert_eq!(openapi.matches("\"/items\"").count(), 1);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(item["get"]["operationId"], "read_items");
+        assert_eq!(item["post"]["operationId"], "create_item");
+        assert_eq!(item["delete"]["operationId"], "delete_item");
+    }
+
+    #[test]
+    fn openapi_replaces_duplicate_path_method_with_explicit_action() {
+        let app = ConnectApp::new("Docs", "Docs API", "https://example.com")
+            .resource(Resource::new(
+                "docs",
+                "Docs",
+                "Read docs.",
+                "/docs",
+                "/docs.md",
+            ))
+            .action(Action::new(
+                "read_docs_action",
+                "Read docs action",
+                "Explicit action for docs.",
+                "GET",
+                "/docs",
+                SideEffect::Read,
+            ));
+
+        let openapi = app.openapi_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&openapi).expect("openapi should be valid JSON");
+        let docs = &parsed["paths"]["/docs"];
+
+        assert_eq!(openapi.matches("\"/docs\"").count(), 1);
+        assert_eq!(openapi.matches("\"get\"").count(), 1);
+        assert_eq!(docs["get"]["operationId"], "read_docs_action");
     }
 
     #[test]

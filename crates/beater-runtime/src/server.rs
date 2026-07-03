@@ -212,21 +212,12 @@ async fn handle_robots(State(state): State<DevState>) -> Response<Body> {
     text_response(StatusCode::OK, crawl::robots_txt(&state.base_url))
 }
 
-/// Static (non-parameterized) routes with their `agent` metadata resolved
-/// through the isolate — the shared input for sitemap.xml and llms.txt.
+/// Static page routes with their `agent` metadata resolved through the isolate
+/// — the shared input for sitemap.xml and llms.txt.
 async fn crawlable_routes(state: &DevState) -> Vec<(String, PathBuf, Option<RouteMeta>)> {
     let targets: Vec<(String, PathBuf, Option<String>)> = {
         let table = state.routes.read().await;
-        table
-            .iter()
-            .filter(|r| !r.segments.iter().any(|s| matches!(s, Segment::Param(_))))
-            .map(|r| {
-                let spec = deno_core::ModuleSpecifier::from_file_path(&r.file)
-                    .ok()
-                    .map(|s| s.to_string());
-                (r.pattern.clone(), r.file.clone(), spec)
-            })
-            .collect()
+        crawlable_route_targets(&table)
     };
     let mut routes = Vec::new();
     for (pattern, file, spec) in targets {
@@ -237,6 +228,25 @@ async fn crawlable_routes(state: &DevState) -> Vec<(String, PathBuf, Option<Rout
         routes.push((pattern, file, meta));
     }
     routes
+}
+
+fn crawlable_route_targets(table: &RouteTable) -> Vec<(String, PathBuf, Option<String>)> {
+    table
+        .iter()
+        .filter(|route| route.kind == RouteKind::Page)
+        .filter(|route| {
+            !route
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, Segment::Param(_)))
+        })
+        .map(|route| {
+            let spec = deno_core::ModuleSpecifier::from_file_path(&route.file)
+                .ok()
+                .map(|specifier| specifier.to_string());
+            (route.pattern.clone(), route.file.clone(), spec)
+        })
+        .collect()
 }
 
 async fn handle_sitemap(State(state): State<DevState>) -> Response<Body> {
@@ -732,8 +742,8 @@ mod tests {
 
     use super::{
         apply_route_security_headers, client_module_response, client_module_route_path,
-        find_client_module, find_rsc_server_module, route_response, route_response_body,
-        rsc_flight_route_path, text_response,
+        crawlable_route_targets, find_client_module, find_rsc_server_module, route_response,
+        route_response_body, rsc_flight_route_path, text_response,
     };
     use crate::router::RouteTable;
     use crate::worker;
@@ -916,6 +926,28 @@ mod tests {
         let table = RouteTable::scan(app.path()).unwrap();
 
         assert!(find_rsc_server_module(app.path(), &table, Path::new("admin/secret")).is_none());
+    }
+
+    #[test]
+    fn crawlable_routes_exclude_api_and_parameterized_routes() {
+        let app = TempDir::new("crawlable");
+        app.write("app/routes/index.tsx", "export default function Home() {}");
+        app.write("app/routes/about.tsx", "export default function About() {}");
+        app.write("app/routes/api/health.ts", "export function GET() {}");
+        app.write("app/routes/api/export.js", "export function GET() {}");
+        app.write(
+            "app/routes/blog/[slug].tsx",
+            "export default function BlogPost() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        let mut patterns: Vec<_> = crawlable_route_targets(&table)
+            .into_iter()
+            .map(|(pattern, _, _)| pattern)
+            .collect();
+        patterns.sort();
+
+        assert_eq!(patterns, vec!["/", "/about"]);
     }
 
     #[tokio::test]

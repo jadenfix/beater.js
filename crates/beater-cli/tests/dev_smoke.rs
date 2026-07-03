@@ -303,13 +303,25 @@ export function GET() {
     let doctor = Command::new(&beater)
         .arg("doctor")
         .arg(&app)
+        .env_remove("BEATER_BASE_URL")
+        .env_remove("BEATBOX_URL")
+        .env_remove("BEATBOX_API_KEY")
         .output()
         .expect("run doctor on scaffolded app");
-    assert!(doctor.status.success());
+    assert!(!doctor.status.success());
+    let doctor_stdout = String::from_utf8_lossy(&doctor.stdout);
     assert!(
-        String::from_utf8_lossy(&doctor.stdout).contains("app:     my-app"),
-        "stdout:\n{}",
-        String::from_utf8_lossy(&doctor.stdout)
+        doctor_stdout.contains("app:     my-app"),
+        "stdout:\n{doctor_stdout}"
+    );
+    assert!(
+        doctor_stdout.contains("venv:    MISMATCH"),
+        "stdout:\n{doctor_stdout}"
+    );
+    assert!(
+        String::from_utf8_lossy(&doctor.stderr).contains("doctor found problems"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&doctor.stderr)
     );
 
     let overwrite = Command::new(&beater)
@@ -763,10 +775,24 @@ fn dev_server_requires_mcp_bearer_token_when_configured() {
 #[test]
 fn doctor_reports_python_v8_and_venv_diagnostics() {
     let workspace = workspace();
-    let app = workspace.join("examples/hello");
+    let temp = temp_dir("doctor-ok");
+    let app = temp.path.join("app");
+    std::fs::create_dir_all(&app).expect("create doctor app");
+    std::fs::write(
+        app.join("beater.toml"),
+        r#"
+[app]
+name = "doctor-ok"
+port = 31234
+"#,
+    )
+    .expect("write doctor app config");
     let output = Command::new(beater_bin(&workspace))
         .arg("doctor")
         .arg(&app)
+        .env_remove("BEATER_BASE_URL")
+        .env_remove("BEATBOX_URL")
+        .env_remove("BEATBOX_API_KEY")
         .output()
         .expect("run beater doctor");
 
@@ -779,6 +805,25 @@ fn doctor_reports_python_v8_and_venv_diagnostics() {
     assert!(stdout.contains("beatbox:"), "{stdout}");
     assert!(stdout.contains("mcp:"), "{stdout}");
     assert!(stdout.contains("v8:"), "{stdout}");
+}
+
+#[test]
+fn doctor_exits_nonzero_when_diagnostics_fail() {
+    let workspace = workspace();
+    let temp = temp_dir("doctor-missing-app");
+    let missing_app = temp.path.join("missing");
+    let output = Command::new(beater_bin(&workspace))
+        .arg("doctor")
+        .arg(&missing_app)
+        .output()
+        .expect("run beater doctor on missing app");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("beater doctor"), "{stdout}");
+    assert!(stdout.contains("app:     UNAVAILABLE"), "{stdout}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("doctor found problems"), "{stderr}");
 }
 
 fn workspace() -> PathBuf {

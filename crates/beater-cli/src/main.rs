@@ -824,6 +824,7 @@ fn json_string(value: &str) -> String {
 }
 
 fn doctor(app: &std::path::Path) -> Result<()> {
+    let mut failed = false;
     println!("beater doctor");
     println!("  app dir: {}", app.display());
     match beater_runtime::AppConfig::load(app) {
@@ -832,7 +833,10 @@ fn doctor(app: &std::path::Path) -> Result<()> {
             println!("  bind:    {}:{}", config.host, config.port);
             match config.public_base_url(config.host, config.port, None) {
                 Ok(base_url) => println!("  public:  {base_url}"),
-                Err(e) => println!("  public:  INVALID — {e}"),
+                Err(e) => {
+                    failed = true;
+                    println!("  public:  INVALID — {e}");
+                }
             }
             match &config.python_venv {
                 Some(venv) => {
@@ -842,6 +846,7 @@ fn doctor(app: &std::path::Path) -> Result<()> {
                             println!("  venv ok: {}", site_packages.display());
                         }
                         Err(e) => {
+                            failed = true;
                             println!("  venv:    MISMATCH — {e}");
                         }
                     }
@@ -855,11 +860,17 @@ fn doctor(app: &std::path::Path) -> Result<()> {
                 println!("  beatbox auth: no bearer token configured");
             }
         }
-        Err(e) => println!("  app:     UNAVAILABLE — {e:#}"),
+        Err(e) => {
+            failed = true;
+            println!("  app:     UNAVAILABLE — {e:#}");
+        }
     }
     match beater_py::python_info() {
         Ok(info) => println!("  python:  {info}"),
-        Err(e) => println!("  python:  UNAVAILABLE — {e}"),
+        Err(e) => {
+            failed = true;
+            println!("  python:  UNAVAILABLE — {e}");
+        }
     }
     match std::env::var("PYO3_PYTHON") {
         Ok(path) => println!("  shell:   PYO3_PYTHON={path}"),
@@ -875,5 +886,8 @@ fn doctor(app: &std::path::Path) -> Result<()> {
         println!("  origins: {}", mcp_access.trusted_origins().join(", "));
     }
     println!("  v8:      {}", beater_runtime::v8_version());
+    if failed {
+        bail!("doctor found problems");
+    }
     Ok(())
 }
