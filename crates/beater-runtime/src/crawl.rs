@@ -246,5 +246,3 @@ mod tests {
         assert!(robots.contains("Disallow: /\n"));
     }
 }
-    }
-}
