@@ -29,7 +29,7 @@ The work below is not just about matching Node/Next request handling. The end st
 **Goal:** make [A] actually true: prove the M2 live gate end to end, record the evidence, and flip the docs from "pending live gate" to "done" only after A3-A5 pass.
 
 **Primary PR sequence:**
-- [x] Add the slow-tool fixtures for A2 with the smallest possible example-app surface.
+- [ ] Add the slow-tool fixtures for A2 with the smallest possible example-app surface.
 - [ ] Run and record A3 happy path with the live Anthropic API.
 - [ ] Run and record A4 crash/resume idempotent proof.
 - [ ] Run and record A5 non-idempotent `needs_review` proof.
@@ -61,11 +61,11 @@ The work below is not just about matching Node/Next request handling. The end st
 
 **Owner:** this Codex thread when working in `codex/agent3-*` branches.
 
-**Goal:** pay down [C] in dependency order with one reviewable PR per vertical slice, starting with the minimum Node/Next replacement path: streaming SSR, hydration, RSC, npm/node-compat, isolate pool, and deploy. Each slice should also strengthen the next-era agent platform: agentic browsing, remote management, networked tool sessions, integrations, auditability, and deployable operations.
+**Goal:** pay down [C] in dependency order with one reviewable PR per vertical slice, starting with the minimum Node/Next replacement path: streaming SSR, hydration, RSC, npm/node-compat, isolate pool, and deploy.
 
 **Primary PR sequence:**
 - [x] Add streaming React SSR over the worker chunk channel and prove shell-before-delayed-subtree delivery.
-- [x] Add client hydration with a per-route client bundle.
+- [ ] Add client hydration with a per-route client bundle.
 - [ ] Add RSC flight protocol over the same chunk channel.
 - [ ] Add npm/node-compat adoption wedge.
 - [ ] Add isolate pool behind the existing worker protocol.
@@ -99,9 +99,7 @@ The work below is not just about matching Node/Next request handling. The end st
 | Agent Access Layer | /robots.txt, /sitemap.xml, /llms.txt, /.well-known/beater.json generated from the route table; `export const agent = {crawl: false}` excludes a route from sitemap + llms.txt; remote deployments can override the advertised public base URL |
 | Agent config pipeline | `agent.ts` (via `beater:agent` shim) evaluates in a one-shot isolate → JSON config → Rust registry; Python TOOL metadata loads through embedded CPython |
 | Durability machinery (code) | SQLite journal with started/completed/failed lifecycle + attempts; resume logic for dangling LLM calls and idempotent-only tool re-runs; `needs_review` parking |
-| M2 crash/resume fixtures | `slow_summarize.py` and `slow_summarize_once.py` are declared from `examples/hello/agents/support/agent.ts`; `scripts/m2-live-gate.sh` drives A3-A5 once `ANTHROPIC_API_KEY` is present |
 | Streaming SSR | `scripts/streaming-ssr-gate.sh` starts `beater dev`, reads the raw HTTP socket, and proved shell marker at 0.026s before Suspense-delayed marker at 0.489s while `/api/health` returned in 0.002s |
-| Client hydration | `/_beater/client/index.js` serves `app/routes/index.client.ts`; the hello page loads it as a module and `scripts/client-hydration-gate.cjs` verifies the counter increments in a browser |
 
 ---
 
@@ -119,11 +117,9 @@ echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshenv
 
 Once the key is present and `./target/debug/beater` is built, `scripts/m2-live-gate.sh` runs A3-A5 and writes transcripts under `examples/hello/.beater/m2-gate/<timestamp>/`.
 
-### A2. Test fixture: slow tools for deterministic kill -9
+### A2. Test fixture: a slow tool (needed to kill -9 deterministically mid-tool)
 
-**Done.** `examples/hello/agents/support/tools/slow_summarize.py` waits before returning and is declared in `agent.ts` as `pyTool("slow_summarize", "./tools/slow_summarize.py", { idempotent: true })`. `slow_summarize_once.py` covers the non-idempotent path with `idempotent: false`. These fixtures are also included in the `beater new` hello template.
-
-A3-A5 are still pending because the live gate requires `ANTHROPIC_API_KEY`.
+Add `examples/hello/agents/support/tools/slow_summarize.py` — same as `summarize_numbers` but with `time.sleep(15)` inside `run()`, declared in `agent.ts` as `pyTool("slow_summarize", "./tools/slow_summarize.py", { idempotent: true })`. Add a second variant (or a flag) declared `{ idempotent: false }` for the needs_review test.
 
 ### A3. Gate 1 — happy path (TS agent → Rust loop → Python tool → LLM)
 
@@ -191,7 +187,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 - [x] Network bind control: `--host` / `[app] host` makes container, VM, and remote-management smoke tests possible.
 - [x] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, browser preflight/CORS support, public base URL metadata, and a safe way to expose a dev/prod agent endpoint beyond localhost.
 - [x] Networked integration contract (v0.1 direct `tools/call`): `remote_mcp` tool sources, request timeouts/retries, bearer-secret handling, `tool_use_id` idempotency keys, review parking, and egress policy are tested against mock servers. Provider discovery and MCP sessions remain Phase C item 8.
-- [x] Agentic browsing foundation (v0.1 mock CDP): `browserTool` provider contract, allowed-origin policy, per-tool-call mock session cleanup on success/failure/timeout, and mocked agent-loop e2e prove an agent can complete a browser task through a tool declaration. Real run-attached Playwright/CDP providers remain Phase C item 9.
+- [ ] Agentic browsing foundation: CDP/Playwright provider contract, browser session lifecycle cleanup, and e2e tests proving an agent can complete a browser task through a tool declaration.
 - [x] Integration registry docs: `docs/integrations.md` shows how first-party Python/Rust tools, remote MCP servers, and browser providers coexist in one agent config without queues or sidecar services.
 
 ### Security floor (currently: dev-mode assumptions everywhere)
@@ -202,7 +198,7 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 ### Docs
 - [x] README quickstart actually runnable start-to-finish by a stranger (install Rust, install Python 3.11+, cargo build, `beater new`, `beater dev`)
 - [x] `docs/tools.md`: the pyTool/rustTool contract (TOOL dict, run(), idempotency rules)
-- [x] `docs/integrations.md`: one-registry contract for first-party tools, remote MCP sources, mock browser providers, production browser-provider acceptance criteria, secrets, retries, idempotency, egress, and journal audit rules
+- [x] `docs/integrations.md`: one-registry contract for first-party tools, planned remote MCP sources, planned browser providers, secrets, retries, idempotency, egress, and journal audit rules
 - [x] `docs/runtime-limits.md`: current single-isolate route serialization, one-app-per-dev-server limit, operational guidance, and isolate-pool acceptance path
 - [x] CHANGELOG + versioning policy (deno_core pin-bump cadence)
 
@@ -214,15 +210,10 @@ These are the items ARCHITECTURE.md §8 explicitly deferred, in dependency order
 
 The through-line is not just parity with Node/Next; it is an agent-native runtime where browsers, remote MCP servers, SaaS APIs, local ML tools, and human-facing web actions are all first-class, durable, inspectable capabilities. Phase C work should therefore prefer slices that improve remote management, networking, integrations, browser automation, and deployability over isolated demos.
 
-Phase C progress so far:
-
-- Route responses can now carry ordered `body_chunks`; the Rust server forwards them as chunked response bodies and strips stale `content-length` headers.
-- Route-scoped client modules can now live beside page routes as `*.client.ts` files and are served from `/_beater/client/<route>.js`; the hello page uses this to prove same-origin browser code can hydrate a counter without Node/npm. Full React hydration and bundling are still open.
-
 | # | Item | Done when |
 |---|---|---|
 | 1 | **Streaming SSR** — renderToReadableStream over the chunked worker channel | **done:** `scripts/streaming-ssr-gate.sh` proved the shell chunk arrived before the Suspense-delayed subtree chunk |
-| 2 | **Client hydration** — route-scoped client bundles (`/_beater/client/<route>.js`) | **done:** `/_beater/client/index.js` serves the route companion client module; the hello counter increments in the browser gate |
+| 2 | **Client hydration** — per-route client bundle (`/_beater/client.js`) | a counter button on index.tsx works in a browser |
 | 3 | **RSC** — flight protocol over the same chunked channel | server components with client islands render + hydrate |
 | 4 | **npm/node-compat** — the adoption wedge (Deno-style compat layer, not a reimplementation) | `import { z } from "zod"` works in a route |
 | 5 | **Isolate pool** — N workers behind the existing channel protocol | wrk shows near-linear scaling to core count |
@@ -244,4 +235,4 @@ Phase C progress so far:
 
 - **To be e2e done (MVP):** install `ANTHROPIC_API_KEY`, add one slow-tool fixture, run the three A3–A5 gates, flip the docs. Everything else is already built and verified.
 - **To ship v0.1:** tests + CI, portable Python config, isolate-pool-or-documented-limits, `beater new`.
-- **To kill Node/Next:** pay off punts 1–5 and 11 first, while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.
+- **To kill Node/Next:** pay off punts 1–5 and 11 first; the rest is compounding advantage.

@@ -247,13 +247,17 @@
     if (typeof ReactDOMServer.renderToReadableStream !== "function") {
       throw new Error("react-dom/server renderToReadableStream is unavailable");
     }
+    const renderOptions = {
+      onError(error) {
+        if (!isExpectedRenderAbort(error)) console.error(error);
+      },
+    };
+    if (typeof request.scriptNonce === "string" && request.scriptNonce !== "") {
+      renderOptions.nonce = request.scriptNonce;
+    }
     const stream = await ReactDOMServer.renderToReadableStream(
       React.createElement(Component, { request }),
-      {
-        onError(error) {
-          if (!isExpectedRenderAbort(error)) console.error(error);
-        },
-      },
+      renderOptions,
     );
     const reader = stream.getReader();
     pageStreams.set(stream_id, reader);
@@ -284,6 +288,32 @@
       description: typeof meta.description === "string" ? meta.description : null,
       crawl: meta.crawl !== false,
     };
+  };
+
+  // Client bundle dispatch: a page route may export `client` as either a
+  // function or a JavaScript string. This keeps the first hydration slice
+  // route-scoped without introducing npm resolution or a persistent bundler.
+  globalThis.__beaterClientBundle = async (specifier, routePath) => {
+    const mod = await import(specifier);
+    const client = mod.client;
+    if (client == null) return null;
+    let source;
+    if (typeof client === "function") {
+      source = `(${client.toString()})();`;
+    } else if (typeof client === "string") {
+      source = client;
+    } else {
+      throw new Error(`route client export must be a function or string: ${specifier}`);
+    }
+    return [
+      `// beater.js route client bundle`,
+      `// route: ${routePath}`,
+      `(() => {`,
+      `"use strict";`,
+      source,
+      `})();`,
+      ``,
+    ].join("\n");
   };
 
   // Route dispatch: called from Rust with (specifier, method, request).

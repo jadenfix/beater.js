@@ -7,7 +7,7 @@ beater.js tools are first-party code declared by an agent and exposed through th
 `agents/<name>/agent.ts` imports helpers from `beater:agent`:
 
 ```ts
-import { browserTool, defineAgent, pyTool, remoteMcpTool, rustTool } from "beater:agent";
+import { defineAgent, pyTool, remoteMcpTool, rustTool } from "beater:agent";
 
 export default defineAgent({
   name: "support",
@@ -71,7 +71,7 @@ Use `idempotent: false` for tools that send email, charge money, mutate external
 
 ## Integration roadmap
 
-Remote MCP servers and browser-control providers enter through the same registry shape: name, description, input schema, implementation kind, timeout/retry policy, secret source, egress allowlist, and idempotency. They should not bypass the journal. Remote MCP tools are mock-server tested. Browser tools currently include a mock CDP provider for contract, cleanup, and agent-loop tests; production Playwright/CDP providers still need real browser e2e coverage.
+Remote MCP servers and browser-control providers enter through the same registry shape: name, description, input schema, implementation kind, timeout/retry policy, secret source, egress allowlist, and idempotency. They should not bypass the journal. Remote MCP tools are mock-server tested; browser tools still need browser e2e coverage proving failures are resumable and sessions are cleaned up.
 
 ## Remote MCP tools
 
@@ -96,27 +96,5 @@ remoteMcpTool("crm.lookup", {
 ```
 
 Secrets are read from environment variables at execution time and are never stored in `agent.ts` or the journal. Missing secrets fail before a network connection is opened. Bearer-auth endpoints must use HTTPS except for loopback test servers. The endpoint host must match `egress`; use `host` or `host:port` entries. Redirects are not followed.
-
-## Browser tools
-
-Use `browserTool` for browser-provider declarations. The current `mock_cdp` provider is deterministic and intended for CI coverage of the browser contract:
-
-```ts
-browserTool("browser.checkout", {
-  provider: "mock_cdp",
-  description: "Verify checkout in a browser.",
-  inputSchema: {
-    type: "object",
-    properties: {url: {type: "string"}, task: {type: "string"}},
-    required: ["url", "task"],
-  },
-  session: {scope: "run", cleanup: "always"},
-  allowedOrigins: ["https://shop.example"],
-  timeoutMs: 30_000,
-  idempotent: false,
-})
-```
-
-Browser tools default to non-idempotent because they create sessions and may perform side effects. `allowedOrigins` is enforced before navigation, and mock sessions are per tool call with cleanup on success, failure, and timeout. `mock_cdp` rejects non-empty `secrets`; real providers must validate and scope credentials explicitly.
 
 See [Integration Registry](integrations.md) for the full contract and target declaration shapes.

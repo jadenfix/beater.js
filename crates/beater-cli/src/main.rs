@@ -97,25 +97,14 @@ fn main() -> Result<()> {
         Command::Agent { command } => match command {
             AgentCommand::Run { app, name, prompt } => {
                 let config = beater_runtime::load_agent_config(&app, &name)?;
-                let app_config = beater_runtime::AppConfig::load(&app)?;
-                beater_agent::run(
-                    &app,
-                    &name,
-                    config,
-                    app_config.python_venv,
-                    app_config.beatbox,
-                    &prompt,
-                )
+                let venv = beater_runtime::AppConfig::load(&app)?.python_venv;
+                beater_agent::run(&app, &name, config, venv, &prompt)
             }
             AgentCommand::Resume { app, run_id } => {
-                let app_config = beater_runtime::AppConfig::load(&app)?;
-                beater_agent::resume(
-                    &app,
-                    &run_id,
-                    app_config.python_venv,
-                    app_config.beatbox,
-                    |agent| beater_runtime::load_agent_config(&app, agent),
-                )
+                let venv = beater_runtime::AppConfig::load(&app)?.python_venv;
+                beater_agent::resume(&app, &run_id, venv, |agent| {
+                    beater_runtime::load_agent_config(&app, agent)
+                })
             }
             AgentCommand::Runs { app } => beater_agent::list_runs(&app),
         },
@@ -131,10 +120,6 @@ const TEMPLATE_FILES: &[(&str, &str)] = &[
     (
         "app/routes/index.tsx",
         include_str!("../../../examples/hello/app/routes/index.tsx"),
-    ),
-    (
-        "app/routes/index.client.ts",
-        include_str!("../../../examples/hello/app/routes/index.client.ts"),
     ),
     (
         "app/routes/api/health.ts",
@@ -159,10 +144,6 @@ const TEMPLATE_FILES: &[(&str, &str)] = &[
     (
         "agents/support/tools/slow_summarize_once.py",
         include_str!("../../../examples/hello/agents/support/tools/slow_summarize_once.py"),
-    ),
-    (
-        "agents/support/tools/fib.wat",
-        include_str!("../../../examples/hello/agents/support/tools/fib.wat"),
     ),
 ];
 
@@ -254,12 +235,6 @@ fn doctor(app: &std::path::Path) -> Result<()> {
                     }
                 }
                 None => println!("  venv:    none configured (stdlib-only Python tools)"),
-            }
-            println!("  beatbox: {}", config.beatbox.url);
-            if config.beatbox.api_key.is_some() {
-                println!("  beatbox auth: bearer auth enabled");
-            } else {
-                println!("  beatbox auth: no bearer token configured");
             }
         }
         Err(e) => println!("  app:     UNAVAILABLE — {e:#}"),

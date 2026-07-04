@@ -8,6 +8,29 @@ export const agent = {
   crawl: true,
 };
 
+export function client() {
+  const root = document.querySelector("[data-beater-counter]");
+  if (!root) return;
+  const button = root.querySelector("[data-counter-button]");
+  const value = root.querySelector("[data-counter-value]");
+  if (!button || !value) return;
+
+  let count = Number(root.getAttribute("data-initial-count") || "0");
+  const render = () => {
+    value.textContent = String(count);
+    button.setAttribute("aria-label", `Hydration counter value ${count}`);
+    root.setAttribute("data-count", String(count));
+  };
+
+  button.addEventListener("click", () => {
+    count += 1;
+    render();
+  });
+  root.setAttribute("data-hydrated", "true");
+  window.__beaterHydrationStatus = { route: "/", hydrated: true };
+  render();
+}
+
 const css = `
 :root {
   color-scheme: light;
@@ -173,6 +196,66 @@ a {
   color: #4c5348;
   font-size: clamp(17px, 2vw, 22px);
   line-height: 1.45;
+}
+
+.counter-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  max-width: 680px;
+  border: 1px solid #b9c2b0;
+  border-radius: 8px;
+  background: #fffef8;
+  padding: 14px;
+}
+
+.counter-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.counter-copy strong {
+  color: #242820;
+  font-size: 15px;
+}
+
+.counter-copy span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.counter-panel button {
+  display: inline-flex;
+  min-width: 128px;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid #096b62;
+  border-radius: 8px;
+  background: var(--teal);
+  color: #f7fffb;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 780;
+}
+
+.counter-panel button:focus-visible {
+  outline: 3px solid rgba(8, 127, 115, 0.28);
+  outline-offset: 2px;
+}
+
+.counter-panel button:hover {
+  background: #096b62;
+}
+
+.counter-panel button strong {
+  min-width: 1ch;
+  font-variant-numeric: tabular-nums;
 }
 
 .signal-row {
@@ -437,45 +520,6 @@ a {
   line-height: 1.45;
 }
 
-.client-island {
-  display: grid;
-  gap: 14px;
-}
-
-.counter-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-}
-
-.counter-button {
-  display: inline-grid;
-  min-width: 54px;
-  min-height: 42px;
-  place-items: center;
-  border: 1px solid #1f342f;
-  border-radius: 8px;
-  background: #20332e;
-  color: #f7f8f1;
-  cursor: pointer;
-  font: inherit;
-  font-size: 18px;
-  font-weight: 820;
-}
-
-.counter-button:focus-visible {
-  outline: 3px solid rgba(8, 127, 115, 0.34);
-  outline-offset: 2px;
-}
-
-.client-state {
-  margin: 0;
-  color: #4d5549;
-  font-size: 13px;
-  font-weight: 720;
-}
-
 @media (max-width: 980px) {
   .topbar,
   .grid,
@@ -525,6 +569,14 @@ a {
 
   .endpoint {
     grid-template-columns: 1fr;
+  }
+
+  .counter-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .counter-panel button {
+    width: 100%;
   }
 
   .topology {
@@ -582,9 +634,24 @@ function Lane({ title, body, meta }: { title: string; body: string; meta: string
   );
 }
 
+function HydrationCounter() {
+  return (
+    <div className="counter-panel" data-beater-counter data-initial-count="0" data-count="0">
+      <span className="counter-copy">
+        <strong>Client hydration probe</strong>
+        <span>Server markup upgrades into a route-scoped browser bundle.</span>
+      </span>
+      <button type="button" data-counter-button aria-label="Hydration counter value 0">
+        Count <strong data-counter-value>0</strong>
+      </button>
+    </div>
+  );
+}
+
 type PageRequest = {
   id: string;
   path: string;
+  scriptNonce: string | null;
 };
 
 type DelayRecord = {
@@ -658,6 +725,7 @@ export default function Home({ request }: { request: PageRequest }) {
                   TypeScript routes, React SSR, durable Rust agent runs, Python tools,
                   and MCP discovery are served from the same local runtime.
                 </p>
+                <HydrationCounter />
                 <Suspense
                   fallback={
                     <p id="stream-shell" data-stream-marker="shell">
@@ -760,14 +828,6 @@ export default function Home({ request }: { request: PageRequest }) {
                   one support agent, and Python tools that prove the polyglot loop.
                 </p>
               </section>
-
-              <section className="panel mini client-island" data-beater-counter data-count="0">
-                <h3 className="section-title">Client island</h3>
-                <div className="counter-strip">
-                  <button className="counter-button" type="button" data-beater-increment>0</button>
-                  <p className="client-state" data-beater-count>server rendered</p>
-                </div>
-              </section>
             </aside>
           </section>
 
@@ -788,7 +848,11 @@ export default function Home({ request }: { request: PageRequest }) {
             </div>
           </section>
         </main>
-        <script type="module" src="/_beater/client/index.js" />
+        <script
+          type="module"
+          src={`/_beater/client.js?route=${encodeURIComponent(request.path)}`}
+          nonce={request.scriptNonce ?? undefined}
+        />
       </body>
     </html>
   );

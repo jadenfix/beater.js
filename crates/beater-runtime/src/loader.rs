@@ -133,26 +133,6 @@ fn load_sync(specifier: &ModuleSpecifier) -> Result<ModuleSource, ModuleLoaderEr
     ))
 }
 
-pub fn transpile_client_module(path: &Path) -> anyhow::Result<String> {
-    let specifier = ModuleSpecifier::from_file_path(path)
-        .map_err(|_| anyhow::anyhow!("not a loadable client module: {}", path.display()))?;
-    let media_type = MediaType::from_specifier(&specifier);
-    match media_type {
-        MediaType::JavaScript | MediaType::Mjs | MediaType::Cjs => {
-            Ok(std::fs::read_to_string(path)?)
-        }
-        MediaType::TypeScript
-        | MediaType::Mts
-        | MediaType::Cts
-        | MediaType::Jsx
-        | MediaType::Tsx => transpile_cached(&specifier, path, media_type),
-        other => Err(anyhow::anyhow!(
-            "unsupported client module type {other:?} for {}",
-            path.display()
-        )),
-    }
-}
-
 fn read_source(path: &Path) -> Result<String, ModuleLoaderError> {
     std::fs::read_to_string(path)
         .map_err(|e| JsErrorBox::generic(format!("failed to read {}: {e}", path.display())))
@@ -323,21 +303,5 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.contains("old"));
         assert!(second.contains("new"));
-    }
-
-    #[test]
-    fn transpile_client_module_accepts_route_scoped_ts() {
-        let dir = TempDir::new("client");
-        let file = dir.path().join("index.client.ts");
-        fs::write(
-            &file,
-            "const count: number = 1;\ndocument.body.dataset.count = String(count);\n",
-        )
-        .unwrap();
-
-        let code = super::transpile_client_module(&file).unwrap();
-
-        assert!(code.contains("document.body.dataset.count"));
-        assert!(!code.contains(": number"));
     }
 }

@@ -27,7 +27,6 @@ tokio-stream = "0.1"
 axum = "0.8"
 bytes = "1"
 futures-util = "0.3"
-base64 = "0.22"
 
 # embedded CPython
 pyo3 = { version = "0.29", features = ["auto-initialize"] }
@@ -59,7 +58,6 @@ beater-runtime = { path = "crates/beater-runtime" }
 beater-agent = { path = "crates/beater-agent" }
 beater-py = { path = "crates/beater-py" }
 beater-connect = { path = "crates/beater-connect" }
-beatbox-client = { git = "https://github.com/jadenfix/beatbox", rev = "dc2ddd9d93542737627210a05eeae96e008a1aad" }
 
 # V8 and swc are unusable at opt-level 0; keep our own crates fast to compile
 [profile.dev.package."*"]

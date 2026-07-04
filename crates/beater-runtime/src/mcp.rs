@@ -317,7 +317,6 @@ async fn tools_call(
     // Tool failures are results with isError, not protocol errors.
     let context = ToolCallContext {
         tool_use_id: json_rpc_id_to_tool_use_id(id),
-        idempotency_key: None,
     };
     match registry
         .execute_with_context(name, &arguments, &context)

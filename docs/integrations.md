@@ -2,7 +2,7 @@
 
 beater.js should expose one integration registry, not separate queues or sidecar services for web actions, local tools, remote MCP servers, and browser-control providers.
 
-The implemented registry today supports first-party Python tools, Rust built-ins, declared remote MCP tools, and a mock CDP browser provider for deterministic agent-loop and lifecycle tests. Production Playwright/CDP providers still need to fit the same contract before they ship.
+The implemented registry today supports first-party Python tools, Rust built-ins, and declared remote MCP tools. Browser providers are still planned, but they must fit the same contract before they ship.
 
 ## Contract
 
@@ -11,7 +11,7 @@ Every integration exposed to an agent should have:
 - `name`: stable, globally unique tool name within the app.
 - `description`: human-readable capability summary for LLM/tool clients.
 - `input_schema`: JSON Schema for validation and MCP/tool metadata.
-- `kind`: implementation kind, such as `python`, `rust`, `remote_mcp`, or `browser`.
+- `kind`: implementation kind, such as `python`, `rust`, `remote_mcp`, or planned `browser`.
 - `idempotent`: crash-resume safety signal used by the journal.
 - `timeout`: maximum time for one call before it fails closed.
 - `retry`: explicit retry policy for network failures, including whether retries use an idempotency key.
@@ -95,42 +95,30 @@ Planned next steps:
 - remote `initialize` and `tools/list` discovery for provider health checks
 - MCP sessions and resumable transport metadata
 
+## Planned Kinds
+
 ### Browser Providers
 
-Browser providers enter as tools, not as a separate automation service. The implemented `mock_cdp` provider is for deterministic tests of declaration shape, allowed origins, per-tool-call session cleanup, and agent-loop execution:
+Browser/CDP/Playwright providers should also enter as tools, not as a separate automation service:
 
 ```ts
 browserTool("checkout_flow", {
-  provider: "mock_cdp",
+  provider: "playwright",
   session: {scope: "run", cleanup: "always"},
   allowedOrigins: ["https://shop.example"],
-  description: "Verify checkout in a browser.",
-  inputSchema: {
-    type: "object",
-    properties: {url: {type: "string"}, task: {type: "string"}},
-    required: ["url", "task"],
-  },
   timeoutMs: 30_000,
+  secrets: {profile: {env: "BROWSER_PROFILE_ID"}},
   idempotent: false,
 })
 ```
 
-Implemented behavior:
+Release criteria:
 
-- browser tools are declared through the same registry and exposed in agent tool metadata
-- `allowedOrigins` blocks navigation outside the declared origins
-- `session: {scope: "run", cleanup: "always"}` is accepted as the target provider policy
-- mock browser sessions are cleaned up on success, failure, and timeout
-- non-empty `secrets` are rejected by `mock_cdp`; real providers must validate and scope credentials explicitly
-- a mocked agent-loop test proves an agent can complete a browser task through a tool declaration
-- destructive actions require non-idempotent handling or explicit review semantics
-
-Production Playwright/CDP release criteria:
-
-- real browser sessions are attached to run IDs
-- session cleanup survives process interruption and resume
+- browser sessions are attached to run IDs
+- session cleanup runs on completion, failure, and resume after crash
 - credentials are scoped to the provider/session
-- browser e2e tests prove an agent can complete a real browser task
+- destructive actions require non-idempotent handling or explicit review semantics
+- e2e tests prove an agent can complete a browser task and cleanup survives interruption
 
 ## Coexistence
 
@@ -153,12 +141,11 @@ export default defineAgent({
       egress: ["mcp.crm.example"],
       idempotent: false,
     }),
+    // planned:
     browserTool("verify_checkout", {
-      provider: "mock_cdp",
+      provider: "playwright",
       session: {scope: "run", cleanup: "always"},
       allowedOrigins: ["https://store.example"],
-      description: "Verify checkout in a browser.",
-      inputSchema: {type: "object", properties: {}, additionalProperties: true},
       timeoutMs: 30_000,
       idempotent: false,
     }),

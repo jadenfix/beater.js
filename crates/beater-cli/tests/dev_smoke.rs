@@ -68,26 +68,31 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
         home.contains("content-security-policy: default-src 'self'"),
         "{home}"
     );
-    assert!(home.contains("script-src 'self'"), "{home}");
+    assert!(
+        home.contains("script-src 'self' 'nonce-"),
+        "page CSP should allow self-hosted scripts and nonce React streaming scripts: {home}"
+    );
+    assert!(
+        home.contains("data-beater-counter=\"true\"") || home.contains("data-beater-counter=\"\""),
+        "home should include the hydration counter SSR marker: {home}"
+    );
+    assert!(
+        home.contains("src=\"/_beater/client.js?route=%2F\""),
+        "home should reference the route client bundle: {home}"
+    );
     assert!(home.contains("x-content-type-options: nosniff"), "{home}");
-    assert!(
-        home.contains(r#"<script type="module" src="/_beater/client/index.js"></script>"#),
-        "{home}"
-    );
-    assert!(home.contains("data-beater-counter"), "{home}");
 
-    let client =
-        http_request(port, "GET", "/_beater/client/index.js", None).expect("GET client module");
-    assert!(client.starts_with("HTTP/1.1 200"), "{client}");
+    let client_js =
+        http_request(port, "GET", "/_beater/client.js?route=%2F", None).expect("GET client bundle");
+    assert!(client_js.starts_with("HTTP/1.1 200"), "{client_js}");
     assert!(
-        client.contains("content-type: application/javascript"),
-        "{client}"
+        client_js.contains("content-type: application/javascript"),
+        "{client_js}"
     );
     assert!(
-        client.contains("root.dataset.state = \"hydrated\""),
-        "{client}"
+        client_js.contains("data-beater-counter"),
+        "client bundle should contain the route counter hydrator: {client_js}"
     );
-    assert!(!client.contains(": number"), "{client}");
 
     let missing = http_request(port, "GET", "/not-a-route", None).expect("GET /not-a-route");
     assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
@@ -181,14 +186,12 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
     assert!(config.contains("name = \"my-app\""), "{config}");
     for relative_path in [
         "app/routes/index.tsx",
-        "app/routes/index.client.ts",
         "app/routes/api/health.ts",
         "app/routes/api/boom.ts",
         "agents/support/agent.ts",
         "agents/support/tools/summarize_numbers.py",
         "agents/support/tools/slow_summarize.py",
         "agents/support/tools/slow_summarize_once.py",
-        "agents/support/tools/fib.wat",
     ] {
         assert!(
             app.join(relative_path).is_file(),
@@ -223,23 +226,6 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
         home.contains("<h1 class=\"brand-title\">beater.js</h1>"),
         "{home}"
     );
-    assert!(
-        home.contains(r#"<script type="module" src="/_beater/client/index.js"></script>"#),
-        "{home}"
-    );
-
-    let client =
-        http_request(port, "GET", "/_beater/client/index.js", None).expect("GET client module");
-    assert!(client.starts_with("HTTP/1.1 200"), "{client}");
-    assert!(
-        client.contains("content-type: application/javascript"),
-        "{client}"
-    );
-    assert!(
-        client.contains("root.dataset.state = \"hydrated\""),
-        "{client}"
-    );
-    assert!(!client.contains(": number"), "{client}");
 
     let doctor = Command::new(&beater)
         .arg("doctor")
@@ -445,7 +431,6 @@ fn doctor_reports_python_v8_and_venv_diagnostics() {
     assert!(stdout.contains("python:"), "{stdout}");
     assert!(stdout.contains("venv:"), "{stdout}");
     assert!(stdout.contains("public:"), "{stdout}");
-    assert!(stdout.contains("beatbox:"), "{stdout}");
     assert!(stdout.contains("mcp:"), "{stdout}");
     assert!(stdout.contains("v8:"), "{stdout}");
 }

@@ -46,13 +46,6 @@ impl RouteTable {
                 .filter(|e| e.file_type().is_file())
             {
                 let path = entry.path();
-                if path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .is_some_and(|stem| stem.ends_with(".client"))
-                {
-                    continue;
-                }
                 let kind = match path.extension().and_then(|e| e.to_str()) {
                     Some("ts") | Some("js") | Some("mjs") => RouteKind::Api,
                     Some("tsx") | Some("jsx") => RouteKind::Page,
@@ -173,12 +166,10 @@ mod tests {
         let app = TempDir::new("scan");
         app.write("app/routes/index.tsx", "export default function Home() {}");
         app.write("app/routes/api/health.ts", "export function GET() {}");
-        app.write("app/routes/index.client.ts", "console.log('client')");
         app.write(
             "app/routes/users/[id].tsx",
             "export default function User() {}",
         );
-        app.write("app/routes/users/[id].client.ts", "console.log('client')");
         app.write("app/routes/ignored.css", "body {}");
 
         let table = RouteTable::scan(app.path()).unwrap();
@@ -187,8 +178,6 @@ mod tests {
         assert!(patterns.contains(&"/"));
         assert!(patterns.contains(&"/api/health"));
         assert!(patterns.contains(&"/users/[id]"));
-        assert!(!patterns.contains(&"/index.client"));
-        assert!(!patterns.contains(&"/users/[id].client"));
         assert_eq!(patterns.len(), 3);
 
         let (route, _) = table.match_path("/").unwrap();

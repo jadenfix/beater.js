@@ -137,10 +137,10 @@ CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` 
 
 - **npm ecosystem / node-compat** — the adoption wedge; adopt a Deno-style compat layer rather than reimplementing.
 - **WHATWG fetch classes in routes** — comes with npm-compat.
-- **RSC** — the chunked isolate→host streaming plumbing plus route-scoped client modules are the substrate; add the flight protocol after hydration.
+- **RSC + client hydration** — the chunked isolate→host streaming plumbing is the substrate; add the flight protocol + client bundle step next.
 - **Wasmtime sandbox** — fourth `impl` kind in the tool registry, for untrusted/agent-generated code.
 - **C++ tools** — via `cxx` on the Rust built-in path when a real use case appears.
-- **Production agentic browsing** — the registry has a mock CDP browser provider for contract tests; reuse beater-agents' real CDP/Playwright crates as the production provider.
+- **Agentic browsing** — reuse beater-agents' CDP/Playwright crates as a tool provider.
 - **Deploy** — the host is one binary + assets; `beater build` → container image with the venv baked in.
 - **Isolate pool / per-request isolation** — channel protocol already supports N workers; current serialization is documented in `docs/runtime-limits.md`.
 - **LLM streaming (SSE to browser)** — journal needs partial-step records first.
@@ -156,4 +156,3 @@ CLI: `beater new <app>` · `beater dev` · `beater agent run <name> "<prompt>"` 
 | M2 | durable agent loop + Python tool + kill-9 resume | **the thesis** | code done; live-API gate pending |
 | M3 | `/mcp` endpoint (inspector-verified) + crawl layer (robots/sitemap/llms.txt/.well-known) | ecosystem | **done** |
 | M4 | React streaming SSR (`renderToReadableStream`) | the web half | **done** |
-| M5 | route-scoped client module (`/_beater/client/<route>.js`) + hydrated counter | interactivity | **done** |
