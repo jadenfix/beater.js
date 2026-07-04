@@ -54,6 +54,7 @@ fn vendor_specifier(specifier: &str) -> Option<&'static str> {
 fn vendor_source(specifier: &str) -> Option<&'static str> {
     match specifier {
         "beater:agent" => Some(include_str!("beater_agent.js")),
+        "beater:connect" => Some(include_str!("beater_connect.js")),
         "beater:vendor/react" => Some(include_str!("../assets/vendor/react.mjs")),
         "beater:vendor/react-jsx-runtime" => {
             Some(include_str!("../assets/vendor/react-jsx-runtime.mjs"))

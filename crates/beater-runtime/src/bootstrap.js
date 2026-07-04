@@ -217,6 +217,75 @@
     return fmt(error).includes("The render was aborted by the server");
   }
 
+  const knownSideEffects = new Set(["read", "draft", "write", "send", "purchase", "delete"]);
+  const mutatingSideEffects = new Set(["write", "send", "purchase", "delete"]);
+  const confirmByDefault = new Set(["send", "purchase", "delete"]);
+  const httpMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
+
+  function objectSchema() {
+    return { type: "object", additionalProperties: false, properties: {}, required: [] };
+  }
+
+  function normalizeAuth(auth) {
+    if (!auth || typeof auth !== "object") {
+      return { type: "public", scopes: [] };
+    }
+    return {
+      type: typeof auth.type === "string" ? auth.type : "public",
+      scopes: Array.isArray(auth.scopes)
+        ? auth.scopes.filter((scope) => typeof scope === "string")
+        : [],
+    };
+  }
+
+  function normalizeActionMethod(method) {
+    const normalized = typeof method === "string" ? method.trim().toUpperCase() : "POST";
+    return httpMethods.has(normalized) ? normalized : null;
+  }
+
+  function normalizeActionPath(path) {
+    if (typeof path !== "string" || path.trim() !== path || !path.startsWith("/")) {
+      return null;
+    }
+    if (path.includes("?") || path.includes("#")) return null;
+    return path;
+  }
+
+  function normalizeAction(action) {
+    if (!action || typeof action !== "object") return null;
+    if (typeof action.id !== "string" || action.id.length === 0) return null;
+    const method = normalizeActionMethod(action.method);
+    const path = normalizeActionPath(action.path);
+    if (!method || !path) return null;
+    const sideEffect = knownSideEffects.has(action.sideEffect) ? action.sideEffect : "read";
+    return {
+      id: action.id,
+      title: typeof action.title === "string" ? action.title : action.id,
+      description: typeof action.description === "string" ? action.description : "",
+      method,
+      path,
+      sideEffect,
+      auth: normalizeAuth(action.auth),
+      confirm:
+        typeof action.confirm === "boolean"
+          ? action.confirm
+          : confirmByDefault.has(sideEffect),
+      dryRun: action.dryRun === true,
+      idempotencyRequired:
+        typeof action.idempotencyRequired === "boolean"
+          ? action.idempotencyRequired
+          : mutatingSideEffects.has(sideEffect),
+      inputSchema:
+        action.inputSchema && typeof action.inputSchema === "object"
+          ? action.inputSchema
+          : objectSchema(),
+      outputSchema:
+        action.outputSchema && typeof action.outputSchema === "object"
+          ? action.outputSchema
+          : objectSchema(),
+    };
+  }
+
   async function pumpPageStream(stream_id, reader) {
     try {
       while (true) {
@@ -345,8 +414,8 @@
     return null;
   };
 
-  // Agent Access Layer: read a route module's optional `agent` metadata
-  // export ({title, description, crawl}) for llms.txt / sitemap generation.
+  // Agent Access Layer: read a route module's optional `agent` metadata export
+  // ({title, description, crawl, actions}) for generated discovery surfaces.
   globalThis.__beaterRouteMeta = async (specifier) => {
     const mod = await import(specifier);
     const meta = mod.agent;
@@ -355,6 +424,9 @@
       title: typeof meta.title === "string" ? meta.title : null,
       description: typeof meta.description === "string" ? meta.description : null,
       crawl: meta.crawl !== false,
+      actions: Array.isArray(meta.actions)
+        ? meta.actions.map(normalizeAction).filter(Boolean)
+        : [],
     };
   };
 

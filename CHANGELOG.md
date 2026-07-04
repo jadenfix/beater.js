@@ -13,6 +13,7 @@ beater.js is pre-alpha. Version numbers are semver-shaped, but compatibility is 
 - Added slow-tool fixtures for the M2 live crash/resume gate.
 - Added route-scoped client modules at `/_beater/client/<route>.js` and a hydrated counter in the hello app.
 - Added route-scoped RSC transport frames at `/_beater/rsc/<route>.flight` and a browser gate for the hello server island.
+- Added route action discovery with `defineAction` metadata exposed through `/openapi.json`, `/.well-known/beater.json`, and `llms.txt`.
 
 ## Versioning Policy
 

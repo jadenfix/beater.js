@@ -101,6 +101,7 @@ Every other framework treats the crawl layer as hand-maintained files or plugins
 | `/sitemap.xml` | route table (lastmod = file mtime) | M3 |
 | `/llms.txt` | route table + per-route `agent` metadata | M3 |
 | `/.well-known/beater.json` | manifest: MCP endpoint, sitemap, llms.txt, auth requirements | M3 |
+| `/openapi.json` | per-route `agent.actions` metadata from `defineAction` | Phase C action discovery |
 | markdown views (`Accept: text/markdown` / `.md`) | rendered routes | post-SSR |
 | MCP `resources/list` / `resources/read` | route table → clean markdown | post-SSR |
 | JSON-LD (schema.org) in pages | per-route `agent.schema` | later |
@@ -108,14 +109,25 @@ Every other framework treats the crawl layer as hand-maintained files or plugins
 Routes opt in to richer description with one export (all fields optional; `crawl` defaults true for GET pages):
 
 ```ts
+import { defineAction } from "beater:connect";
+
 export const agent = {
   title: "Product catalog",
   description: "Browse and compare products.",
   crawl: true,
+  actions: [
+    defineAction({
+      id: "search_products",
+      method: "POST",
+      path: "/api/products/search",
+      sideEffect: "read",
+      inputSchema: {type: "object", properties: {query: {type: "string"}}},
+    }),
+  ],
 };
 ```
 
-The end state (post-MVP): a single `defineAction({name, input, auth, confirm, handler})` on a route exposes the same action to humans (HTML form), agents (MCP tool), APIs (OpenAPI), and crawlers (metadata) — with dry-run previews, idempotency keys, and human confirmation for destructive scopes. The journal (§5) already gives every agent-initiated action an audit trail.
+Current route action discovery is metadata-only: `defineAction` entries flow into `/openapi.json`, `/.well-known/beater.json`, and `llms.txt`. The end state (post-MVP): a single `defineAction({name, input, auth, confirm, handler})` on a route exposes the same action to humans (HTML form), agents (MCP tool), APIs (OpenAPI), and crawlers (metadata) — with dry-run previews, idempotency keys, and human confirmation for destructive scopes. The journal (§5) already gives every agent-initiated action an audit trail.
 
 ## 7. Developer experience
 

@@ -103,6 +103,7 @@ The work below is not just about matching Node/Next request handling. The end st
 | Streaming SSR | `scripts/streaming-ssr-gate.sh` starts `beater dev`, reads the raw HTTP socket, and proved shell marker at 0.026s before Suspense-delayed marker at 0.489s while `/api/health` returned in 0.002s |
 | Client hydration | `/_beater/client/index.js` serves `app/routes/index.client.ts`; the hello page loads it as a module and `scripts/client-hydration-gate.cjs` verifies the counter increments in a browser |
 | RSC transport foundation | `/_beater/rsc/index.flight` serves `app/routes/index.server.tsx` as `text/x-component` frames over the worker stream channel; `scripts/rsc-flight-gate.cjs` verifies the browser renders the server island and the client counter still hydrates |
+| Route action discovery | `defineAction` from `beater:connect` can be attached to route `agent.actions`; `/openapi.json`, `/.well-known/beater.json`, and `llms.txt` expose the hello `read_health` action; `dev_smoke` asserts the no-key dev server serves that metadata |
 
 ---
 
@@ -220,6 +221,7 @@ Phase C progress so far:
 - Route responses can now carry ordered `body_chunks`; the Rust server forwards them as chunked response bodies and strips stale `content-length` headers.
 - Route-scoped client modules can now live beside page routes as `*.client.ts` files and are served from `/_beater/client/<route>.js`; the hello page uses this to prove same-origin browser code can hydrate a counter without Node/npm. Full React hydration and bundling are still open.
 - Route-scoped server components can now live beside page routes as `*.server.tsx` files and stream `text/x-component` flight frames from `/_beater/rsc/<route>.flight`; this proves the transport and browser island path, not full official React Flight manifests.
+- Route actions can now be declared with `defineAction` in route metadata and discovered through `/openapi.json`, `/.well-known/beater.json`, and `llms.txt`; execution, HTML forms, MCP dispatch, auth enforcement, confirmations, and receipts are still open.
 
 | # | Item | Done when |
 |---|---|---|
@@ -232,7 +234,7 @@ Phase C progress so far:
 | 7 | **LLM streaming** — SSE to browser + partial-step journal records | tokens stream to a page while every step stays crash-resumable |
 | 8 | **MCP consume + sessions** — use remote MCP servers as tool sources; add session/auth plumbing for remote management; adopt the next MCP spec when released | an agent uses a third-party MCP server's tool via config only, with scoped credentials and resumable error handling |
 | 9 | **Agentic browsing** — reuse beater-agents' CDP/Playwright crates as a tool provider | an agent completes a real browsing task from a pyTool-style declaration, with browser sessions cleaned up after crashes |
-| 10 | **defineAction** — one definition → HTML form + MCP tool + OpenAPI + crawler metadata (§6b end state) | a form posts for humans AND appears in tools/list with auth + confirm semantics |
+| 10 | **defineAction** — one definition → HTML form + MCP tool + OpenAPI + crawler metadata (§6b end state) | **partial:** route metadata actions now reach `/openapi.json`, `/.well-known/beater.json`, and `llms.txt`; done when a form posts for humans AND the action appears in `tools/list` with auth + confirm semantics |
 | 11 | **Deploy story** — `beater build` → single container (binary + assets + venv) | `docker run` of the built image serves the app cold in <1s |
 | 12 | **Observability** — OTLP out of the agent loop into beater-agents | a run's trace appears in the beater-agents dashboard |
 | 13 | **Free-threaded Python** — pyo3 on 3.14t once ML wheels are reliable | two Python tools execute truly in parallel under load |
@@ -244,6 +246,6 @@ Phase C progress so far:
 
 ## TL;DR
 
-- **To be e2e done (MVP):** install `ANTHROPIC_API_KEY`, add one slow-tool fixture, run the three A3–A5 gates, flip the docs. Everything else is already built and verified.
+- **To be e2e done (MVP):** install `ANTHROPIC_API_KEY`, run the three A3–A5 gates with the existing slow-tool fixtures, and flip the docs. Everything else is already built and verified.
 - **To ship v0.1:** tests + CI, portable Python config, isolate-pool-or-documented-limits, `beater new`.
 - **To kill Node/Next:** pay off punts 1–5 and 11 first, while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.

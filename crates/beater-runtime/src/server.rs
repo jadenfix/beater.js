@@ -117,6 +117,7 @@ pub async fn serve(
         .route("/robots.txt", get(handle_robots))
         .route("/sitemap.xml", get(handle_sitemap))
         .route("/llms.txt", get(handle_llms))
+        .route("/openapi.json", get(handle_openapi))
         .route("/.well-known/beater.json", get(handle_well_known))
         .fallback(handle)
         .with_state(state);
@@ -214,19 +215,13 @@ async fn handle_robots(State(state): State<DevState>) -> Response<Body> {
 
 /// Static (non-parameterized) routes with their `agent` metadata resolved
 /// through the isolate — the shared input for sitemap.xml and llms.txt.
-async fn crawlable_routes(state: &DevState) -> Vec<(String, PathBuf, Option<RouteMeta>)> {
+async fn routes_with_meta(
+    state: &DevState,
+    include_parameterized: bool,
+) -> Vec<(String, PathBuf, Option<RouteMeta>)> {
     let targets: Vec<(String, PathBuf, Option<String>)> = {
         let table = state.routes.read().await;
-        table
-            .iter()
-            .filter(|r| !r.segments.iter().any(|s| matches!(s, Segment::Param(_))))
-            .map(|r| {
-                let spec = deno_core::ModuleSpecifier::from_file_path(&r.file)
-                    .ok()
-                    .map(|s| s.to_string());
-                (r.pattern.clone(), r.file.clone(), spec)
-            })
-            .collect()
+        route_meta_targets(&table, include_parameterized)
     };
     let mut routes = Vec::new();
     for (pattern, file, spec) in targets {
@@ -237,6 +232,28 @@ async fn crawlable_routes(state: &DevState) -> Vec<(String, PathBuf, Option<Rout
         routes.push((pattern, file, meta));
     }
     routes
+}
+
+async fn crawlable_routes(state: &DevState) -> Vec<(String, PathBuf, Option<RouteMeta>)> {
+    routes_with_meta(state, false).await
+}
+
+fn route_meta_targets(
+    table: &RouteTable,
+    include_parameterized: bool,
+) -> Vec<(String, PathBuf, Option<String>)> {
+    table
+        .iter()
+        .filter(|r| {
+            include_parameterized || !r.segments.iter().any(|s| matches!(s, Segment::Param(_)))
+        })
+        .map(|r| {
+            let spec = deno_core::ModuleSpecifier::from_file_path(&r.file)
+                .ok()
+                .map(|s| s.to_string());
+            (r.pattern.clone(), r.file.clone(), spec)
+        })
+        .collect()
 }
 
 async fn handle_sitemap(State(state): State<DevState>) -> Response<Body> {
@@ -255,23 +272,52 @@ async fn handle_llms(State(state): State<DevState>) -> Response<Body> {
         .into_iter()
         .map(|(pattern, _, meta)| (pattern, meta))
         .collect();
+    let action_routes: Vec<(String, Option<RouteMeta>)> = routes_with_meta(&state, true)
+        .await
+        .into_iter()
+        .map(|(pattern, _, meta)| (pattern, meta))
+        .collect();
+    let actions = crawl::route_actions(&action_routes);
     text_response(
         StatusCode::OK,
         crawl::llms_txt(
             &state.app_name,
             &state.base_url,
             &routes,
+            &actions,
             &state.agents,
             &state.mcp_access,
         ),
     )
 }
 
+async fn handle_openapi(State(state): State<DevState>) -> Response<Body> {
+    let routes: Vec<(String, Option<RouteMeta>)> = routes_with_meta(&state, true)
+        .await
+        .into_iter()
+        .map(|(pattern, _, meta)| (pattern, meta))
+        .collect();
+    let actions = crawl::route_actions(&routes);
+    let openapi = crawl::openapi_json(&state.app_name, &state.base_url, &actions);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(openapi.to_string()))
+        .expect("static response")
+}
+
 async fn handle_well_known(State(state): State<DevState>) -> Response<Body> {
+    let routes: Vec<(String, Option<RouteMeta>)> = routes_with_meta(&state, true)
+        .await
+        .into_iter()
+        .map(|(pattern, _, meta)| (pattern, meta))
+        .collect();
+    let actions = crawl::route_actions(&routes);
     let manifest = crawl::well_known(
         &state.app_name,
         &state.base_url,
         &state.agents,
+        &actions,
         &state.mcp_access,
     );
     Response::builder()
@@ -727,8 +773,8 @@ mod tests {
 
     use super::{
         apply_route_security_headers, client_module_response, client_module_route_path,
-        find_client_module, find_rsc_server_module, route_response, route_response_body,
-        rsc_flight_route_path, text_response,
+        find_client_module, find_rsc_server_module, route_meta_targets, route_response,
+        route_response_body, rsc_flight_route_path, text_response,
     };
     use crate::router::RouteTable;
     use crate::worker;
@@ -911,6 +957,33 @@ mod tests {
         let table = RouteTable::scan(app.path()).unwrap();
 
         assert!(find_rsc_server_module(app.path(), &table, Path::new("admin/secret")).is_none());
+    }
+
+    #[test]
+    fn action_metadata_targets_include_parameterized_routes_when_requested() {
+        let app = TempDir::new("route-meta-targets");
+        app.write("app/routes/index.tsx", "export default function Home() {}");
+        app.write(
+            "app/routes/users/[id].tsx",
+            "export default function User() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        let crawl_targets = route_meta_targets(&table, false);
+        let action_targets = route_meta_targets(&table, true);
+        let crawl_patterns: Vec<_> = crawl_targets
+            .iter()
+            .map(|(pattern, _, _)| pattern.as_str())
+            .collect();
+        let action_patterns: Vec<_> = action_targets
+            .iter()
+            .map(|(pattern, _, _)| pattern.as_str())
+            .collect();
+
+        assert!(crawl_patterns.contains(&"/"));
+        assert!(!crawl_patterns.contains(&"/users/[id]"));
+        assert!(action_patterns.contains(&"/"));
+        assert!(action_patterns.contains(&"/users/[id]"));
     }
 
     #[tokio::test]

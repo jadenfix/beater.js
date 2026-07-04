@@ -128,6 +128,27 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
 
     let mcp_get = http_request(port, "GET", "/mcp", None).expect("GET /mcp");
     assert!(mcp_get.starts_with("HTTP/1.1 405"), "{mcp_get}");
+
+    let llms = http_request(port, "GET", "/llms.txt", None).expect("GET /llms.txt");
+    assert!(llms.starts_with("HTTP/1.1 200"), "{llms}");
+    assert!(llms.contains("## Actions"), "{llms}");
+    assert!(llms.contains("read_health"), "{llms}");
+    assert!(llms.contains("OpenAPI actions"), "{llms}");
+
+    let manifest = http_request(port, "GET", "/.well-known/beater.json", None)
+        .expect("GET /.well-known/beater.json");
+    assert!(manifest.starts_with("HTTP/1.1 200"), "{manifest}");
+    assert!(manifest.contains("\"openapi\""), "{manifest}");
+    assert!(manifest.contains("\"read_health\""), "{manifest}");
+
+    let openapi = http_request(port, "GET", "/openapi.json", None).expect("GET /openapi.json");
+    assert!(openapi.starts_with("HTTP/1.1 200"), "{openapi}");
+    assert!(openapi.contains("\"/api/health\""), "{openapi}");
+    assert!(
+        openapi.contains("\"operationId\":\"read_health\""),
+        "{openapi}"
+    );
+    assert!(openapi.contains("\"sideEffect\":\"read\""), "{openapi}");
 }
 
 #[test]
@@ -255,6 +276,13 @@ fn new_scaffolds_runnable_app_and_refuses_overwrite() {
     );
     assert!(flight.contains("H["), "{flight}");
     assert!(flight.contains("E{\"ok\":true}"), "{flight}");
+
+    let openapi = http_request(port, "GET", "/openapi.json", None).expect("GET scaffolded OpenAPI");
+    assert!(openapi.starts_with("HTTP/1.1 200"), "{openapi}");
+    assert!(
+        openapi.contains("\"operationId\":\"read_health\""),
+        "{openapi}"
+    );
 
     let doctor = Command::new(&beater)
         .arg("doctor")

@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use deno_core::error::{CoreError, CoreErrorKind, JsError};
 use deno_core::{JsRuntime, OpState, PollEventLoopOptions, RuntimeOptions, extension, op2, v8};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::loader::BeaterModuleLoader;
@@ -52,6 +53,39 @@ pub struct RouteMeta {
     pub title: Option<String>,
     pub description: Option<String>,
     pub crawl: bool,
+    #[serde(default)]
+    pub actions: Vec<RouteActionMeta>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteActionMeta {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub method: String,
+    pub path: String,
+    pub side_effect: String,
+    #[serde(default = "default_action_auth")]
+    pub auth: Value,
+    #[serde(default)]
+    pub confirm: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub idempotency_required: bool,
+    #[serde(default = "default_object_schema")]
+    pub input_schema: Value,
+    #[serde(default = "default_object_schema")]
+    pub output_schema: Value,
+}
+
+fn default_action_auth() -> Value {
+    json!({"type": "public", "scopes": []})
+}
+
+fn default_object_schema() -> Value {
+    json!({"type": "object", "additionalProperties": false, "properties": {}, "required": []})
 }
 
 #[derive(Debug)]

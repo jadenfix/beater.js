@@ -132,6 +132,40 @@ Production Playwright/CDP release criteria:
 - credentials are scoped to the provider/session
 - browser e2e tests prove an agent can complete a real browser task
 
+### Route Actions
+
+Route modules can declare metadata-only actions with `defineAction` from
+`beater:connect`:
+
+```ts
+import { defineAction } from "beater:connect";
+
+export const agent = {
+  title: "Health check",
+  actions: [
+    defineAction({
+      id: "read_health",
+      title: "Read health",
+      description: "Read runtime liveness and timestamp status.",
+      method: "GET",
+      path: "/api/health",
+      sideEffect: "read",
+      outputSchema: {
+        type: "object",
+        properties: {ok: {type: "boolean"}},
+        required: ["ok"],
+      },
+    }),
+  ],
+};
+```
+
+`beater dev` exposes these declarations through `/openapi.json`,
+`/.well-known/beater.json`, and `llms.txt`. The declarations are intentionally
+not executable yet: HTML form generation, MCP `tools/list` integration,
+`tools/call` dispatch, auth enforcement, confirmations, receipts, and journaled
+action execution are the remaining Phase C work.
+
 ## Coexistence
 
 One agent config should be able to mix local and networked capabilities:
