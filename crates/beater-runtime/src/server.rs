@@ -2,7 +2,7 @@
 //! notify-based hot reload, plus the agent surfaces — /mcp and the
 //! generated crawl layer (robots.txt, sitemap.xml, llms.txt, .well-known).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::io;
 use std::path::Path;
@@ -15,12 +15,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::middleware;
 use axum::routing::{Router, get, post};
-use beater_agent::BeatboxConfig;
-use beater_agent::ToolRegistry;
+use beater_agent::{BeatboxConfig, Journal, ToolRegistry};
 use bytes::Bytes;
 use futures_util::{Stream, stream};
 use serde_json::json;
@@ -144,6 +143,10 @@ pub async fn serve(
         .route("/sitemap.xml", get(handle_sitemap))
         .route("/llms.txt", get(handle_llms))
         .route("/.well-known/beater.json", get(handle_well_known))
+        .route(
+            "/_beater/agent/runs/{run_id}/events",
+            get(handle_agent_run_events),
+        )
         .fallback(handle)
         .layer(middleware::map_response(with_route_security_headers))
         .with_state(state);
@@ -373,6 +376,129 @@ async fn handle_well_known(State(state): State<DevState>) -> Response<Body> {
         .header("content-type", "application/json")
         .body(Body::from(manifest.to_string()))
         .expect("static response")
+}
+
+async fn handle_agent_run_events(
+    State(state): State<DevState>,
+    AxumPath(run_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if !state.mcp_access.origin_allowed(&headers) {
+        return text_response(StatusCode::FORBIDDEN, "origin not allowed".to_string());
+    }
+    if !state.mcp_access.authorized(&headers) {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("www-authenticate", "Bearer")
+            .body(Body::from("missing or invalid bearer token"))
+            .expect("static response");
+    }
+    match Journal::open(&state.app_dir).and_then(|journal| journal.run(&run_id).map(|_| ())) {
+        Ok(()) => {}
+        Err(_) => return text_response(StatusCode::NOT_FOUND, "run not found".to_string()),
+    }
+
+    let stream = stream::unfold(
+        RunEventStreamState::new(state.app_dir.clone(), run_id),
+        next_run_event,
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream; charset=utf-8")
+        .header("cache-control", "no-store")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(stream))
+        .expect("stream response")
+}
+
+struct RunEventStreamState {
+    app_dir: PathBuf,
+    run_id: String,
+    seen_ordinals: HashMap<i64, i64>,
+    pending: VecDeque<String>,
+    done: bool,
+}
+
+impl RunEventStreamState {
+    fn new(app_dir: PathBuf, run_id: String) -> Self {
+        Self {
+            app_dir,
+            run_id,
+            seen_ordinals: HashMap::new(),
+            pending: VecDeque::new(),
+            done: false,
+        }
+    }
+}
+
+async fn next_run_event(
+    mut state: RunEventStreamState,
+) -> Option<(std::result::Result<Bytes, Infallible>, RunEventStreamState)> {
+    loop {
+        if let Some(event) = state.pending.pop_front() {
+            return Some((Ok(Bytes::from(event)), state));
+        }
+        if state.done {
+            return None;
+        }
+
+        match collect_run_events(&mut state) {
+            Ok(terminal) => {
+                if terminal && state.pending.is_empty() {
+                    state.pending.push_back(sse_event(
+                        "done",
+                        &json!({"run_id": state.run_id.clone(), "status": "terminal"}),
+                    ));
+                    state.done = true;
+                }
+            }
+            Err(error) => {
+                state.pending.push_back(sse_event(
+                    "error",
+                    &json!({"run_id": state.run_id.clone(), "error": format!("{error:#}")}),
+                ));
+                state.done = true;
+            }
+        }
+        if state.pending.is_empty() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+}
+
+fn collect_run_events(state: &mut RunEventStreamState) -> Result<bool> {
+    let journal = Journal::open(&state.app_dir)?;
+    let run = journal.run(&state.run_id)?;
+    for step in journal.steps(&state.run_id)? {
+        if step.kind != "llm_call" {
+            continue;
+        }
+        let last_seen = state.seen_ordinals.entry(step.seq).or_insert(0);
+        for partial in journal.step_partials(&state.run_id, step.seq)? {
+            if partial.ordinal <= *last_seen {
+                continue;
+            }
+            *last_seen = partial.ordinal;
+            state.pending.push_back(sse_event(
+                "llm_partial",
+                &json!({
+                    "run_id": state.run_id.clone(),
+                    "seq": partial.seq,
+                    "ordinal": partial.ordinal,
+                    "kind": partial.kind,
+                    "payload": partial.payload,
+                }),
+            ));
+        }
+    }
+    Ok(matches!(
+        run.status.as_str(),
+        "completed" | "failed" | "needs_review"
+    ))
+}
+
+fn sse_event(event: &str, data: &serde_json::Value) -> String {
+    format!("event: {event}\ndata: {data}\n\n")
 }
 
 async fn agent_surfaces(state: &DevState) -> AgentSurfaces {
@@ -978,20 +1104,24 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Body;
-    use axum::http::{HeaderValue, Request, Response, StatusCode};
+    use axum::extract::{Path as AxumPath, State};
+    use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
     use axum::routing::get;
     use axum::{Router, middleware};
+    use beater_agent::{Journal, ToolRegistry};
     use futures_util::StreamExt;
+    use serde_json::json;
     use tokio::sync::{RwLock, mpsc};
     use tower::ServiceExt;
 
     use super::{
-        apply_route_security_headers, cancel_on_drop_body_stream, client_module_response,
-        client_module_route_path, crawlable_route_targets, find_client_module,
-        find_rsc_server_module, method_not_allowed_response, route_response, route_response_body,
-        rsc_flight_route_path, secure_route_response, send_worker_msg, text_response,
-        with_route_security_headers,
+        AgentSurfaces, DevState, apply_route_security_headers, cancel_on_drop_body_stream,
+        client_module_response, client_module_route_path, crawlable_route_targets,
+        find_client_module, find_rsc_server_module, handle_agent_run_events,
+        method_not_allowed_response, route_response, route_response_body, rsc_flight_route_path,
+        secure_route_response, send_worker_msg, text_response, with_route_security_headers,
     };
+    use crate::mcp;
     use crate::router::RouteTable;
     use crate::worker;
 
@@ -1288,6 +1418,115 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    fn test_state(app: &TempDir, mcp_access: mcp::AccessConfig) -> DevState {
+        let (worker_tx, _worker_rx) = mpsc::channel(1);
+        DevState {
+            routes: Arc::new(RwLock::new(RouteTable::default())),
+            worker_txs: Arc::new(RwLock::new(vec![worker_tx])),
+            next_worker: Arc::new(AtomicUsize::new(0)),
+            agent_surfaces: Arc::new(RwLock::new(AgentSurfaces::new(
+                ToolRegistry::empty(),
+                Vec::new(),
+            ))),
+            app_name: "test".to_string(),
+            base_url: "http://127.0.0.1:3000".to_string(),
+            mcp_access,
+            app_dir: app.path().to_path_buf(),
+            worker_count: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_run_events_replays_journaled_llm_partials_and_closes_terminal_run() {
+        let app = TempDir::new("agent-run-events");
+        let journal = Journal::open(app.path()).unwrap();
+        journal.create_run("run-1", "support", "hello").unwrap();
+        let seq = journal
+            .start_step(
+                "run-1",
+                "llm_call",
+                &json!({"messages": [{"role": "user", "content": "hello"}]}),
+                None,
+                None,
+                1,
+            )
+            .unwrap();
+        journal
+            .append_step_partial(
+                "run-1",
+                seq,
+                "content_block_delta",
+                &json!({
+                    "event": "content_block_delta",
+                    "data": {"delta": {"type": "text_delta", "text": "hel"}}
+                }),
+            )
+            .unwrap();
+        journal
+            .append_step_partial(
+                "run-1",
+                seq,
+                "content_block_delta",
+                &json!({
+                    "event": "content_block_delta",
+                    "data": {"delta": {"type": "text_delta", "text": "lo"}}
+                }),
+            )
+            .unwrap();
+        journal
+            .complete_step(
+                "run-1",
+                seq,
+                &json!({"content": [{"type": "text", "text": "hello"}], "stop_reason": "end_turn"}),
+            )
+            .unwrap();
+        journal.set_run_status("run-1", "completed").unwrap();
+
+        let response = handle_agent_run_events(
+            State(test_state(&app, mcp::AccessConfig::default())),
+            AxumPath("run-1".to_string()),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/event-stream; charset=utf-8"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(body.matches("event: llm_partial").count(), 2, "{body}");
+        assert!(body.contains("\"text\":\"hel\""), "{body}");
+        assert!(body.contains("\"text\":\"lo\""), "{body}");
+        assert!(body.contains("event: done"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn agent_run_events_requires_bearer_when_mcp_auth_is_enabled() {
+        let app = TempDir::new("agent-run-events-auth");
+        let journal = Journal::open(app.path()).unwrap();
+        journal.create_run("run-1", "support", "hello").unwrap();
+
+        let response = handle_agent_run_events(
+            State(test_state(
+                &app,
+                mcp::AccessConfig::new(Some("secret".to_string()), Vec::new()),
+            )),
+            AxumPath("run-1".to_string()),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("www-authenticate").unwrap(),
+            "Bearer"
+        );
     }
 
     #[test]

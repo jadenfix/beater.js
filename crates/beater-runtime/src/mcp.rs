@@ -107,7 +107,7 @@ impl AccessConfig {
                 .any(|allowed| allowed == &origin)
     }
 
-    fn authorized(&self, headers: &HeaderMap) -> bool {
+    pub fn authorized(&self, headers: &HeaderMap) -> bool {
         let Some(expected) = self.bearer_token.as_deref() else {
             return true;
         };
