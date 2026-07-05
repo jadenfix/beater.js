@@ -270,4 +270,4 @@ Phase C progress so far:
 
 - **To be e2e done (MVP):** install `ANTHROPIC_API_KEY`, run `scripts/m2-live-gate.sh`, preserve the emitted `evidence.md` + raw logs, then flip README.md/ARCHITECTURE.md/final.md from pending to done. Everything else is already built and verified.
 - **To ship v0.1:** tests + CI, portable Python config, isolate-pool support plus the remaining scaling proof, `beater new`.
-- **To kill Node/Next:** pay off punts 1–5 and finish the remaining Docker proof for 11, while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.
+- **To kill Node/Next:** finish the #5 scaling proof and the #11 Docker proof, then pay off #7–#10 and #12–#14 while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.
