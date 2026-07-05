@@ -139,7 +139,7 @@ CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <
 - **WHATWG fetch classes in routes** — comes with broader npm-compat.
 - **Full RSC** — the chunked isolate→host streaming plumbing, route-scoped client modules, and initial `text/x-component` flight transport are the substrate; add official React Flight client references/manifests after broader npm-compat.
 - **Wasmtime sandbox expansion** — local `wasmtime` tools now run hermetic scalar wasm with empty imports; broader WASI/capability handles for files, sockets, and richer value passing remain future work.
-- **C++ tools** — via `cxx` on the Rust built-in path when a real use case appears.
+- **C++ tools** — `cpp_double` proves the `cxx` bridge on the Rust built-in path; richer C++ tool packaging remains future work.
 - **Production agentic browsing** — the registry has a mock CDP browser provider for contract tests; reuse beater-agents' real CDP/Playwright crates as the production provider.
 - **Deploy** — first slice exists: `beater build --out <dir>` emits a runnable host-platform bundle with copied app assets, the current binary, a launcher, a manifest, and a non-root Docker context while excluding runtime state and common local credential files. `scripts/docker-cold-start-gate.sh` codifies the Linux-builder path and `docker run` health check; a passing gate, target-OS binary selection, and venv baking guarantees remain.
 - **Isolate pool production hardening / per-request isolation** — `[app].workers = N` starts N route isolates; smoke tests prove round-robin dispatch, and `scripts/isolate-pool-scaling-gate.cjs` proved 7.65x route throughput on ten local workers. Per-request isolation hardening and worker-count tuning remain production work.

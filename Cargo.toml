@@ -28,6 +28,8 @@ axum = "0.8"
 bytes = "1"
 futures-util = "0.3"
 base64 = "0.22"
+cxx = "1"
+cxx-build = "1"
 
 # embedded CPython
 pyo3 = { version = "0.29", features = ["auto-initialize"] }

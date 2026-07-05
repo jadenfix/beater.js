@@ -52,9 +52,10 @@ Use `rustTool` for host built-ins:
 
 ```ts
 rustTool("get_time")
+rustTool("cpp_double")
 ```
 
-Rust built-ins are appropriate for stable host capabilities, low-level system integration, and functionality that should ship inside the binary.
+Rust built-ins are appropriate for stable host capabilities, low-level system integration, and functionality that should ship inside the binary. `cpp_double` is the current C++ proof: it runs through `cxx` on the Rust built-in path, so it keeps the same registry schema and journal behavior as other host tools.
 
 ### Remote MCP Tools
 

@@ -245,6 +245,7 @@ Phase C progress so far:
 - Direct `/mcp tools/call` requests now create synthetic MCP journal runs, commit a `tool_call` started row before executing side-effecting tools, and finish the row/run as completed, failed, or `needs_review` before returning the MCP tool result.
 - Dev hot reload now refreshes the agent/tool registry and agent metadata alongside routes and the worker, preserving the last good agent snapshot if a reload-time config rebuild fails.
 - Local `wasmtime` tools now provide the fourth registry implementation kind for hermetic untrusted scalar wasm: `wasmtime_tool_runs_hermetic_wasm_function` proves execution with fuel/memory/wall limits, and `wasmtime_tool_rejects_filesystem_imports_before_execution` plus `wasmtime_policy_rejects_filesystem_mounts` prove filesystem capability denial.
+- `rustTool("cpp_double")` now calls a C++ function through `cxx` on the Rust built-in path; `cpp_builtin_executes_through_rust_tool_registry` proves schema exposure and execution through the same registry path as other host tools.
 - Agent LLM calls now use Anthropic SSE, rebuild text and tool-use responses from stream events, and append each stream event as a durable `step_partials` row before the final `llm_call` completion. Tests cover text deltas, tool-use `input_json_delta`, journal partial durability, and agent-loop partial recording.
 - `GET /_beater/agent/runs/<run_id>/events` now streams journaled LLM partials as `text/event-stream`, reusing the MCP origin/bearer policy and closing with a terminal event once the run reaches `completed`, `failed`, or `needs_review`.
 
@@ -263,7 +264,7 @@ Phase C progress so far:
 | 11 | **Deploy story** — `beater build` → single container (binary + assets + venv) | **partial:** host-platform bundle exists and is locally boot-tested through `run.sh`; `scripts/docker-cold-start-gate.sh` defines the target-OS image proof; done requires the gate to pass with `docker run` serving the app cold in <1s |
 | 12 | **Observability** — OTLP out of the agent loop into beater-agents | a run's trace appears in the beater-agents dashboard |
 | 13 | **Free-threaded Python** — pyo3 on 3.14t once ML wheels are reliable | two Python tools execute truly in parallel under load |
-| 14 | **C++ tools** — via cxx on the Rust builtin path | a C++ function is callable as a tool with schema |
+| 14 | **C++ tools** — via cxx on the Rust builtin path | **done for the first builtin:** `rustTool("cpp_double")` exposes a schema and calls a C++ function through `cxx`; broader C++ packaging remains future work |
 
 **Definition of thesis-done:** a team can build and deploy a production app where the web UI, the agents, the browser automation, the remote integrations, and the ML tools live in one repo, run in one process, survive crashes mid-agent-loop, and are discoverable/callable by third-party AI agents — without Node, without a queue between the web and ML halves, and without a cloud lock-in. Items 1–5 + 11 are the minimum for the web-runtime replacement to be true; 6–10 + 12–14 make it an agent-native platform for remote management, networking, integrations, and browsing.
 

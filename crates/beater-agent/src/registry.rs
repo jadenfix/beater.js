@@ -1822,15 +1822,34 @@ fn rust_builtin(name: &str) -> Option<ToolEntry> {
             idempotent: true, // no side effects; safe to re-run on resume
             imp: ToolImpl::RustBuiltin,
         }),
+        "cpp_double" => Some(ToolEntry {
+            name: name.to_string(),
+            description: "Double an integer through the host C++ tool bridge.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"n": {"type": "integer"}},
+                "required": ["n"],
+                "additionalProperties": false,
+            }),
+            idempotent: true,
+            imp: ToolImpl::RustBuiltin,
+        }),
         _ => None,
     }
 }
 
-fn execute_builtin(name: &str, _input: &Value) -> Result<String> {
+fn execute_builtin(name: &str, input: &Value) -> Result<String> {
     match name {
         "get_time" => {
             let now = chrono::Utc::now();
             Ok(json!({"iso": now.to_rfc3339(), "unix": now.timestamp()}).to_string())
+        }
+        "cpp_double" => {
+            let n = input
+                .get("n")
+                .and_then(Value::as_i64)
+                .context("cpp_double requires integer input field n")?;
+            Ok(json!({"value": crate::cpp_bridge::double(n)}).to_string())
         }
         _ => bail!("no rust builtin {name}"),
     }
@@ -1909,6 +1928,22 @@ mod tests {
                 .expect("rust builtin registry should build");
 
         assert!(!registry.get("get_time").unwrap().idempotent);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cpp_builtin_executes_through_rust_tool_registry() {
+        let registry =
+            ToolRegistry::build(PathBuf::new().as_path(), &[rust_decl("cpp_double", true)])
+                .expect("C++ builtin registry should build");
+        let tool = registry.get("cpp_double").unwrap();
+        assert!(matches!(tool.imp, ToolImpl::RustBuiltin));
+        assert_eq!(tool.input_schema["properties"]["n"]["type"], "integer");
+
+        let result = registry
+            .execute("cpp_double", &json!({"n": 21}))
+            .await
+            .expect("C++ builtin should execute");
+        assert_eq!(serde_json::from_str::<Value>(&result).unwrap()["value"], 42);
     }
 
     #[test]

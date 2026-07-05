@@ -5,6 +5,7 @@
 //! reloads and every step is journaled before it executes (ARCHITECTURE.md §5).
 
 mod anthropic;
+mod cpp_bridge;
 mod journal;
 mod registry;
 mod runner;

@@ -57,6 +57,7 @@ The tool file is executed in a fresh namespace for every call, so code edits are
 Rust tools are built into the host binary. Current built-ins:
 
 - `get_time`: returns the current UTC time as JSON.
+- `cpp_double`: calls a C++ function through `cxx` and returns `{"value": n * 2}`.
 
 Rust built-ins are idempotent by default because they are first-party host code with no external side effects unless explicitly implemented otherwise.
 

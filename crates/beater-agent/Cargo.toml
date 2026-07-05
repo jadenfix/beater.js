@@ -12,6 +12,7 @@ wasmtime.workspace = true
 beater-py.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+cxx.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
@@ -21,3 +22,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[build-dependencies]
+cxx-build.workspace = true
