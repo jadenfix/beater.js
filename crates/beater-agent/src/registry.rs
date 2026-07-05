@@ -978,6 +978,8 @@ pub struct RemoteMcpTool {
     timeout: Duration,
     retry: RemoteMcpRetry,
     idempotent: bool,
+    session: Option<RemoteMcpSessionPolicy>,
+    session_id: Mutex<Option<String>>,
 }
 
 pub struct BrowserTool {
@@ -1013,6 +1015,19 @@ struct RemoteMcpRetry {
     attempts: u32,
     backoff: Duration,
     idempotency_key: Option<IdempotencyKeySource>,
+}
+
+struct RemoteMcpSessionPolicy {
+    scope: RemoteMcpSessionScope,
+    cleanup: RemoteMcpSessionCleanup,
+}
+
+enum RemoteMcpSessionScope {
+    Run,
+}
+
+enum RemoteMcpSessionCleanup {
+    Always,
 }
 
 enum IdempotencyKeySource {
@@ -1294,6 +1309,7 @@ impl RemoteMcpTool {
             "remote_mcp tool {} retry attempts > 1 requires idempotencyKey for non-idempotent tools",
             decl.name
         );
+        let session = RemoteMcpSessionPolicy::from_decl(decl)?;
         Ok(Self {
             endpoint,
             remote_tool,
@@ -1301,6 +1317,8 @@ impl RemoteMcpTool {
             timeout: Duration::from_millis(timeout_ms),
             retry,
             idempotent: decl.idempotent,
+            session,
+            session_id: Mutex::new(None),
         })
     }
 
@@ -1310,10 +1328,20 @@ impl RemoteMcpTool {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("build remote MCP HTTP client")?;
+        let session_id = self
+            .session_id(&client, bearer.as_deref())
+            .await
+            .with_context(|| format!("initializing remote MCP session for {}", self.remote_tool))?;
         let attempts = self.effective_attempts(context);
         for attempt in 1..=attempts {
             match self
-                .send_once(&client, input, context, bearer.as_deref())
+                .send_once(
+                    &client,
+                    input,
+                    context,
+                    bearer.as_deref(),
+                    session_id.as_deref(),
+                )
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -1346,6 +1374,107 @@ impl RemoteMcpTool {
             }
         }
         bail!("remote MCP tool {} exhausted retries", self.remote_tool)
+    }
+
+    async fn session_id(
+        &self,
+        client: &reqwest::Client,
+        bearer: Option<&str>,
+    ) -> Result<Option<String>> {
+        if self.session.is_none() {
+            return Ok(None);
+        }
+        if let Some(existing) = self.session_id.lock().unwrap().clone() {
+            return Ok(Some(existing));
+        }
+        let session_id = self.initialize_session(client, bearer).await?;
+        let mut slot = self.session_id.lock().unwrap();
+        let value = slot.get_or_insert(session_id);
+        Ok(Some(value.clone()))
+    }
+
+    async fn initialize_session(
+        &self,
+        client: &reqwest::Client,
+        bearer: Option<&str>,
+    ) -> Result<String> {
+        if let Some(session) = &self.session {
+            tracing::debug!(
+                remote_tool = %self.remote_tool,
+                scope = session.scope.as_str(),
+                cleanup = session.cleanup.as_str(),
+                "initializing remote MCP session"
+            );
+        }
+        let id = "beater:init";
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "beater.js", "version": env!("CARGO_PKG_VERSION")},
+            },
+        });
+        let mut request = client
+            .post(self.endpoint.clone())
+            .timeout(self.timeout)
+            .header("accept", "application/json")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-11-25")
+            .json(&body);
+        if let Some(bearer) = bearer {
+            request = request.header("authorization", format!("Bearer {bearer}"));
+        }
+        let response = request.send().await.with_context(|| {
+            format!("remote MCP initialize request to {} failed", self.endpoint)
+        })?;
+        let status = response.status();
+        let session_id = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let text = response.text().await.with_context(|| {
+            format!(
+                "remote MCP initialize response body failed for {}",
+                self.endpoint
+            )
+        })?;
+        ensure!(
+            status.is_success(),
+            "remote MCP initialize returned HTTP {status}: {text}"
+        );
+        let message: Value = serde_json::from_str(&text)
+            .with_context(|| format!("remote MCP initialize returned invalid JSON: {text}"))?;
+        ensure!(
+            message["jsonrpc"] == "2.0",
+            "remote MCP initialize response has invalid jsonrpc version: {}",
+            message["jsonrpc"]
+        );
+        ensure!(
+            message["id"] == id,
+            "remote MCP initialize response id {} did not match request id {id:?}",
+            message["id"]
+        );
+        ensure!(
+            message.get("error").is_none(),
+            "remote MCP initialize returned JSON-RPC error: {}",
+            message["error"]
+        );
+        ensure!(
+            message.get("result").is_some(),
+            "remote MCP initialize response has no result"
+        );
+        session_id.with_context(|| {
+            format!(
+                "remote_mcp tool {} requested session support but initialize returned no mcp-session-id",
+                self.remote_tool
+            )
+        })
     }
 
     fn bearer_token(&self) -> Result<Option<String>> {
@@ -1388,6 +1517,7 @@ impl RemoteMcpTool {
         input: &Value,
         context: &ToolCallContext,
         bearer: Option<&str>,
+        session_id: Option<&str>,
     ) -> std::result::Result<String, RemoteAttempt> {
         let id = context.tool_use_id.as_deref().unwrap_or("1");
         let body = json!({
@@ -1408,6 +1538,9 @@ impl RemoteMcpTool {
             .json(&body);
         if let Some(bearer) = bearer {
             request = request.header("authorization", format!("Bearer {bearer}"));
+        }
+        if let Some(session_id) = session_id {
+            request = request.header("mcp-session-id", session_id);
         }
         if let Some(key) = self.idempotency_key(context) {
             request = request.header("idempotency-key", key);
@@ -1485,6 +1618,45 @@ impl RemoteMcpTool {
             )));
         }
         mcp_result_to_string(result).map_err(RemoteAttempt::AmbiguousSuccess)
+    }
+}
+
+impl RemoteMcpSessionPolicy {
+    fn from_decl(decl: &ToolDecl) -> Result<Option<Self>> {
+        let Some(session) = decl.session.as_ref() else {
+            return Ok(None);
+        };
+        let scope = match session.scope.as_deref().unwrap_or("run") {
+            "run" => RemoteMcpSessionScope::Run,
+            other => bail!(
+                "remote_mcp tool {} unsupported session.scope {other:?}; supported scopes: run",
+                decl.name
+            ),
+        };
+        let cleanup = match session.cleanup.as_deref().unwrap_or("always") {
+            "always" => RemoteMcpSessionCleanup::Always,
+            other => bail!(
+                "remote_mcp tool {} unsupported session.cleanup {other:?}; supported cleanup: always",
+                decl.name
+            ),
+        };
+        Ok(Some(Self { scope, cleanup }))
+    }
+}
+
+impl RemoteMcpSessionScope {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Run => "run",
+        }
+    }
+}
+
+impl RemoteMcpSessionCleanup {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Always => "always",
+        }
     }
 }
 
@@ -1898,6 +2070,102 @@ def run(input):
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn remote_mcp_initializes_and_reuses_provider_session() {
+        let mut init = MockResponse::json(
+            "200 OK",
+            json!({
+                "jsonrpc": "2.0",
+                "id": "beater:init",
+                "result": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
+                }
+            }),
+        );
+        init.headers
+            .push(("mcp-session-id".to_string(), "session-123".to_string()));
+        let server = MockMcp::new(vec![
+            init,
+            MockResponse::json(
+                "200 OK",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "toolu_first",
+                    "result": {
+                        "content": [{"type": "text", "text": "{\"ok\":\"first\"}"}],
+                        "isError": false
+                    }
+                }),
+            ),
+            MockResponse::json(
+                "200 OK",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "toolu_second",
+                    "result": {
+                        "content": [{"type": "text", "text": "{\"ok\":\"second\"}"}],
+                        "isError": false
+                    }
+                }),
+            ),
+        ]);
+        let mut decl = remote_decl(&server.endpoint, None, None, true);
+        decl.session =
+            Some(serde_json::from_value(json!({"scope": "run", "cleanup": "always"})).unwrap());
+        let registry = ToolRegistry::build(PathBuf::new().as_path(), &[decl])
+            .expect("remote MCP registry should build");
+
+        let first = registry
+            .execute_with_context(
+                "crm.lookup",
+                &json!({"email": "a@example.com"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_first".to_string()),
+                    ..ToolCallContext::default()
+                },
+            )
+            .await
+            .expect("first session tool call should succeed");
+        let second = registry
+            .execute_with_context(
+                "crm.lookup",
+                &json!({"email": "b@example.com"}),
+                &ToolCallContext {
+                    tool_use_id: Some("toolu_second".to_string()),
+                    ..ToolCallContext::default()
+                },
+            )
+            .await
+            .expect("second session tool call should succeed");
+
+        assert_eq!(first, "{\"ok\":\"first\"}");
+        assert_eq!(second, "{\"ok\":\"second\"}");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        let init_body: Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(init_body["method"], "initialize");
+        assert!(
+            !requests[0]
+                .headers
+                .to_ascii_lowercase()
+                .contains("mcp-session-id")
+        );
+        for request in &requests[1..] {
+            assert!(
+                request
+                    .headers
+                    .to_ascii_lowercase()
+                    .contains("mcp-session-id: session-123"),
+                "{}",
+                request.headers
+            );
+            let body: Value = serde_json::from_str(&request.body).unwrap();
+            assert_eq!(body["method"], "tools/call");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn remote_mcp_missing_bearer_env_fails_before_network() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let endpoint = format!(
@@ -1960,6 +2228,21 @@ def run(input):
             Err(error) => error,
         };
         assert!(format!("{error:#}").contains("requires https"), "{error:#}");
+    }
+
+    #[test]
+    fn remote_mcp_session_policy_rejects_unsupported_scope() {
+        let mut decl = remote_decl("http://127.0.0.1:65530/mcp", None, None, true);
+        decl.session =
+            Some(serde_json::from_value(json!({"scope": "global", "cleanup": "always"})).unwrap());
+        let error = match ToolRegistry::build(PathBuf::new().as_path(), &[decl]) {
+            Ok(_) => panic!("unsupported remote MCP session scope should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("unsupported session.scope"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

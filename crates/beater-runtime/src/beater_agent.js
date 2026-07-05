@@ -104,6 +104,7 @@ export function remoteMcpTool(name, opts = {}) {
     auth: opts.auth ?? null,
     timeoutMs: opts.timeoutMs ?? 10000,
     retry: opts.retry ?? null,
+    session: opts.session ?? null,
     egress: opts.egress ?? [],
   };
 }

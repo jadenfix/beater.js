@@ -73,6 +73,7 @@ remoteMcpTool("linear.create_issue", {
   auth: {type: "bearer", env: "LINEAR_MCP_TOKEN"},
   timeoutMs: 10_000,
   retry: {attempts: 2, backoffMs: 250, idempotencyKey: "tool_use_id"},
+  session: {scope: "run", cleanup: "always"},
   egress: ["mcp.linear.example"],
   idempotent: false,
 })
@@ -88,12 +89,13 @@ Implemented behavior:
 - HTTP timeouts fail closed
 - transient server errors and rate limits retry only when the tool is idempotent or a configured `tool_use_id` idempotency key is available
 - outbound MCP `tools/call` requests reuse `tool_use_id` as the JSON-RPC id and `Idempotency-Key` header when configured
+- `session: {scope: "run", cleanup: "always"}` lazily sends `initialize`, stores the returned `Mcp-Session-Id` in memory for the tool, and sends it on later `tools/call` requests
 - non-idempotent calls park as `needs_review` on crash-resume and after ambiguous network/provider failures
 
 Planned next steps:
 
-- remote `initialize` and `tools/list` discovery for provider health checks
-- MCP sessions and resumable transport metadata
+- remote `tools/list` discovery for provider health checks and schema import
+- resumable transport metadata beyond the current in-memory provider session id
 
 ### Browser Providers
 

@@ -84,7 +84,7 @@ The tool registry is served at `POST /mcp` per spec 2025-11-25 (Streamable HTTP)
 - `GET /mcp` → 405 (we offer no server-initiated SSE stream — explicitly allowed by spec)
 - stateless: no `MCP-Session-Id` issued
 
-Consuming remote MCP servers as tool sources is a planned follow-up (the registry is impl-agnostic).
+Consuming remote MCP servers as declared tool sources is implemented through direct `tools/call`, with optional bearer auth, egress policy, retries, idempotency keys, and provider session initialization. Provider `tools/list` discovery and future MCP transport upgrades remain follow-ups.
 
 ## 6b. The Agent Access Layer (agent-ready sites by default)
 
@@ -144,7 +144,7 @@ CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <
 - **Deploy** — first slice exists: `beater build --out <dir>` emits a runnable host-platform bundle with copied app assets, the current binary, a launcher, a manifest, and a non-root Docker context while excluding runtime state and common local credential files. `scripts/docker-cold-start-gate.sh` codifies the Linux-builder path and `docker run` health check; a passing gate, target-OS binary selection, and venv baking guarantees remain.
 - **Isolate pool production hardening / per-request isolation** — `[app].workers = N` starts N route isolates; smoke tests prove round-robin dispatch, and `scripts/isolate-pool-scaling-gate.cjs` proved 7.65x route throughput on ten local workers. Per-request isolation hardening and worker-count tuning remain production work.
 - **LLM streaming to browser** — Anthropic SSE ingestion and partial-step journal records are in place; expose those partials over a browser-facing run stream next.
-- **MCP sessions/SSE + the 2026-07-28 spec** — adopt when released.
+- **MCP discovery/SSE + the 2026-07-28 spec** — remote MCP `tools/call` plus provider session initialization are in place; add `tools/list` discovery and adopt the next transport spec when released.
 - **Observability/evals** — integrate beater-agents (OTLP out of the agent loop) rather than rebuilding.
 
 ## 9. Milestones

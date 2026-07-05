@@ -125,6 +125,7 @@ export default defineAgent({
       auth: {type: "bearer", env: "CRM_MCP_TOKEN"},
       timeoutMs: 5000,
       retry: {attempts: 2, backoffMs: 25, idempotencyKey: "tool_use_id"},
+      session: {scope: "run", cleanup: "always"},
       egress: ["127.0.0.1:9000"],
       idempotent: false,
     }),
@@ -152,6 +153,7 @@ export default defineAgent({
                 "auth": {"type": "bearer", "env": "CRM_MCP_TOKEN"},
                 "timeoutMs": 5000,
                 "retry": {"attempts": 2, "backoffMs": 25, "idempotencyKey": "tool_use_id"},
+                "session": {"scope": "run", "cleanup": "always"},
                 "egress": ["127.0.0.1:9000"]
             })
         );
