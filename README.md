@@ -95,3 +95,11 @@ More docs:
 ## License
 
 Apache-2.0
+
+## Ecosystem
+
+beater.js is part of the [ecosystem](https://github.com/jadenfix/ecosystem) — a family of Rust-first, local-first agent-infrastructure projects. It is fully standalone: one Rust binary that serves your app and runs durable polyglot agents, with no sibling project required. Within the family it can connect for:
+
+- feeding its journaled runs to [beater-memory](https://github.com/jadenfix/beater-memory) (journal import exists today) and its traces to [beater](https://github.com/jadenfix/beater) for evals and CI gates
+- using [beatbox](https://github.com/jadenfix/beatbox) as the sandboxed execution tier for untrusted agent-generated code (the planned Wasmtime tier)
+- giving its agents web hands via [tempo](https://github.com/jadenfix/tempo) and running under [beaterOS](https://github.com/jadenfix/beaterOS) authority and policy
