@@ -275,16 +275,41 @@ async fn handle_mcp_post(
     body: axum::body::Bytes,
 ) -> Response<Body> {
     let surfaces = agent_surfaces(&state).await;
-    let route_actions =
-        if state.mcp_access.origin_allowed(&headers) && state.mcp_access.authorized(&headers) {
-            route_actions(&state).await
-        } else {
-            Vec::new()
-        };
+    let requested_method = mcp_request_method(&body);
+    let requested_resource_uri = mcp_request_resource_uri(&body);
+    let has_response_id = mcp_request_has_response_id(&body);
+    let route_actions = if state.mcp_access.origin_allowed(&headers)
+        && state.mcp_access.authorized(&headers)
+        && has_response_id
+        && mcp_request_needs_route_actions(
+            requested_method.as_deref(),
+            requested_resource_uri.as_deref(),
+        ) {
+        route_actions(&state).await
+    } else {
+        Vec::new()
+    };
+    let route_resources = if state.mcp_access.origin_allowed(&headers)
+        && state.mcp_access.authorized(&headers)
+        && has_response_id
+        && matches!(
+            (
+                requested_method.as_deref(),
+                requested_resource_uri.as_deref()
+            ),
+            (Some("resources/read"), Some("beater://routes"))
+        ) {
+        mcp_route_resources(&state).await
+    } else {
+        Vec::new()
+    };
     let action_state = state.clone();
     mcp::handle_post(
         &surfaces.registry,
-        &route_actions,
+        mcp::RouteCatalog {
+            actions: &route_actions,
+            resources: &route_resources,
+        },
         &state.mcp_access,
         &state.app_dir,
         &headers,
@@ -297,6 +322,92 @@ async fn handle_mcp_post(
         },
     )
     .await
+}
+
+fn mcp_request_method(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("method")
+                .and_then(|method| method.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn mcp_request_needs_route_actions(method: Option<&str>, resource_uri: Option<&str>) -> bool {
+    matches!(
+        (method, resource_uri),
+        (Some("tools/list" | "tools/call" | "resources/list"), _)
+            | (
+                Some("resources/read"),
+                Some("beater://routes" | "beater://actions")
+            )
+    )
+}
+
+fn mcp_request_has_response_id(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("id").cloned())
+        .is_some_and(|id| !id.is_null())
+}
+
+fn mcp_request_resource_uri(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("params")
+                .and_then(|params| params.get("uri"))
+                .and_then(|uri| uri.as_str())
+                .map(str::to_string)
+        })
+}
+
+async fn mcp_route_resources(state: &DevState) -> Vec<mcp::RouteResource> {
+    let targets: Vec<(String, RouteKind, PathBuf, Option<String>)> = {
+        let table = state.routes.read().await;
+        table
+            .iter()
+            .map(|route| {
+                let spec = deno_core::ModuleSpecifier::from_file_path(&route.file)
+                    .ok()
+                    .map(|specifier| specifier.to_string());
+                (route.pattern.clone(), route.kind, route.file.clone(), spec)
+            })
+            .collect()
+    };
+    let mut resources = Vec::new();
+    for (pattern, kind, file, specifier) in targets {
+        let meta = match specifier {
+            Some(specifier) => route_meta(state, specifier).await,
+            None => None,
+        };
+        if matches!(meta, Some(meta) if !meta.crawl) {
+            continue;
+        }
+        resources.push(mcp::RouteResource {
+            pattern,
+            kind: mcp_route_kind_label(kind).to_string(),
+            source: mcp_app_relative_path(&state.app_dir, &file),
+        });
+    }
+    resources
+}
+
+fn mcp_route_kind_label(kind: RouteKind) -> &'static str {
+    match kind {
+        RouteKind::Api => "api",
+        RouteKind::Page => "page",
+    }
+}
+
+fn mcp_app_relative_path(app_dir: &Path, path: &Path) -> String {
+    path.strip_prefix(app_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 async fn handle_mcp_get(State(state): State<DevState>, headers: HeaderMap) -> Response<Body> {

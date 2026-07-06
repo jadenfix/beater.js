@@ -20,7 +20,7 @@ Pre-alpha, built in the open. Current milestone progress:
 - [x] **M0** — scaffold, pinned deps, architecture contract
 - [x] **M1** — `beater dev`: TS routes in embedded V8, source-mapped errors, hot reload
 - [ ] **M2** — durable agent loop + embedded-Python tools + step-lifecycle journal (code complete; live-API kill-9/resume gate pending a funded `ANTHROPIC_API_KEY`)
-- [x] **M3** — MCP server endpoint (spec 2025-11-25, verified with the official MCP inspector) + agent-ready crawl layer (robots.txt, sitemap.xml, llms.txt, .well-known manifest — auto-generated from the route table)
+- [x] **M3** — MCP server endpoint (spec 2025-11-25, verified with the official MCP inspector) + MCP route resources + agent-ready crawl layer (robots.txt, sitemap.xml, llms.txt, .well-known manifest — auto-generated from the route table)
 - [x] **M4** — streamed React 19 SSR (`renderToReadableStream`; shell chunks flush before Suspense-delayed subtrees)
 - [x] **M5** — route-scoped client module (`/_beater/client/index.js`) hydrates a counter on the hello route
 - [x] **M6** — route-scoped RSC transport (`/_beater/rsc/index.flight`) streams server islands to the browser
@@ -56,6 +56,8 @@ export BEATER_MCP_TOKEN="$(openssl rand -hex 32)"
 export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # browser-based operators only
 ./target/debug/beater dev my-app --host 0.0.0.0 --base-url https://hello.example.com
 ```
+
+MCP clients can call `resources/list` and `resources/read` on the same `/mcp` endpoint to read `beater://routes`, a markdown index of the app's crawlable route table and route-bound actions. Routes marked `export const agent = { crawl: false }` are omitted.
 
 ## Current limits
 

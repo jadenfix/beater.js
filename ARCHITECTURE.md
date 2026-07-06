@@ -75,7 +75,7 @@ Rules:
 
 ## 6. MCP
 
-The tool registry is served at `POST /mcp` per spec 2025-11-25 (Streamable HTTP):
+The tool registry and route resources are served at `POST /mcp` per spec 2025-11-25 (Streamable HTTP):
 - single endpoint; JSON-RPC over POST (`initialize`, `tools/list`, `tools/call`)
 - optional bearer-token auth via `BEATER_MCP_TOKEN`; missing or bad tokens fail with 401
 - `Origin` header parsed and validated → 403 on mismatch (MUST, DNS-rebinding defense); loopback origins are allowed by default, remote browser origins must be listed in `BEATER_MCP_TRUSTED_ORIGINS`
@@ -83,6 +83,7 @@ The tool registry is served at `POST /mcp` per spec 2025-11-25 (Streamable HTTP)
 - generated MCP/crawl metadata uses the public base URL from `--base-url`, `BEATER_BASE_URL`, or `[app] base_url` when serving behind a remote address or proxy
 - `GET /mcp` → 405 (we offer no server-initiated SSE stream — explicitly allowed by spec)
 - stateless: no `MCP-Session-Id` issued
+- `resources/list` and `resources/read` expose a markdown crawlable route/action index (`beater://routes`) so AI clients can inspect the app surface without scraping HTML; routes marked `agent.crawl = false` are omitted
 
 Consuming remote MCP servers as declared tool sources is implemented through direct `tools/call`, with optional bearer auth, egress policy, retries, idempotency keys, and provider session initialization. Provider `tools/list` discovery and future MCP transport upgrades remain follow-ups.
 
@@ -103,7 +104,7 @@ Every other framework treats the crawl layer as hand-maintained files or plugins
 | `/.well-known/beater.json` | manifest: MCP endpoint, OpenAPI, sitemap, llms.txt, auth requirements, route actions | M3 |
 | `/openapi.json` | route action definitions | M3 |
 | markdown views (`Accept: text/markdown` / `.md`) | rendered routes | post-SSR |
-| MCP `resources/list` / `resources/read` | route table → clean markdown | post-SSR |
+| MCP `resources/list` / `resources/read` | route table → clean markdown | M3 |
 | JSON-LD (schema.org) in pages | per-route `agent.schema` | later |
 
 Routes opt in to richer description with one export (all fields optional; `crawl` defaults true for GET pages):

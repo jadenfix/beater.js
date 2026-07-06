@@ -176,6 +176,51 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
         "{tools_list}"
     );
 
+    let resources_list = http_request(
+        port,
+        "POST",
+        "/mcp",
+        Some(r#"{"jsonrpc":"2.0","id":5,"method":"resources/list","params":{}}"#),
+    )
+    .expect("POST /mcp resources/list");
+    assert!(
+        resources_list.starts_with("HTTP/1.1 200"),
+        "{resources_list}"
+    );
+    assert!(
+        resources_list.contains("\"uri\":\"beater://routes\""),
+        "{resources_list}"
+    );
+    assert!(
+        resources_list.contains("\"mimeType\":\"text/markdown\""),
+        "{resources_list}"
+    );
+
+    let resources_read = http_request(
+        port,
+        "POST",
+        "/mcp",
+        Some(
+            r#"{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"beater://routes"}}"#,
+        ),
+    )
+    .expect("POST /mcp resources/read");
+    assert!(
+        resources_read.starts_with("HTTP/1.1 200"),
+        "{resources_read}"
+    );
+    assert!(
+        resources_read.contains("# beater.js route table"),
+        "{resources_read}"
+    );
+    assert!(resources_read.contains("/api/health"), "{resources_read}");
+    assert!(!resources_read.contains("/api/boom"), "{resources_read}");
+    assert!(
+        resources_read.contains("app/routes/index.tsx"),
+        "{resources_read}"
+    );
+    assert!(resources_read.contains("hello.contact"), "{resources_read}");
+
     let route_action_tool = http_request(
         port,
         "POST",

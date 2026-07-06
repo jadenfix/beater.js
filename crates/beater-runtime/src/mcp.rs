@@ -42,11 +42,26 @@ pub struct RouteActionTool {
     pub auth: Value,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteResource {
+    pub pattern: String,
+    pub kind: String,
+    pub source: String,
+}
+
+pub struct RouteCatalog<'a> {
+    pub actions: &'a [RouteActionTool],
+    pub resources: &'a [RouteResource],
+}
+
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 pub const DEFAULT_TOKEN_ENV: &str = "BEATER_MCP_TOKEN";
 pub const DEFAULT_TRUSTED_ORIGINS_ENV: &str = "BEATER_MCP_TRUSTED_ORIGINS";
 pub const AETHER_PAYMENT_HEADER: &str = "x-payment";
 pub const AETHER_PAYMENT_HASH_HEADER: &str = "x-aether-payment-hash";
+const MAX_RESOURCE_MARKDOWN_BYTES: usize = 64 * 1024;
+const MAX_RESOURCE_ROWS: usize = 512;
+const RESOURCE_TRUNCATION_NOTICE_RESERVE: usize = 256;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaymentHeaders {
@@ -246,7 +261,7 @@ fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
 
 pub async fn handle_post(
     registry: &ToolRegistry,
-    route_actions: &[RouteActionTool],
+    route_catalog: RouteCatalog<'_>,
     access: &AccessConfig,
     app_dir: &Path,
     headers: &HeaderMap,
@@ -322,15 +337,17 @@ pub async fn handle_post(
     let reply = match method {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {}, "resources": {}},
             "serverInfo": {"name": "beater.js", "version": env!("CARGO_PKG_VERSION")},
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": tools_json(registry, route_actions)})),
+        "tools/list" => Ok(json!({"tools": tools_json(registry, route_catalog.actions)})),
+        "resources/list" => resources_list(route_catalog.resources, route_catalog.actions),
+        "resources/read" => resources_read(route_catalog.resources, route_catalog.actions, &params),
         "tools/call" => {
             tools_call(
                 registry,
-                route_actions,
+                route_catalog.actions,
                 app_dir,
                 &params,
                 payment_headers,
@@ -428,6 +445,198 @@ fn tools_json(registry: &ToolRegistry, route_actions: &[RouteActionTool]) -> Val
         })
     }));
     Value::Array(tools)
+}
+
+fn resources_list(
+    _route_resources: &[RouteResource],
+    route_actions: &[RouteActionTool],
+) -> Result<Value, (i64, String)> {
+    let mut resources = vec![json!({
+        "uri": "beater://routes",
+        "name": "Route table",
+        "description": "Markdown index of beater.js routes and route-bound actions.",
+        "mimeType": "text/markdown",
+    })];
+    if !route_actions.is_empty() {
+        resources.push(json!({
+            "uri": "beater://actions",
+            "name": "Route actions",
+            "description": "Markdown index of route-bound actions exposed through MCP.",
+            "mimeType": "text/markdown",
+        }));
+    }
+    Ok(json!({ "resources": resources }))
+}
+
+fn resources_read(
+    route_resources: &[RouteResource],
+    route_actions: &[RouteActionTool],
+    params: &Value,
+) -> Result<Value, (i64, String)> {
+    let uri = params["uri"]
+        .as_str()
+        .ok_or((-32602, "resources/read requires params.uri".to_string()))?;
+    let text = match uri {
+        "beater://routes" => route_resource_markdown(route_resources, route_actions),
+        "beater://actions" => action_resource_markdown(route_actions),
+        other => return Err((-32602, format!("unknown resource: {other}"))),
+    };
+    let mut result = json!({
+        "contents": [{
+            "uri": uri,
+            "mimeType": "text/markdown",
+            "text": text.text,
+        }]
+    });
+    if text.truncated {
+        result["_meta"] = json!({
+            "truncated": true,
+            "rowsEmitted": text.rows_emitted,
+            "rowsTotal": text.rows_total,
+            "maxBytes": MAX_RESOURCE_MARKDOWN_BYTES,
+            "maxRows": MAX_RESOURCE_ROWS,
+        });
+    }
+    Ok(result)
+}
+
+struct ResourceMarkdown {
+    text: String,
+    truncated: bool,
+    rows_emitted: usize,
+    rows_total: usize,
+}
+
+struct ResourceMarkdownBuilder {
+    text: String,
+    truncated: bool,
+    rows_emitted: usize,
+    rows_total: usize,
+}
+
+impl ResourceMarkdownBuilder {
+    fn new(rows_total: usize) -> Self {
+        Self {
+            text: String::new(),
+            truncated: false,
+            rows_emitted: 0,
+            rows_total,
+        }
+    }
+
+    fn push_static(&mut self, text: &str) {
+        if !self.truncated {
+            self.push_bounded(text);
+        }
+    }
+
+    fn push_row(&mut self, row: String) {
+        if self.truncated {
+            return;
+        }
+        if self.rows_emitted >= MAX_RESOURCE_ROWS {
+            self.truncated = true;
+            return;
+        }
+        if self.push_bounded(&row) {
+            self.rows_emitted += 1;
+        }
+    }
+
+    fn push_bounded(&mut self, text: &str) -> bool {
+        if self.text.len() + text.len() + RESOURCE_TRUNCATION_NOTICE_RESERVE
+            > MAX_RESOURCE_MARKDOWN_BYTES
+        {
+            self.truncated = true;
+            return false;
+        }
+        self.text.push_str(text);
+        true
+    }
+
+    fn finish(mut self) -> ResourceMarkdown {
+        if self.rows_emitted < self.rows_total {
+            self.truncated = true;
+        }
+        if self.truncated {
+            let notice = format!(
+                "\n_Resource truncated after {} of {} rows. Increase the resource cap or narrow the app surface before relying on this as a complete index._\n",
+                self.rows_emitted, self.rows_total
+            );
+            let available = MAX_RESOURCE_MARKDOWN_BYTES.saturating_sub(self.text.len());
+            if available >= notice.len() {
+                self.text.push_str(&notice);
+            } else if available > 0 {
+                self.text.push_str(&notice[..available.min(notice.len())]);
+            }
+        }
+        ResourceMarkdown {
+            text: self.text,
+            truncated: self.truncated,
+            rows_emitted: self.rows_emitted,
+            rows_total: self.rows_total,
+        }
+    }
+}
+
+fn route_resource_markdown(
+    route_resources: &[RouteResource],
+    route_actions: &[RouteActionTool],
+) -> ResourceMarkdown {
+    let mut out = ResourceMarkdownBuilder::new(route_resources.len() + route_actions.len());
+    out.push_static("# beater.js route table\n\n");
+    out.push_static("## Routes\n\n");
+    if route_resources.is_empty() {
+        out.push_static("No crawlable routes are registered.\n");
+    } else {
+        out.push_static("| path | kind | source |\n");
+        out.push_static("|---|---|---|\n");
+        for route in route_resources {
+            out.push_row(format!(
+                "| {} | {} | {} |\n",
+                markdown_table_cell(&route.pattern),
+                markdown_table_cell(&route.kind),
+                markdown_table_cell(&route.source),
+            ));
+        }
+    }
+    if route_actions.is_empty() {
+        out.push_static("\n## Actions\n\nNo route-bound actions are registered.\n");
+    } else {
+        push_action_markdown(&mut out, route_actions);
+    }
+    out.finish()
+}
+
+fn action_resource_markdown(route_actions: &[RouteActionTool]) -> ResourceMarkdown {
+    let mut out = ResourceMarkdownBuilder::new(route_actions.len());
+    push_action_markdown(&mut out, route_actions);
+    out.finish()
+}
+
+fn push_action_markdown(out: &mut ResourceMarkdownBuilder, route_actions: &[RouteActionTool]) {
+    out.push_static("\n## Actions\n\n");
+    if route_actions.is_empty() {
+        out.push_static("No route-bound actions are registered.\n");
+        return;
+    }
+    out.push_static("| name | method | path | side effect | confirm | idempotency required |\n");
+    out.push_static("|---|---|---|---|---|---|\n");
+    for action in route_actions {
+        out.push_row(format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            markdown_table_cell(&action.name),
+            markdown_table_cell(&action.method),
+            markdown_table_cell(&action.path),
+            markdown_table_cell(&action.side_effect),
+            action.confirm,
+            action.idempotency_required,
+        ));
+    }
+}
+
+fn markdown_table_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
 }
 
 async fn tools_call(
@@ -617,8 +826,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        AETHER_PAYMENT_HASH_HEADER, AETHER_PAYMENT_HEADER, AccessConfig, PaymentHeaders,
-        RouteActionTool, handle_get, handle_options, handle_post, mcp_tool_use_id,
+        AETHER_PAYMENT_HASH_HEADER, AETHER_PAYMENT_HEADER, AccessConfig,
+        MAX_RESOURCE_MARKDOWN_BYTES, MAX_RESOURCE_ROWS, PaymentHeaders, RouteActionTool,
+        RouteCatalog, RouteResource, handle_get, handle_options, handle_post, mcp_tool_use_id,
     };
 
     struct TempApp {
@@ -639,6 +849,12 @@ mod tests {
         fn path(&self) -> &Path {
             &self.path
         }
+
+        fn write(&self, rel: &str, contents: &str) {
+            let path = self.path.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
     }
 
     impl Drop for TempApp {
@@ -656,7 +872,10 @@ mod tests {
     ) -> axum::http::Response<Body> {
         handle_post(
             registry,
-            &[],
+            RouteCatalog {
+                actions: &[],
+                resources: &[],
+            },
             access,
             app_dir,
             headers,
@@ -760,6 +979,205 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_resource_capability() {
+        let app = TempApp::new("resources-capability");
+        let registry = ToolRegistry::empty();
+
+        let response = test_handle_post(
+            &registry,
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["result"]["capabilities"]["resources"].is_object());
+        assert!(body["result"]["capabilities"]["tools"].is_object());
+    }
+
+    #[tokio::test]
+    async fn resources_list_and_read_expose_route_table_markdown() {
+        let app = TempApp::new("resources-route-table");
+        app.write(
+            "app/routes/index.tsx",
+            "export default function Home() {}\n",
+        );
+        app.write("app/routes/api/health.ts", "export function GET() {}\n");
+        let registry = ToolRegistry::empty();
+        let route_actions = vec![RouteActionTool {
+            name: "hello.contact".to_string(),
+            description: "Send a contact request.".to_string(),
+            input_schema: json!({"type": "object"}),
+            method: "POST".to_string(),
+            path: "/api/actions/contact".to_string(),
+            side_effect: "write".to_string(),
+            confirm: true,
+            dry_run: false,
+            idempotency_required: true,
+            auth: Value::Null,
+        }];
+        let route_resources = vec![
+            RouteResource {
+                pattern: "/".to_string(),
+                kind: "page".to_string(),
+                source: "app/routes/index.tsx".to_string(),
+            },
+            RouteResource {
+                pattern: "/api/health".to_string(),
+                kind: "api".to_string(),
+                source: "app/routes/api/health.ts".to_string(),
+            },
+        ];
+
+        let list = handle_post(
+            &registry,
+            RouteCatalog {
+                actions: &route_actions,
+                resources: &route_resources,
+            },
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"list","method":"resources/list"}"#,
+            |_action, _arguments, _context, _payment_headers| {
+                Pin::from(Box::new(async {
+                    anyhow::bail!("test did not configure route action execution")
+                })
+                    as Box<dyn Future<Output = anyhow::Result<String>> + Send>)
+            },
+        )
+        .await;
+
+        assert_eq!(list.status(), StatusCode::OK);
+        let list = response_json(list).await;
+        let resources = list["result"]["resources"].as_array().unwrap();
+        assert!(
+            resources
+                .iter()
+                .any(|resource| resource["uri"] == "beater://routes"
+                    && resource["mimeType"] == "text/markdown"),
+            "{list}"
+        );
+        assert!(
+            resources
+                .iter()
+                .any(|resource| resource["uri"] == "beater://actions"),
+            "{list}"
+        );
+
+        let read = handle_post(
+            &registry,
+            RouteCatalog {
+                actions: &route_actions,
+                resources: &route_resources,
+            },
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"read","method":"resources/read","params":{"uri":"beater://routes"}}"#,
+            |_action, _arguments, _context, _payment_headers| {
+                Pin::from(Box::new(async {
+                    anyhow::bail!("test did not configure route action execution")
+                })
+                    as Box<dyn Future<Output = anyhow::Result<String>> + Send>)
+            },
+        )
+        .await;
+
+        assert_eq!(read.status(), StatusCode::OK);
+        let read = response_json(read).await;
+        let text = read["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(text.contains("# beater.js route table"), "{text}");
+        assert!(
+            text.contains("| / | page | app/routes/index.tsx |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| /api/health | api | app/routes/api/health.ts |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| hello.contact | POST | /api/actions/contact | write | true | true |"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resources_read_rejects_unknown_resource_uri() {
+        let app = TempApp::new("resources-unknown");
+        let registry = ToolRegistry::empty();
+
+        let response = test_handle_post(
+            &registry,
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"beater://missing"}}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown resource"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resources_read_truncates_large_route_indexes() {
+        let app = TempApp::new("resources-large");
+        let registry = ToolRegistry::empty();
+        let route_resources: Vec<RouteResource> = (0..(MAX_RESOURCE_ROWS + 20))
+            .map(|index| RouteResource {
+                pattern: format!("/generated/{index}"),
+                kind: "page".to_string(),
+                source: format!("app/routes/generated/{index}.tsx"),
+            })
+            .collect();
+
+        let response = handle_post(
+            &registry,
+            RouteCatalog {
+                actions: &[],
+                resources: &route_resources,
+            },
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"read","method":"resources/read","params":{"uri":"beater://routes"}}"#,
+            |_action, _arguments, _context, _payment_headers| {
+                Pin::from(Box::new(async {
+                    anyhow::bail!("test did not configure route action execution")
+                })
+                    as Box<dyn Future<Output = anyhow::Result<String>> + Send>)
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["result"]["_meta"]["truncated"], true);
+        assert_eq!(body["result"]["_meta"]["rowsEmitted"], MAX_RESOURCE_ROWS);
+        assert_eq!(body["result"]["_meta"]["rowsTotal"], MAX_RESOURCE_ROWS + 20);
+        let text = body["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Resource truncated after"), "{text}");
+        assert!(text.contains("/generated/0"), "{text}");
+        assert!(
+            !text.contains(&format!("/generated/{}", MAX_RESOURCE_ROWS + 19)),
+            "{text}"
+        );
+        assert!(text.len() <= MAX_RESOURCE_MARKDOWN_BYTES, "{text}");
     }
 
     #[tokio::test]
@@ -960,7 +1378,10 @@ mod tests {
 
         let response = handle_post(
             &registry,
-            &route_actions,
+            RouteCatalog {
+                actions: &route_actions,
+                resources: &[],
+            },
             &AccessConfig::default(),
             app.path(),
             &headers,
