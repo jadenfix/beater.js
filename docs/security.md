@@ -44,6 +44,8 @@ Operational implications:
 - redact secrets before passing them to agents or tools
 - add redaction hooks before production deployments that handle private data
 
+The optional Beater trace exporter reads from the same journal data and posts prompts, tool inputs, model responses, and tool outputs to the configured Beater ingest endpoint. Treat `BEATER_TRACE_EXPORT_URL` as a sensitive deployment decision, set `BEATER_API_KEY` through the environment or secret manager when required, and do not enable export for private data until redaction policy is in place.
+
 ## Remote Integrations
 
 Networked tools have explicit timeouts, retry policy, idempotency keys, secret handling, and egress allowlists. Remote MCP tools read bearer tokens from environment variables, require HTTPS for bearer auth except loopback test servers, fail before connecting when a required secret is missing, and never follow redirects. Transient failures retry only when the tool is idempotent or a configured `tool_use_id` idempotency key is available; ambiguous non-idempotent failures park the run as `needs_review`. SaaS API integrations and browser automation sessions should follow the same registry path so calls are journaled before side effects happen.

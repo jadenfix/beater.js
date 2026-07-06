@@ -252,6 +252,7 @@ Phase C progress so far:
 - Agent LLM calls now use Anthropic SSE, rebuild text and tool-use responses from stream events, and append each stream event as a durable `step_partials` row before the final `llm_call` completion. Tests cover text deltas, tool-use `input_json_delta`, journal partial durability, and agent-loop partial recording.
 - `GET /_beater/agent/runs`, `GET /_beater/agent/runs/<run_id>`, and `GET /_beater/agent/runs/<run_id>/events` now expose protected run history, step summaries, and journaled LLM partials for browser run UIs, reusing the MCP origin/bearer policy and closing streams with a terminal event once the run reaches `completed`, `failed`, or `needs_review`.
 - The hello example now includes a route-scoped recent-runs EventSource panel that lists journaled runs, opens a selected run, and renders `llm_partial` events in the browser; dev smoke tests prove the panel and transpiled client code ship in both the checked-in fixture and scaffolded app.
+- Agent runs can now opt into Beater native trace export with `BEATER_TRACE_EXPORT_URL`: after run/resume, beater.js projects journal runs and steps into `agent.run`, `llm.call`, and `tool.call` spans for `/v1/traces/native`. Unit and runner integration tests cover the projection, auth header, scope fields, and tool metadata; full OTLP/dashboard proof remains.
 
 | # | Item | Done when |
 |---|---|---|
@@ -266,7 +267,7 @@ Phase C progress so far:
 | 9 | **Agentic browsing** — reuse beater-agents' CDP/Playwright crates as a tool provider | an agent completes a real browsing task from a pyTool-style declaration, with browser sessions cleaned up after crashes |
 | 10 | **defineAction** — one definition → HTML form + MCP tool + OpenAPI + crawler metadata (§6b end state) | **done for the first route-action path:** route-bound `defineAction` now powers a human form POST, live MCP `tools/list` + journaled `tools/call`, runtime `/openapi.json`, `/llms.txt`, and well-known action metadata; `beater-connect` static `Action` definitions still emit `forms.html`, OpenAPI, MCP catalog, and crawler metadata with matching semantics |
 | 11 | **Deploy story** — `beater build` → single container (binary + assets + venv) | **partial:** host-platform bundle exists and is locally boot-tested through `run.sh`; `scripts/docker-cold-start-gate.sh` defines the target-OS image proof; done requires the gate to pass with `docker run` serving the app cold in <1s |
-| 12 | **Observability** — OTLP out of the agent loop into beater-agents | a run's trace appears in the beater-agents dashboard |
+| 12 | **Observability** — OTLP out of the agent loop into beater-agents | **partial:** an opt-in native Beater exporter posts finished journal runs and steps to `/v1/traces/native`; done still requires OTLP export and dashboard proof that a run trace appears in beater-agents |
 | 13 | **Free-threaded Python** — pyo3 on 3.14t once ML wheels are reliable | two Python tools execute truly in parallel under load |
 | 14 | **C++ tools** — via cxx on the Rust builtin path | **done for the first builtin:** `rustTool("cpp_double")` exposes a schema and calls a C++ function through `cxx`; broader C++ packaging remains future work |
 

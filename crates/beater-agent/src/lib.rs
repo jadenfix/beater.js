@@ -9,6 +9,7 @@ mod cpp_bridge;
 mod journal;
 mod registry;
 mod runner;
+mod trace_export;
 
 pub use journal::{Journal, RunRow, StepRow};
 pub use registry::{

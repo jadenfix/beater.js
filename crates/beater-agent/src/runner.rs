@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use crate::anthropic::Anthropic;
 use crate::journal::Journal;
 use crate::registry::{AgentConfig, BeatboxConfig, ToolCallContext, ToolNeedsReview, ToolRegistry};
+use crate::trace_export;
 
 const MAX_TOKENS: u64 = 16000;
 const MAX_LOOP_STEPS: usize = 50;
@@ -82,7 +83,9 @@ pub fn run(
         run_id,
     };
     let messages = vec![json!({"role": "user", "content": prompt})];
-    runtime()?.block_on(agent_loop(&ctx, messages, 1))
+    let result = runtime()?.block_on(agent_loop(&ctx, messages, 1));
+    export_run_trace_best_effort(app_dir, &ctx.run_id);
+    result
 }
 
 pub fn resume(
@@ -115,11 +118,19 @@ pub fn resume(
         config,
         run_id: run_id.to_string(),
     };
-    runtime()?.block_on(resume_async(&ctx, run, steps))
+    let result = runtime()?.block_on(resume_async(&ctx, run, steps));
+    export_run_trace_best_effort(app_dir, &ctx.run_id);
+    result
 }
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+fn export_run_trace_best_effort(app_dir: &Path, run_id: &str) {
+    if let Err(error) = trace_export::export_run_if_configured(app_dir, run_id) {
+        tracing::warn!("trace export for run {run_id} failed: {error:#}");
+    }
 }
 
 async fn resume_async(
@@ -497,6 +508,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -585,6 +597,11 @@ def run(input):
             unsafe {
                 std::env::remove_var("ANTHROPIC_API_KEY");
                 std::env::remove_var("ANTHROPIC_BASE_URL");
+                std::env::remove_var("BEATER_TRACE_EXPORT_URL");
+                std::env::remove_var("BEATER_TENANT_ID");
+                std::env::remove_var("BEATER_PROJECT_ID");
+                std::env::remove_var("BEATER_ENVIRONMENT_ID");
+                std::env::remove_var("BEATER_API_KEY");
             }
         }
     }
@@ -598,6 +615,7 @@ def run(input):
     #[derive(Debug)]
     struct CapturedRequest {
         request_line: String,
+        headers: String,
         body: String,
     }
 
@@ -678,6 +696,71 @@ def run(input):
         }
 
         fn join(mut self) -> Vec<String> {
+            if let Some(handle) = self.handle.take() {
+                handle.join().unwrap();
+            }
+            Arc::try_unwrap(self.requests)
+                .unwrap()
+                .into_inner()
+                .unwrap()
+        }
+    }
+
+    struct MockTraceIngest {
+        base_url: String,
+        requests: Arc<Mutex<Vec<CapturedRequest>>>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockTraceIngest {
+        fn new(expected_requests: usize) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let server_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while server_requests.lock().unwrap().len() < expected_requests {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let request = read_http_request(&mut stream);
+                            server_requests.lock().unwrap().push(request);
+                            let response = json!({
+                                "ack": {
+                                    "accepted_raw": 1,
+                                    "accepted_spans": 1,
+                                    "duplicate_raw": 0,
+                                    "duplicate_spans": 0,
+                                },
+                                "downstream_queued": false,
+                            })
+                            .to_string();
+                            let reply = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                response.len(),
+                                response
+                            );
+                            stream.write_all(reply.as_bytes()).unwrap();
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("mock trace ingest accept failed: {error}"),
+                    }
+                }
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+                requests,
+                handle: Some(handle),
+            }
+        }
+
+        fn join(mut self) -> Vec<CapturedRequest> {
             if let Some(handle) = self.handle.take() {
                 handle.join().unwrap();
             }
@@ -816,24 +899,20 @@ def run(input):
             if let Some(end) = headers_end
                 && content_len.is_none()
             {
+                let headers = String::from_utf8_lossy(&bytes[..end]).to_string();
                 return CapturedRequest {
-                    request_line: String::from_utf8_lossy(&bytes[..end])
-                        .lines()
-                        .next()
-                        .unwrap_or_default()
-                        .to_string(),
+                    request_line: headers.lines().next().unwrap_or_default().to_string(),
+                    headers,
                     body: String::new(),
                 };
             }
             if let (Some(end), Some(len)) = (headers_end, content_len) {
                 let body_start = end + 4;
                 if bytes.len() >= body_start + len {
+                    let headers = String::from_utf8_lossy(&bytes[..end]).to_string();
                     return CapturedRequest {
-                        request_line: String::from_utf8_lossy(&bytes[..end])
-                            .lines()
-                            .next()
-                            .unwrap_or_default()
-                            .to_string(),
+                        request_line: headers.lines().next().unwrap_or_default().to_string(),
+                        headers,
                         body: String::from_utf8(bytes[body_start..body_start + len].to_vec())
                             .unwrap(),
                     };
@@ -1267,6 +1346,86 @@ def run(input):
             .expect("browser tool call step");
         assert_eq!(tool_step.status, "completed");
         assert_eq!(tool_step.tool_use_id.as_deref(), Some("toolu_browser"));
+    }
+
+    #[test]
+    fn run_exports_beater_native_trace_when_configured() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let app = TempApp::new("trace-export");
+        let anthropic = MockAnthropic::new(vec![
+            json!({
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_browser",
+                    "name": "browser.checkout",
+                    "input": {
+                        "url": "https://shop.example/cart",
+                        "task": "verify checkout"
+                    },
+                }],
+                "stop_reason": "tool_use",
+            }),
+            json!({
+                "content": [{"type": "text", "text": "checkout verified"}],
+                "stop_reason": "end_turn",
+            }),
+        ]);
+        let trace_ingest = MockTraceIngest::new(4);
+        let _env = EnvGuard::set(&anthropic.base_url);
+        unsafe {
+            std::env::set_var("BEATER_TRACE_EXPORT_URL", &trace_ingest.base_url);
+            std::env::set_var("BEATER_TENANT_ID", "tenant");
+            std::env::set_var("BEATER_PROJECT_ID", "project");
+            std::env::set_var("BEATER_ENVIRONMENT_ID", "prod");
+            std::env::set_var("BEATER_API_KEY", "trace-key");
+        }
+
+        run(
+            app.path(),
+            "support",
+            browser_config(),
+            None,
+            BeatboxConfig::default(),
+            "verify checkout",
+        )
+        .unwrap();
+        let _anthropic_requests = anthropic.join();
+        let trace_requests = trace_ingest.join();
+
+        assert_eq!(trace_requests.len(), 4);
+        assert!(
+            trace_requests
+                .iter()
+                .all(|request| request.request_line == "POST /v1/traces/native HTTP/1.1")
+        );
+        assert!(
+            trace_requests[0]
+                .headers
+                .to_ascii_lowercase()
+                .contains("x-beater-api-key: trace-key")
+        );
+        let spans: Vec<Value> = trace_requests
+            .iter()
+            .map(|request| serde_json::from_str(&request.body).unwrap())
+            .collect();
+        assert!(spans.iter().any(|span| span["kind"] == "agent.run"));
+        assert_eq!(
+            spans
+                .iter()
+                .filter(|span| span["kind"] == "llm.call")
+                .count(),
+            2
+        );
+        let tool = spans
+            .iter()
+            .find(|span| span["kind"] == "tool.call")
+            .expect("tool span");
+        assert_eq!(tool["scope"]["tenant_id"], "tenant");
+        assert_eq!(tool["scope"]["project_id"], "project");
+        assert_eq!(tool["scope"]["environment_id"], "prod");
+        assert_eq!(tool["parent_span_id"], "run");
+        assert_eq!(tool["attributes"]["beater.tool_name"], "browser.checkout");
+        assert_eq!(tool["attributes"]["beater.tool_use_id"], "toolu_browser");
     }
 
     #[test]

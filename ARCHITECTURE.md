@@ -147,7 +147,7 @@ CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <
 - **Isolate pool production hardening / per-request isolation** — `[app].workers = N` starts N route isolates; smoke tests prove round-robin dispatch, and `scripts/isolate-pool-scaling-gate.cjs` proved 7.65x route throughput on ten local workers. Per-request isolation hardening and worker-count tuning remain production work.
 - **LLM streaming to browser** — Anthropic SSE ingestion, partial-step journal records, protected run list/detail/events endpoints under `/_beater/agent/runs`, and the hello example's recent-run EventSource panel are in place; richer production run-management UI remains.
 - **MCP discovery/SSE + the 2026-07-28 spec** — remote MCP `tools/call`, provider session initialization, and startup `tools/list` schema import via `remoteMcpProvider` are in place; adopt the next transport spec when released.
-- **Observability/evals** — integrate beater-agents (OTLP out of the agent loop) rather than rebuilding.
+- **Observability/evals** — an opt-in native Beater trace exporter posts finished journal runs and steps to `/v1/traces/native`; full OTLP export and dashboard proof remain future work.
 
 ## 9. Milestones
 

@@ -45,6 +45,8 @@ export ANTHROPIC_API_KEY=sk-ant-...                     # required for live agen
 BEATER_HOST=127.0.0.1 BEATER_PORT=3000 /tmp/my-app-bundle/run.sh
 ```
 
+Set `BEATER_TRACE_EXPORT_URL` to export finished agent runs to Beater's native `/v1/traces/native` ingest endpoint. See [Observability](docs/observability.md) for the full environment contract.
+
 When exposing `/mcp` beyond localhost, require a bearer token and add browser origins explicitly:
 
 ```sh
@@ -88,6 +90,7 @@ More docs:
 
 - [Tool contract](docs/tools.md)
 - [Integration registry](docs/integrations.md)
+- [Observability](docs/observability.md)
 - [Runtime limits](docs/runtime-limits.md)
 - [Security and trust model](docs/security.md)
 - [Changelog and versioning policy](CHANGELOG.md)
