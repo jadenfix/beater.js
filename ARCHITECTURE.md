@@ -139,7 +139,7 @@ CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <
 
 ## 8. Not yet (each with its future path)
 
-- **Full npm ecosystem / node-compat** — server routes can import local ESM packages from `node_modules` with bare specifiers, exact and wildcard `exports`, array export targets, server-side conditions, `module`/`main` fallbacks, app-local `import_map.json` aliases, and leaf `.cjs` modules as default exports of `module.exports`; CommonJS `require` fails closed, while Node built-ins, package install/build hooks, and client-side dependency bundling remain.
+- **Full npm ecosystem / node-compat** — server routes can import local ESM packages from `node_modules` with bare specifiers, exact and wildcard `exports`, array export targets, server-side conditions, `module`/`main` fallbacks, app-local `import_map.json` aliases, and leaf `.cjs` modules as default exports of `module.exports`; route-scoped client modules can bundle browser-safe static ESM graphs through same-origin dependency URLs. CommonJS `require` fails closed, while Node built-ins, package install/build hooks, CommonJS browser shims, and broader production bundling remain.
 - **WHATWG fetch classes in routes** — comes with broader npm-compat.
 - **Full RSC** — the chunked isolate→host streaming plumbing, route-scoped client modules, and initial `text/x-component` flight transport are the substrate; add official React Flight client references/manifests after broader npm-compat.
 - **Wasmtime sandbox expansion** — local `wasmtime` tools now run hermetic scalar wasm with empty imports; broader WASI/capability handles for files, sockets, and richer value passing remain future work.

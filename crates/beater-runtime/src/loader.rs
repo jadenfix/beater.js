@@ -2,15 +2,17 @@
 //! TS/TSX/JSX via deno_ast (SWC) with inline source maps so stack traces
 //! point at the original source.
 
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+use deno_ast::swc::ast::{Callee, Expr, ModuleDecl, ModuleItem};
+use deno_ast::swc::ecma_visit::{Visit, VisitWith, noop_visit_type};
 use deno_ast::{
     EmitOptions, JsxAutomaticOptions, JsxRuntime, MediaType, ParseParams, SourceMapOption,
-    TranspileOptions,
+    SourceRange, TranspileOptions,
 };
 use deno_core::error::ModuleLoaderError;
 use deno_core::{
@@ -36,6 +38,8 @@ struct TranspileCacheEntry {
 }
 
 static TRANSPILE_CACHE: OnceLock<Mutex<HashMap<PathBuf, TranspileCacheEntry>>> = OnceLock::new();
+const MAX_CLIENT_BUNDLE_MODULES: usize = 128;
+const MAX_CLIENT_BUNDLE_SOURCE_BYTES: u64 = 1024 * 1024;
 
 fn transpile_cache() -> &'static Mutex<HashMap<PathBuf, TranspileCacheEntry>> {
     TRANSPILE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -600,7 +604,8 @@ fn load_sync(specifier: &ModuleSpecifier) -> Result<ModuleSource, ModuleLoaderEr
     ))
 }
 
-pub fn transpile_client_module(path: &Path) -> anyhow::Result<String> {
+#[cfg(test)]
+fn transpile_client_module(path: &Path) -> anyhow::Result<String> {
     let specifier = ModuleSpecifier::from_file_path(path)
         .map_err(|_| anyhow::anyhow!("not a loadable client module: {}", path.display()))?;
     let media_type = MediaType::from_specifier(&specifier);
@@ -620,6 +625,582 @@ pub fn transpile_client_module(path: &Path) -> anyhow::Result<String> {
             path.display()
         )),
     }
+}
+
+pub fn bundle_client_module(
+    app_dir: &Path,
+    entry_path: &Path,
+    public_path: &str,
+    dep: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let app_root = app_dir.canonicalize()?;
+    let mut bundler = ClientBundler {
+        app_root,
+        public_path: public_path.to_string(),
+        module_ids: HashMap::new(),
+        modules: Vec::new(),
+        in_progress: HashSet::new(),
+        source_bytes: 0,
+    };
+    bundler.module_id(entry_path)?;
+    let id = match dep {
+        Some(dep) => match dep.parse::<usize>() {
+            Ok(id) => id,
+            Err(_) => return Ok(None),
+        },
+        None => 0,
+    };
+    Ok(bundler.modules.get(id).and_then(|module| module.clone()))
+}
+
+struct ClientBundler {
+    app_root: PathBuf,
+    public_path: String,
+    module_ids: HashMap<PathBuf, usize>,
+    modules: Vec<Option<String>>,
+    in_progress: HashSet<PathBuf>,
+    source_bytes: u64,
+}
+
+impl ClientBundler {
+    fn module_id(&mut self, path: &Path) -> anyhow::Result<usize> {
+        let path = path.canonicalize()?;
+        ensure_client_app_boundary(&self.app_root, &path)?;
+        ensure_client_media_type(&path)?;
+        if let Some(id) = self.module_ids.get(&path).copied() {
+            return Ok(id);
+        }
+        if self.modules.len() >= MAX_CLIENT_BUNDLE_MODULES {
+            anyhow::bail!("client module graph exceeds {MAX_CLIENT_BUNDLE_MODULES} modules");
+        }
+        let id = self.modules.len();
+        self.module_ids.insert(path.clone(), id);
+        self.modules.push(None);
+        self.in_progress.insert(path.clone());
+        let result = self.module_code_uncached(&path);
+        self.in_progress.remove(&path);
+        let code = result?;
+        self.modules[id] = Some(code);
+        Ok(id)
+    }
+
+    fn module_code_uncached(&mut self, path: &Path) -> anyhow::Result<String> {
+        let metadata = std::fs::metadata(path)?;
+        self.source_bytes = self
+            .source_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| anyhow::anyhow!("client module graph source size overflow"))?;
+        if self.source_bytes > MAX_CLIENT_BUNDLE_SOURCE_BYTES {
+            anyhow::bail!(
+                "client module graph exceeds {MAX_CLIENT_BUNDLE_SOURCE_BYTES} source bytes"
+            );
+        }
+        let source = std::fs::read_to_string(path)?;
+        let specifier = ModuleSpecifier::from_file_path(path)
+            .map_err(|_| anyhow::anyhow!("not a loadable client module: {}", path.display()))?;
+        let media_type = MediaType::from_specifier(&specifier);
+        let emitted = match media_type {
+            MediaType::JavaScript | MediaType::Mjs => source,
+            MediaType::TypeScript
+            | MediaType::Mts
+            | MediaType::Cts
+            | MediaType::Jsx
+            | MediaType::Tsx => transpile(&specifier, source, media_type)?,
+            other => {
+                return Err(anyhow::anyhow!(
+                    "unsupported client module type {other:?} for {}",
+                    path.display()
+                ));
+            }
+        };
+        let parsed = deno_ast::parse_module(ParseParams {
+            specifier: specifier.clone(),
+            text: emitted.clone().into(),
+            media_type: MediaType::JavaScript,
+            capture_tokens: false,
+            scope_analysis: false,
+            maybe_syntax: None,
+        })?;
+        reject_forbidden_client_calls(&parsed, path)?;
+
+        let mut rewrites = Vec::new();
+        for import in static_client_imports(&parsed)? {
+            let resolved = resolve_client_import(&self.app_root, &specifier, &import.specifier)?;
+            let dep_id = self.module_id(&resolved)?;
+            rewrites.push((
+                import.literal_range,
+                format!("{}?dep={dep_id}", self.public_path),
+            ));
+        }
+        Ok(rewrite_import_specifiers(&emitted, rewrites))
+    }
+}
+
+struct ClientImport {
+    specifier: String,
+    literal_range: std::ops::Range<usize>,
+}
+
+fn static_client_imports(parsed: &deno_ast::ParsedSource) -> anyhow::Result<Vec<ClientImport>> {
+    let mut imports = Vec::new();
+    let source_start = parsed.text_info_lazy().range().start;
+    let deno_ast::ProgramRef::Module(module) = parsed.program_ref() else {
+        return Ok(imports);
+    };
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(decl) = item else {
+            continue;
+        };
+        match decl {
+            ModuleDecl::Import(import) => {
+                if !import.type_only {
+                    imports.push(ClientImport {
+                        specifier: import.src.value.to_string_lossy().into_owned(),
+                        literal_range: SourceRange::unsafely_from_span(import.src.span)
+                            .as_byte_range(source_start),
+                    });
+                }
+            }
+            ModuleDecl::ExportNamed(export) => {
+                if !export.type_only
+                    && let Some(src) = &export.src
+                {
+                    imports.push(ClientImport {
+                        specifier: src.value.to_string_lossy().into_owned(),
+                        literal_range: SourceRange::unsafely_from_span(src.span)
+                            .as_byte_range(source_start),
+                    });
+                }
+            }
+            ModuleDecl::ExportAll(export) => imports.push(ClientImport {
+                specifier: export.src.value.to_string_lossy().into_owned(),
+                literal_range: SourceRange::unsafely_from_span(export.src.span)
+                    .as_byte_range(source_start),
+            }),
+            ModuleDecl::TsImportEquals(_)
+            | ModuleDecl::TsExportAssignment(_)
+            | ModuleDecl::TsNamespaceExport(_) => {
+                anyhow::bail!(
+                    "TypeScript CommonJS-style imports are not supported in client modules"
+                )
+            }
+            _ => {}
+        }
+    }
+    Ok(imports)
+}
+
+#[derive(Default)]
+struct ForbiddenClientCalls {
+    dynamic_import: bool,
+    require_call: bool,
+}
+
+impl Visit for ForbiddenClientCalls {
+    noop_visit_type!();
+
+    fn visit_call_expr(&mut self, call_expr: &deno_ast::swc::ast::CallExpr) {
+        match &call_expr.callee {
+            Callee::Import(_) => self.dynamic_import = true,
+            Callee::Expr(expr) => {
+                if let Expr::Ident(ident) = expr.as_ref()
+                    && ident.sym.as_ref() == "require"
+                {
+                    self.require_call = true;
+                }
+            }
+            _ => {}
+        }
+        call_expr.visit_children_with(self);
+    }
+}
+
+fn reject_forbidden_client_calls(
+    parsed: &deno_ast::ParsedSource,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let mut visitor = ForbiddenClientCalls::default();
+    parsed.program_ref().visit_with(&mut visitor);
+    if visitor.dynamic_import {
+        anyhow::bail!(
+            "dynamic import() is not supported in client modules: {}",
+            path.display()
+        );
+    }
+    if visitor.require_call {
+        anyhow::bail!(
+            "CommonJS require() is not supported in client modules: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn resolve_client_import(
+    app_root: &Path,
+    referrer: &ModuleSpecifier,
+    specifier: &str,
+) -> anyhow::Result<PathBuf> {
+    if specifier.starts_with("node:") || is_node_builtin(specifier) {
+        anyhow::bail!("Node built-in imports are not supported in client modules: {specifier}");
+    }
+    if ModuleSpecifier::parse(specifier).is_ok() {
+        anyhow::bail!("URL imports are not supported in client modules: {specifier}");
+    }
+    if specifier.starts_with('/') {
+        anyhow::bail!("absolute client imports are not supported: {specifier}");
+    }
+
+    if specifier.starts_with("./") || specifier.starts_with("../") {
+        let referrer_path = referrer
+            .to_file_path()
+            .map_err(|_| anyhow::anyhow!("bad file referrer for client import: {referrer}"))?;
+        let base = referrer_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("client import referrer has no parent: {referrer}"))?;
+        let resolved = resolve_browser_file_or_dir(base.join(specifier))?;
+        ensure_client_app_boundary(app_root, &resolved)?;
+        if let Some(package_root) = package_root_for_module(app_root, &referrer_path)? {
+            ensure_package_boundary(&package_root, &resolved, specifier)?;
+        }
+        ensure_client_media_type(&resolved)?;
+        return Ok(resolved);
+    }
+
+    if let Some(resolved) = resolve_import_map(specifier, referrer.as_str())? {
+        let referrer_path = referrer
+            .to_file_path()
+            .map_err(|_| anyhow::anyhow!("bad file referrer for client import: {referrer}"))?;
+        let resolved = resolved
+            .to_file_path()
+            .map_err(|_| anyhow::anyhow!("bad import-map client path for {specifier}"))?;
+        ensure_client_app_boundary(app_root, &resolved)?;
+        if let Some(package_root) = package_root_for_module(app_root, &referrer_path)? {
+            ensure_package_boundary(&package_root, &resolved, specifier)?;
+        }
+        ensure_client_media_type(&resolved)?;
+        return Ok(resolved);
+    }
+
+    if let Some(resolved) = resolve_browser_package_import(specifier, referrer.as_str())? {
+        let resolved = resolved
+            .to_file_path()
+            .map_err(|_| anyhow::anyhow!("bad package client path for {specifier}"))?;
+        ensure_client_app_boundary(app_root, &resolved)?;
+        ensure_client_media_type(&resolved)?;
+        return Ok(resolved);
+    }
+
+    anyhow::bail!("client import {specifier:?} could not be resolved")
+}
+
+fn resolve_browser_package_import(
+    specifier: &str,
+    referrer: &str,
+) -> anyhow::Result<Option<ModuleSpecifier>> {
+    let Some(import) = parse_package_import(specifier) else {
+        return Ok(None);
+    };
+    let referrer = ModuleSpecifier::parse(referrer)?;
+    if referrer.scheme() != "file" {
+        anyhow::bail!("cannot resolve package import {specifier:?} from {referrer}");
+    }
+    let referrer_path = referrer
+        .to_file_path()
+        .map_err(|_| anyhow::anyhow!("bad file referrer for package import: {referrer}"))?;
+    let start = referrer_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("package import referrer has no parent: {referrer}"))?;
+
+    for dir in start.ancestors() {
+        let package_dir = dir.join("node_modules").join(import.package);
+        if package_dir.is_dir() {
+            let resolved = resolve_browser_package_dir(&package_dir, import.subpath)?;
+            return ModuleSpecifier::from_file_path(&resolved)
+                .map(Some)
+                .map_err(|_| anyhow::anyhow!("bad package path {}", resolved.display()));
+        }
+    }
+
+    anyhow::bail!(
+        "package import {specifier:?} was not found in node_modules from {}",
+        start.display()
+    )
+}
+
+fn resolve_browser_package_dir(
+    package_dir: &Path,
+    subpath: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let package_json = read_package_json(package_dir)?;
+    let export_key = subpath.map_or(".".to_string(), |subpath| format!("./{subpath}"));
+    if let Some(subpath) = subpath {
+        validate_package_relative(package_dir, subpath)?;
+    }
+
+    if let Some(exports) = package_json.get("exports") {
+        if let Some(target) = resolve_browser_package_export(package_dir, exports, &export_key)? {
+            return Ok(target);
+        }
+        anyhow::bail!(
+            "package {} does not export browser-safe {export_key}",
+            package_dir.display()
+        );
+    }
+
+    if let Some(subpath) = subpath {
+        return resolve_browser_package_relative(package_dir, subpath);
+    }
+    if let Some(browser) = package_json.get("browser").and_then(Value::as_str) {
+        return resolve_browser_package_relative(package_dir, browser);
+    }
+    if let Some(module) = package_json.get("module").and_then(Value::as_str) {
+        return resolve_browser_package_relative(package_dir, module);
+    }
+    if let Some(main) = package_json.get("main").and_then(Value::as_str) {
+        return resolve_browser_package_relative(package_dir, main);
+    }
+    resolve_browser_file_or_dir(package_dir.join("index"))
+}
+
+fn resolve_browser_package_export(
+    package_dir: &Path,
+    exports: &Value,
+    export_key: &str,
+) -> anyhow::Result<Option<PathBuf>> {
+    match exports {
+        Value::String(_) if export_key == "." => {
+            resolve_browser_export_target(package_dir, exports)
+        }
+        Value::Object(map) => {
+            if let Some(value) = map.get(export_key) {
+                return resolve_browser_export_target(package_dir, value);
+            }
+            let mut best_pattern: Option<(&String, &Value, String)> = None;
+            for (key, value) in map {
+                let Some(pattern_match) = export_pattern_match(key, export_key) else {
+                    continue;
+                };
+                let is_better = match &best_pattern {
+                    Some((best_key, _, _)) => {
+                        export_pattern_specificity(key) > export_pattern_specificity(best_key)
+                    }
+                    None => true,
+                };
+                if is_better {
+                    best_pattern = Some((key, value, pattern_match));
+                }
+            }
+            if let Some((_, value, pattern_match)) = best_pattern {
+                return resolve_browser_export_target_with_match(
+                    package_dir,
+                    value,
+                    Some(&pattern_match),
+                );
+            }
+            if export_key == "."
+                && map.keys().all(|key| !key.starts_with('.'))
+                && let Some(target) = resolve_browser_export_target(package_dir, exports)?
+            {
+                return Ok(Some(target));
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn resolve_browser_export_target(
+    package_dir: &Path,
+    value: &Value,
+) -> anyhow::Result<Option<PathBuf>> {
+    resolve_browser_export_target_with_match(package_dir, value, None)
+}
+
+fn resolve_browser_export_target_with_match(
+    package_dir: &Path,
+    value: &Value,
+    pattern_match: Option<&str>,
+) -> anyhow::Result<Option<PathBuf>> {
+    match value {
+        Value::String(target) => {
+            let target =
+                pattern_match.map_or_else(|| target.to_string(), |m| target.replace('*', m));
+            resolve_browser_package_relative(package_dir, &target).map(Some)
+        }
+        Value::Object(map) => {
+            for (condition, target) in map {
+                if is_active_browser_export_condition(condition)
+                    && let Some(resolved) = resolve_browser_export_target_with_match(
+                        package_dir,
+                        target,
+                        pattern_match,
+                    )?
+                {
+                    return Ok(Some(resolved));
+                }
+            }
+            Ok(None)
+        }
+        Value::Array(targets) => {
+            for target in targets {
+                if let Some(resolved) =
+                    resolve_browser_export_target_with_match(package_dir, target, pattern_match)?
+                {
+                    return Ok(Some(resolved));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn is_active_browser_export_condition(condition: &str) -> bool {
+    matches!(condition, "browser" | "import" | "module" | "default")
+}
+
+fn resolve_browser_package_relative(package_dir: &Path, raw: &str) -> anyhow::Result<PathBuf> {
+    validate_package_relative(package_dir, raw)?;
+    let relative = raw.strip_prefix("./").unwrap_or(raw);
+    let resolved = resolve_browser_file_or_dir(package_dir.join(relative))?;
+    ensure_package_boundary(package_dir, &resolved, raw)?;
+    Ok(resolved)
+}
+
+fn resolve_browser_file_or_dir(path: PathBuf) -> anyhow::Result<PathBuf> {
+    if path.is_file() {
+        ensure_client_media_type(&path)?;
+        return Ok(path);
+    }
+    if path.extension().is_none() {
+        for ext in ["js", "mjs", "ts", "tsx", "jsx"] {
+            let candidate = path.with_extension(ext);
+            if candidate.is_file() {
+                ensure_client_media_type(&candidate)?;
+                return Ok(candidate);
+            }
+        }
+    }
+    if path.is_dir() {
+        let package_json = read_package_json(&path)?;
+        if let Some(browser) = package_json.get("browser").and_then(Value::as_str) {
+            return resolve_browser_package_relative(&path, browser);
+        }
+        if let Some(module) = package_json.get("module").and_then(Value::as_str) {
+            return resolve_browser_package_relative(&path, module);
+        }
+        for ext in ["js", "mjs", "ts", "tsx", "jsx"] {
+            let candidate = path.join(format!("index.{ext}"));
+            if candidate.is_file() {
+                ensure_client_media_type(&candidate)?;
+                return Ok(candidate);
+            }
+        }
+    }
+    anyhow::bail!("could not resolve browser client file {}", path.display())
+}
+
+fn ensure_client_media_type(path: &Path) -> anyhow::Result<()> {
+    let specifier = ModuleSpecifier::from_file_path(path)
+        .map_err(|_| anyhow::anyhow!("not a loadable client module: {}", path.display()))?;
+    match MediaType::from_specifier(&specifier) {
+        MediaType::JavaScript
+        | MediaType::Mjs
+        | MediaType::TypeScript
+        | MediaType::Mts
+        | MediaType::Cts
+        | MediaType::Jsx
+        | MediaType::Tsx => Ok(()),
+        MediaType::Cjs => Err(anyhow::anyhow!(
+            "CommonJS client modules are not supported: {}",
+            path.display()
+        )),
+        other => Err(anyhow::anyhow!(
+            "unsupported client module type {other:?} for {}",
+            path.display()
+        )),
+    }
+}
+
+fn ensure_client_app_boundary(app_root: &Path, path: &Path) -> anyhow::Result<()> {
+    let resolved = path.canonicalize()?;
+    if !resolved.starts_with(app_root) {
+        anyhow::bail!(
+            "client module {} points outside app root {}",
+            resolved.display(),
+            app_root.display()
+        );
+    }
+    Ok(())
+}
+
+fn package_root_for_module(app_root: &Path, path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let path = path.canonicalize()?;
+    let node_modules = app_root.join("node_modules");
+    let Ok(relative) = path.strip_prefix(&node_modules) else {
+        return Ok(None);
+    };
+    let mut components = relative.components();
+    let Some(first) = components.next() else {
+        return Ok(None);
+    };
+    let mut package_root = node_modules.join(first.as_os_str());
+    if first.as_os_str().to_string_lossy().starts_with('@') {
+        let Some(scope_package) = components.next() else {
+            return Ok(None);
+        };
+        package_root.push(scope_package.as_os_str());
+    }
+    Ok(Some(package_root.canonicalize()?))
+}
+
+fn rewrite_import_specifiers(
+    source: &str,
+    mut rewrites: Vec<(std::ops::Range<usize>, String)>,
+) -> String {
+    rewrites.sort_by_key(|(range, _)| range.start);
+    let mut rewritten = source.to_string();
+    for (range, replacement) in rewrites.into_iter().rev() {
+        let replacement = serde_json::to_string(&replacement).expect("string literal");
+        rewritten.replace_range(range, &replacement);
+    }
+    rewritten
+}
+
+fn is_node_builtin(specifier: &str) -> bool {
+    let specifier = specifier
+        .split_once('/')
+        .map_or(specifier, |(name, _)| name);
+    matches!(
+        specifier,
+        "assert"
+            | "buffer"
+            | "child_process"
+            | "cluster"
+            | "crypto"
+            | "dns"
+            | "events"
+            | "fs"
+            | "http"
+            | "https"
+            | "module"
+            | "net"
+            | "os"
+            | "path"
+            | "process"
+            | "querystring"
+            | "readline"
+            | "stream"
+            | "timers"
+            | "tls"
+            | "tty"
+            | "url"
+            | "util"
+            | "vm"
+            | "worker_threads"
+            | "zlib"
+    )
 }
 
 fn read_source(path: &Path) -> Result<String, ModuleLoaderError> {
@@ -733,8 +1314,8 @@ fn transpile(
 #[cfg(test)]
 mod tests {
     use super::{
-        load_sync, parse_package_import, resolve_import_map, resolve_package_import,
-        transpile_cache,
+        bundle_client_module, load_sync, parse_package_import, resolve_import_map,
+        resolve_package_import, transpile_cache,
     };
     use deno_core::{ModuleSource, ModuleSourceCode, ModuleSpecifier};
     use std::fs;
@@ -859,6 +1440,359 @@ mod tests {
                 .to_string()
                 .contains("CommonJS client modules are not supported")
         );
+    }
+
+    #[test]
+    fn bundle_client_module_rewrites_relative_imports_to_same_origin_deps() {
+        let app = TempDir::new("client-bundle-relative");
+        app.write(
+            "app/routes/index.client.ts",
+            "import { label } from './client-helper';\nconst literal = './client-helper';\ndocument.body.dataset.label = `${label}:${literal}`;\n",
+        );
+        app.write(
+            "app/routes/client-helper.ts",
+            "export const label: string = 'relative-helper';\n",
+        );
+
+        let entry = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(entry.contains("/_beater/client/index.js?dep=1"), "{entry}");
+        assert!(!entry.contains("from './client-helper'"), "{entry}");
+        assert!(!entry.contains("from \"./client-helper\""), "{entry}");
+        assert!(
+            entry.contains("const literal = './client-helper'"),
+            "{entry}"
+        );
+        assert!(entry.contains("document.body.dataset.label"), "{entry}");
+
+        let dep = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            Some("1"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(dep.contains("relative-helper"), "{dep}");
+        assert!(!dep.contains(": string"), "{dep}");
+
+        let missing = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            Some("99"),
+        )
+        .unwrap();
+        assert!(missing.is_none());
+        let invalid = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            Some("../1"),
+        )
+        .unwrap();
+        assert!(invalid.is_none());
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn bundle_client_module_resolves_import_map_aliases() {
+        let app = TempDir::new("client-bundle-import-map");
+        app.write("beater.toml", "name = \"client-bundle-import-map\"\n");
+        app.write(
+            "import_map.json",
+            r##"{"imports":{"#exact":"./app/client/exact.ts","#prefix/":"./app/client/prefix/"}}"##,
+        );
+        app.write(
+            "app/routes/index.client.ts",
+            "import { exact } from '#exact';\nimport { prefixed } from '#prefix/prefixed';\ndocument.body.dataset.alias = `${exact}:${prefixed}`;\n",
+        );
+        app.write(
+            "app/client/exact.ts",
+            "export const exact = 'exact-alias';\n",
+        );
+        app.write(
+            "app/client/prefix/prefixed.ts",
+            "export const prefixed = 'prefix-alias';\n",
+        );
+
+        let entry = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(entry.contains("?dep=1"), "{entry}");
+        assert!(entry.contains("?dep=2"), "{entry}");
+        assert!(!entry.contains("#exact"), "{entry}");
+        assert!(!entry.contains("#prefix"), "{entry}");
+        let first = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            Some("1"),
+        )
+        .unwrap()
+        .unwrap();
+        let second = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            Some("2"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(first.contains("exact-alias"), "{first}");
+        assert!(second.contains("prefix-alias"), "{second}");
+    }
+
+    #[test]
+    fn bundle_client_module_prefers_browser_package_exports() {
+        let app = TempDir::new("client-bundle-package-browser");
+        app.write(
+            "app/routes/index.client.ts",
+            "import { label } from 'tiny-browser';\ndocument.body.dataset.package = label;\n",
+        );
+        app.write(
+            "node_modules/tiny-browser/package.json",
+            r#"{"name":"tiny-browser","exports":{".":{"node":"./node.js","browser":"./browser.js","default":"./default.js"}}}"#,
+        );
+        app.write(
+            "node_modules/tiny-browser/node.js",
+            "export const label = 'node-only';\n",
+        );
+        app.write(
+            "node_modules/tiny-browser/browser.js",
+            "export const label = 'browser-only';\n",
+        );
+        app.write(
+            "node_modules/tiny-browser/default.js",
+            "export const label = 'default-only';\n",
+        );
+
+        let dep = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            Some("1"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(dep.contains("browser-only"), "{dep}");
+        assert!(!dep.contains("node-only"), "{dep}");
+    }
+
+    #[test]
+    fn bundle_client_module_rejects_package_relative_escape_to_app_file() {
+        let app = TempDir::new("client-bundle-package-relative-escape");
+        app.write(
+            "app/routes/index.client.ts",
+            "import { leak } from 'leaky-pkg';\ndocument.body.dataset.leak = leak;\n",
+        );
+        app.write(
+            "node_modules/leaky-pkg/package.json",
+            r#"{"name":"leaky-pkg","exports":{".":"./index.js"}}"#,
+        );
+        app.write(
+            "node_modules/leaky-pkg/index.js",
+            "export { leak } from '../../app/routes/api/secret';\n",
+        );
+        app.write(
+            "app/routes/api/secret.ts",
+            "export const leak = 'secret';\n",
+        );
+
+        let error = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("outside its package"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn bundle_client_module_rejects_package_import_map_escape_to_app_file() {
+        let app = TempDir::new("client-bundle-package-import-map-escape");
+        app.write(
+            "beater.toml",
+            "name = \"client-bundle-import-map-escape\"\n",
+        );
+        app.write(
+            "import_map.json",
+            r##"{"imports":{"#secret":"./app/client/secret.ts"}}"##,
+        );
+        app.write(
+            "app/routes/index.client.ts",
+            "import { leak } from 'leaky-pkg';\ndocument.body.dataset.leak = leak;\n",
+        );
+        app.write(
+            "node_modules/leaky-pkg/package.json",
+            r#"{"name":"leaky-pkg","exports":{".":"./index.js"}}"#,
+        );
+        app.write(
+            "node_modules/leaky-pkg/index.js",
+            "export { leak } from '#secret';\n",
+        );
+        app.write("app/client/secret.ts", "export const leak = 'secret';\n");
+
+        let error = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("outside its package"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn bundle_client_module_rejects_cjs_dependency() {
+        let app = TempDir::new("client-bundle-cjs");
+        app.write(
+            "app/routes/index.client.ts",
+            "import legacy from 'legacy-cjs';\ndocument.body.dataset.legacy = legacy.label;\n",
+        );
+        app.write(
+            "node_modules/legacy-cjs/package.json",
+            r#"{"name":"legacy-cjs","main":"index.cjs"}"#,
+        );
+        app.write(
+            "node_modules/legacy-cjs/index.cjs",
+            "module.exports = {label: 'legacy'};\n",
+        );
+
+        let error = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("CommonJS client modules are not supported"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn bundle_client_module_rejects_node_and_url_imports() {
+        let app = TempDir::new("client-bundle-node-url");
+        app.write(
+            "app/routes/node.client.ts",
+            "import { readFile } from 'node:fs';\nconsole.log(readFile);\n",
+        );
+        app.write(
+            "app/routes/builtin.client.ts",
+            "import fs from 'fs';\nconsole.log(fs);\n",
+        );
+        app.write(
+            "app/routes/builtin-subpath.client.ts",
+            "import promises from 'fs/promises';\nconsole.log(promises);\n",
+        );
+        app.write(
+            "app/routes/url.client.ts",
+            "import 'https://cdn.example.test/module.js';\n",
+        );
+
+        for (file, expected) in [
+            ("node.client.ts", "Node built-in imports are not supported"),
+            (
+                "builtin.client.ts",
+                "Node built-in imports are not supported",
+            ),
+            (
+                "builtin-subpath.client.ts",
+                "Node built-in imports are not supported",
+            ),
+            ("url.client.ts", "URL imports are not supported"),
+        ] {
+            let error = bundle_client_module(
+                app.path(),
+                &app.path().join("app/routes").join(file),
+                "/_beater/client/index.js",
+                None,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn bundle_client_module_rejects_dynamic_import_and_require() {
+        let app = TempDir::new("client-bundle-dynamic-require");
+        app.write(
+            "app/routes/dynamic.client.ts",
+            "const mod = await import('./helper');\nconsole.log(mod);\n",
+        );
+        app.write(
+            "app/routes/require.client.ts",
+            "const mod = require('./helper');\nconsole.log(mod);\n",
+        );
+        app.write("app/routes/helper.ts", "export const value = 1;\n");
+
+        for (file, expected) in [
+            ("dynamic.client.ts", "dynamic import() is not supported"),
+            ("require.client.ts", "CommonJS require() is not supported"),
+        ] {
+            let error = bundle_client_module(
+                app.path(),
+                &app.path().join("app/routes").join(file),
+                "/_beater/client/index.js",
+                None,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_client_module_rejects_relative_symlink_escape() {
+        let app = TempDir::new("client-bundle-relative-symlink");
+        let outside = std::env::temp_dir().join(format!(
+            "beater-loader-outside-{}-{}.ts",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::write(&outside, "export const secret = 'outside';\n").unwrap();
+        app.write(
+            "app/routes/index.client.ts",
+            "import { secret } from './outside';\ndocument.body.dataset.secret = secret;\n",
+        );
+        std::os::unix::fs::symlink(&outside, app.path().join("app/routes/outside.ts")).unwrap();
+
+        let error = bundle_client_module(
+            app.path(),
+            &app.path().join("app/routes/index.client.ts"),
+            "/_beater/client/index.js",
+            None,
+        )
+        .unwrap_err();
+
+        let _ = fs::remove_file(outside);
+        assert!(error.to_string().contains("outside app root"), "{error:#}");
     }
 
     #[test]

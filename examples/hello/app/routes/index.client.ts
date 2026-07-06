@@ -1,3 +1,5 @@
+import { clientBundleMarker, clientCounterLabel } from "../client/counter";
+
 const root = document.querySelector<HTMLElement>("[data-beater-counter]");
 const rscRoot = document.querySelector<HTMLElement>("[data-beater-rsc-root]");
 const runEventsRoot = document.querySelector<HTMLElement>("[data-beater-run-events]");
@@ -9,13 +11,14 @@ if (root) {
 
   const render = () => {
     root.dataset.state = "hydrated";
+    root.dataset.bundle = clientBundleMarker;
     root.dataset.count = String(count);
     if (button) {
       button.textContent = String(count);
       button.setAttribute("aria-label", `Client counter value ${count}`);
     }
     if (label) {
-      label.textContent = `hydrated · ${count}`;
+      label.textContent = clientCounterLabel(count);
     }
   };
 

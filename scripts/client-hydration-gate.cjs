@@ -50,8 +50,18 @@ const app = process.env.BEATER_APP ?? path.join(root, "examples/hello");
       const hydrated = await page
         .locator("[data-beater-counter]")
         .evaluate((node) => node.getAttribute("data-state"));
-      if (value !== "1" || hydrated !== "hydrated" || !label?.startsWith("hydrated")) {
-        throw new Error(`counter did not hydrate: value=${value} state=${hydrated} label=${label}`);
+      const bundled = await page
+        .locator("[data-beater-counter]")
+        .evaluate((node) => node.getAttribute("data-bundle"));
+      if (
+        value !== "1" ||
+        hydrated !== "hydrated" ||
+        bundled !== "client-helper-bundled" ||
+        !label?.startsWith("hydrated via bundle")
+      ) {
+        throw new Error(
+          `counter did not hydrate from bundle: value=${value} state=${hydrated} bundle=${bundled} label=${label}`,
+        );
       }
       console.log(`client hydration passed: ${base} counter incremented to ${value}`);
     } finally {

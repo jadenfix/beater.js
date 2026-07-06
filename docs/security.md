@@ -27,6 +27,10 @@ export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # only needed for br
 
 Do not put MCP bearer tokens in `beater.toml`. Keep them in the process environment or the deployment secret manager. Set `--base-url`, `BEATER_BASE_URL`, or `[app] base_url` so generated manifests advertise the externally reachable URL instead of a bind address such as `0.0.0.0`. The dev smoke tests cover the remote-management path: missing tokens fail with 401, valid bearer tokens succeed, trusted browser-origin preflight and POST requests receive CORS headers, untrusted browser origins fail with 403, and the manifest uses the configured public URL.
 
+## Browser Client Modules
+
+Route-scoped client modules are public browser code. `/_beater/client/<route>.js` only serves the route companion entry and dependency IDs reachable from that entry's static import graph; query parameters are not decoded as filesystem paths. The graph resolver enforces app-root containment after symlink resolution, package-root containment for `node_modules`, and explicit graph size caps. Browser client graphs reject `.cjs`, `require()`, `node:` and bare Node built-ins, URL imports, dynamic `import()`, and unsupported module types instead of trying to emulate Node in the browser.
+
 ## Python Tools
 
 Python tools are first-party code and run with the same OS privileges as the beater process. They can read files, open sockets, import packages from the configured venv, and mutate external systems.

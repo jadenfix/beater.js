@@ -1032,7 +1032,7 @@ async fn handle_inner(state: DevState, req: Request<Body>) -> Result<Response<Bo
         return rsc_flight_response(&state, &method, &path, head).await;
     }
     if path.starts_with(CLIENT_MODULE_PREFIX) {
-        return client_module_response(&state.app_dir, &method, &path);
+        return client_module_response(&state.app_dir, &method, &path, req.uri().query());
     }
     let query: HashMap<String, String> = req
         .uri()
@@ -1269,7 +1269,12 @@ async fn rsc_flight_response(
     }
 }
 
-fn client_module_response(app_dir: &Path, method: &str, path: &str) -> Result<Response<Body>> {
+fn client_module_response(
+    app_dir: &Path,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+) -> Result<Response<Body>> {
     if method != "GET" && method != "HEAD" {
         return Ok(method_not_allowed_response(
             "GET, HEAD",
@@ -1290,8 +1295,15 @@ fn client_module_response(app_dir: &Path, method: &str, path: &str) -> Result<Re
         ));
     };
 
-    let code = loader::transpile_client_module(&module_path)
-        .with_context(|| format!("transpile client module {}", module_path.display()))?;
+    let dep = client_module_dep_query(query);
+    let Some(code) = loader::bundle_client_module(app_dir, &module_path, path, dep)
+        .with_context(|| format!("bundle client module {}", module_path.display()))?
+    else {
+        return Ok(text_response(
+            StatusCode::NOT_FOUND,
+            "client module dependency not found".to_string(),
+        ));
+    };
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/javascript; charset=utf-8")
@@ -1302,6 +1314,13 @@ fn client_module_response(app_dir: &Path, method: &str, path: &str) -> Result<Re
             Body::from(code)
         })
         .map_err(Into::into)
+}
+
+fn client_module_dep_query(query: Option<&str>) -> Option<&str> {
+    query?.split('&').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        (key == "dep" && !value.is_empty()).then_some(value)
+    })
 }
 
 fn client_module_route_path(path: &str) -> Option<PathBuf> {
@@ -2242,7 +2261,7 @@ mod tests {
         );
 
         let response =
-            client_module_response(app.path(), "GET", "/_beater/client/index.js").unwrap();
+            client_module_response(app.path(), "GET", "/_beater/client/index.js", None).unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -2260,10 +2279,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_module_response_sets_allow_header_on_405() {
-        let response =
-            client_module_response(Path::new("/missing"), "POST", "/_beater/client/index.js")
+    async fn client_module_response_serves_reachable_dependency_modules() {
+        let app = TempDir::new("serve-client-dep");
+        app.write(
+            "app/routes/index.client.ts",
+            "import { label } from './client-helper';\ndocument.body.dataset.label = label;\n",
+        );
+        app.write(
+            "app/routes/client-helper.ts",
+            "export const label: string = 'client-helper-loaded';\n",
+        );
+
+        let entry =
+            client_module_response(app.path(), "GET", "/_beater/client/index.js", None).unwrap();
+        assert_eq!(entry.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(entry.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("/_beater/client/index.js?dep=1"), "{body}");
+        assert!(!body.contains("./client-helper"), "{body}");
+
+        let dep =
+            client_module_response(app.path(), "GET", "/_beater/client/index.js", Some("dep=1"))
                 .unwrap();
+        assert_eq!(dep.status(), StatusCode::OK);
+        assert_eq!(
+            dep.headers().get("content-type").unwrap(),
+            "application/javascript; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(dep.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("client-helper-loaded"), "{body}");
+        assert!(!body.contains(": string"), "{body}");
+
+        let missing = client_module_response(
+            app.path(),
+            "GET",
+            "/_beater/client/index.js",
+            Some("dep=99"),
+        )
+        .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let invalid = client_module_response(
+            app.path(),
+            "GET",
+            "/_beater/client/index.js",
+            Some("dep=../1"),
+        )
+        .unwrap();
+        assert_eq!(invalid.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn client_module_response_sets_allow_header_on_405() {
+        let response = client_module_response(
+            Path::new("/missing"),
+            "POST",
+            "/_beater/client/index.js",
+            None,
+        )
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(response.headers().get("allow").unwrap(), "GET, HEAD");

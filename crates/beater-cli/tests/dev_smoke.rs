@@ -94,9 +94,27 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
         client.contains("root.dataset.state = \"hydrated\""),
         "{client}"
     );
+    assert!(
+        client.contains("root.dataset.bundle = clientBundleMarker"),
+        "{client}"
+    );
+    assert!(
+        client.contains("/_beater/client/index.js?dep=1"),
+        "{client}"
+    );
     assert!(client.contains("new EventSource"), "{client}");
     assert!(client.contains("fetch(\"/_beater/agent/runs\""), "{client}");
     assert!(!client.contains(": number"), "{client}");
+
+    let client_dep = http_request(port, "GET", "/_beater/client/index.js?dep=1", None)
+        .expect("GET client dependency module");
+    assert!(client_dep.starts_with("HTTP/1.1 200"), "{client_dep}");
+    assert!(
+        client_dep.contains("content-type: application/javascript"),
+        "{client_dep}"
+    );
+    assert!(client_dep.contains("client-helper-bundled"), "{client_dep}");
+    assert!(!client_dep.contains(": number"), "{client_dep}");
 
     let runs = http_request(port, "GET", "/_beater/agent/runs", None).expect("GET run history");
     assert!(runs.starts_with("HTTP/1.1 200"), "{runs}");
@@ -695,9 +713,27 @@ export function GET() {
         client.contains("root.dataset.state = \"hydrated\""),
         "{client}"
     );
+    assert!(
+        client.contains("root.dataset.bundle = clientBundleMarker"),
+        "{client}"
+    );
+    assert!(
+        client.contains("/_beater/client/index.js?dep=1"),
+        "{client}"
+    );
     assert!(client.contains("new EventSource"), "{client}");
     assert!(client.contains("fetch(\"/_beater/agent/runs\""), "{client}");
     assert!(!client.contains(": number"), "{client}");
+
+    let client_dep = http_request(port, "GET", "/_beater/client/index.js?dep=1", None)
+        .expect("GET scaffolded client dependency module");
+    assert!(client_dep.starts_with("HTTP/1.1 200"), "{client_dep}");
+    assert!(
+        client_dep.contains("content-type: application/javascript"),
+        "{client_dep}"
+    );
+    assert!(client_dep.contains("client-helper-bundled"), "{client_dep}");
+    assert!(!client_dep.contains(": number"), "{client_dep}");
 
     let flight =
         http_request(port, "GET", "/_beater/rsc/index.flight", None).expect("GET RSC flight");
