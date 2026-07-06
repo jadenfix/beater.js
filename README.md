@@ -125,6 +125,18 @@ export BEATER_OPENAI_API_KEY=...
 
 Run `scripts/llm-provider-conformance-gate.cjs` after `cargo build --bin beater` for the no-secret provider proof. It drives the real `beater agent run` loop through loopback Anthropic and OpenAI-compatible SSE mocks, verifies Python tool execution, checks OpenAI tool-name sanitization/fallback IDs, and asserts both providers write the same canonical journal shape.
 
+Run `scripts/llm-live-provider-smoke.cjs` only when you intentionally want to spend real provider credits. It reads keys from the environment, requires an explicit model, drives one live `beater agent run` through a Python tool, verifies the SQLite journal, redacts known key patterns from saved logs, and writes evidence under `examples/hello/.beater/live-provider-smoke/<timestamp-pid>/`.
+
+```sh
+export BEATER_LIVE_PROVIDER=openai-compatible
+export BEATER_LLM_MODEL=z-ai/glm-5.2
+export BEATER_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
+export BEATER_OPENAI_API_KEY=...
+node scripts/llm-live-provider-smoke.cjs --dry-run
+node scripts/llm-live-provider-smoke.cjs
+```
+
 More docs:
 
 - [Tool contract](docs/tools.md)
