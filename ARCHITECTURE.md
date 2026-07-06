@@ -102,7 +102,7 @@ Every other framework treats the crawl layer as hand-maintained files or plugins
 | `/robots.txt` | crawl policy + sitemap pointer | M3 |
 | `/sitemap.xml` | route table (lastmod = file mtime) | M3 |
 | `/llms.txt` | route table + per-route `agent` metadata + route actions | M3 |
-| `/.well-known/beater.json` | manifest: MCP endpoint, OpenAPI, sitemap, llms.txt, auth requirements, route actions | M3 |
+| `/.well-known/beater.json` | manifest: MCP endpoint, OpenAPI, sitemap, llms.txt, auth requirements, route actions, MCP capabilities, resources, and workflow prompts | M3 |
 | `/openapi.json` | route action definitions | M3 |
 | markdown views (`Accept: text/markdown` / `.md`) | rendered routes | post-SSR |
 | MCP `resources/list` / `resources/read` | route table → clean markdown | M3 |

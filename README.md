@@ -57,7 +57,7 @@ export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # browser-based oper
 ./target/debug/beater dev my-app --host 0.0.0.0 --base-url https://hello.example.com
 ```
 
-MCP clients can call `resources/list` and `resources/read` on the same `/mcp` endpoint to read `beater://routes`, a markdown index of the app's crawlable route table and route-bound actions. Routes marked `export const agent = { crawl: false }` are omitted. The endpoint also advertises static workflow prompts through `prompts/list` and `prompts/get`: `beater.review_pr`, `beater.update_docs`, `beater.systems_design`, and `beater.choose_stack`.
+MCP clients can call `resources/list` and `resources/read` on the same `/mcp` endpoint to read `beater://routes`, a markdown index of the app's crawlable route table and route-bound actions. Routes marked `export const agent = { crawl: false }` are omitted. The endpoint also advertises static workflow prompts through `prompts/list` and `prompts/get`: `beater.review_pr`, `beater.update_docs`, `beater.systems_design`, and `beater.choose_stack`. `/.well-known/beater.json` publishes the same MCP capability, resource, and prompt metadata for clients that discover the app before opening JSON-RPC.
 
 ## Current limits
 

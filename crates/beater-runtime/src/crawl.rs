@@ -124,8 +124,14 @@ pub fn llms_txt(
     } else {
         "no bearer token configured"
     };
+    let mut resource_uris = vec!["beater://routes"];
+    if !actions.is_empty() {
+        resource_uris.push("beater://actions");
+    }
+    let resource_uris = resource_uris.join(", ");
+    let prompt_names = crate::mcp::workflow_prompt_names().join(", ");
     out.push_str(&format!(
-        "\n## For AI agents\n\n- MCP endpoint (tools): {base_url}/mcp (Streamable HTTP, spec {}; {auth_note})\n- Manifest: {base_url}/.well-known/beater.json\n",
+        "\n## For AI agents\n\n- MCP endpoint (tools, resources, prompts): {base_url}/mcp (Streamable HTTP, spec {}; {auth_note})\n- MCP resources: {resource_uris}\n- MCP workflow prompts: {prompt_names}\n- Manifest: {base_url}/.well-known/beater.json\n",
         crate::mcp::PROTOCOL_VERSION,
     ));
     out
@@ -143,6 +149,18 @@ pub fn well_known(
     } else {
         json!({"required": false, "schemes": []})
     };
+    let mut resources = vec![json!({
+        "uri": "beater://routes",
+        "mimeType": "text/markdown",
+        "description": "Markdown index of beater.js routes and route-bound actions.",
+    })];
+    if !actions.is_empty() {
+        resources.push(json!({
+            "uri": "beater://actions",
+            "mimeType": "text/markdown",
+            "description": "Markdown index of route-bound actions exposed through MCP.",
+        }));
+    }
     json!({
         "name": app_name,
         "framework": {"name": "beater.js", "version": env!("CARGO_PKG_VERSION")},
@@ -151,6 +169,13 @@ pub fn well_known(
             "transport": "streamable-http",
             "protocolVersion": crate::mcp::PROTOCOL_VERSION,
             "auth": auth,
+            "capabilities": {
+                "tools": true,
+                "resources": true,
+                "prompts": true,
+            },
+            "resources": resources,
+            "prompts": crate::mcp::workflow_prompts_json(),
             "originPolicy": {
                 "noOrigin": "allowed",
                 "loopbackOrigins": true,
@@ -354,6 +379,67 @@ mod tests {
         assert!(
             llms.contains("- [hello.contact](https://example.test/api/actions/contact): Send a contact request. (POST write; confirm: true; idempotency: true)"),
             "{llms}"
+        );
+        assert!(llms.contains("beater://actions"), "{llms}");
+    }
+
+    #[test]
+    fn llms_txt_includes_mcp_resources_and_prompts() {
+        let llms = llms_txt(
+            "hello",
+            "https://example.test",
+            &[],
+            &[],
+            &[],
+            &crate::mcp::AccessConfig::default(),
+        );
+
+        assert!(
+            llms.contains("MCP endpoint (tools, resources, prompts)"),
+            "{llms}"
+        );
+        assert!(llms.contains("beater://routes"), "{llms}");
+        assert!(!llms.contains("beater://actions"), "{llms}");
+        assert!(llms.contains("beater.review_pr"), "{llms}");
+        assert!(llms.contains("beater.choose_stack"), "{llms}");
+    }
+
+    #[test]
+    fn well_known_advertises_mcp_capabilities_resources_and_prompts() {
+        let manifest = well_known(
+            "hello",
+            "https://hello.example.test",
+            &[],
+            &[action()],
+            &crate::mcp::AccessConfig::default(),
+        );
+
+        assert_eq!(manifest["mcp"]["capabilities"]["tools"], true);
+        assert_eq!(manifest["mcp"]["capabilities"]["resources"], true);
+        assert_eq!(manifest["mcp"]["capabilities"]["prompts"], true);
+        assert!(
+            manifest["mcp"]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|resource| resource["uri"] == "beater://routes")
+        );
+        assert!(
+            manifest["mcp"]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|resource| resource["uri"] == "beater://actions")
+        );
+        assert!(
+            manifest["mcp"]["prompts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|prompt| prompt["name"] == "beater.review_pr"
+                    && prompt["arguments"].as_array().unwrap().iter().any(
+                        |argument| argument["name"] == "scope" && argument["required"] == true
+                    ))
         );
     }
 

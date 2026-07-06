@@ -538,29 +538,35 @@ fn tools_json(registry: &ToolRegistry, route_actions: &[RouteActionTool]) -> Val
     Value::Array(tools)
 }
 
-fn prompts_list() -> Result<Value, (i64, String)> {
-    let prompts: Vec<Value> = WORKFLOW_PROMPTS
+pub fn workflow_prompts_json() -> Value {
+    Value::Array(WORKFLOW_PROMPTS.iter().map(workflow_prompt_json).collect())
+}
+
+pub fn workflow_prompt_names() -> Vec<&'static str> {
+    WORKFLOW_PROMPTS.iter().map(|prompt| prompt.name).collect()
+}
+
+fn workflow_prompt_json(prompt: &PromptSpec) -> Value {
+    let arguments: Vec<Value> = prompt
+        .arguments
         .iter()
-        .map(|prompt| {
-            let arguments: Vec<Value> = prompt
-                .arguments
-                .iter()
-                .map(|argument| {
-                    json!({
-                        "name": argument.name,
-                        "description": argument.description,
-                        "required": argument.required,
-                    })
-                })
-                .collect();
+        .map(|argument| {
             json!({
-                "name": prompt.name,
-                "description": prompt.description,
-                "arguments": arguments,
+                "name": argument.name,
+                "description": argument.description,
+                "required": argument.required,
             })
         })
         .collect();
-    Ok(json!({ "prompts": prompts }))
+    json!({
+        "name": prompt.name,
+        "description": prompt.description,
+        "arguments": arguments,
+    })
+}
+
+fn prompts_list() -> Result<Value, (i64, String)> {
+    Ok(json!({ "prompts": workflow_prompts_json() }))
 }
 
 fn prompts_get(params: &Value) -> Result<Value, (i64, String)> {
