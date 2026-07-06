@@ -123,6 +123,8 @@ export BEATER_OPENAI_API_KEY=...
 
 `BEATER_LLM_PROVIDER` and `BEATER_LLM_MODEL` override `agent.ts` for smoke tests and deployments. `BEATER_OPENAI_*` take precedence over `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
 
+Run `scripts/llm-provider-conformance-gate.cjs` after `cargo build --bin beater` for the no-secret provider proof. It drives the real `beater agent run` loop through loopback Anthropic and OpenAI-compatible SSE mocks, verifies Python tool execution, checks OpenAI tool-name sanitization/fallback IDs, and asserts both providers write the same canonical journal shape.
+
 More docs:
 
 - [Tool contract](docs/tools.md)
