@@ -148,6 +148,7 @@ export BEATER_LLM_MODEL=z-ai/glm-5.2
 export BEATER_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
 export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
 export BEATER_OPENAI_API_KEY=...
+scripts/m2-live-gate.sh --dry-run
 scripts/m2-live-gate.sh
 ```
 

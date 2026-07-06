@@ -144,7 +144,7 @@ export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
 export BEATER_OPENAI_API_KEY=...
 ```
 
-Once the funded provider config is present and `./target/debug/beater` is built, `scripts/m2-live-gate.sh` runs A3-A5 and writes transcripts plus an `evidence.md` manifest under `examples/hello/.beater/m2-gate/<timestamp-pid>/`. Authentication, billing, quota, or model-access failures before the first completed tool call are external-provider blockers, not M2 evidence; preserve the failed transcript if useful, but do not flip M2 to done.
+Once the funded provider config is present and `./target/debug/beater` is built, run `scripts/m2-live-gate.sh --dry-run` first to validate the local binary, app fixtures, provider selection, model, base URL, and output path without making provider API calls. Then `scripts/m2-live-gate.sh` runs A3-A5 and writes transcripts plus an `evidence.md` manifest under `examples/hello/.beater/m2-gate/<timestamp-pid>/`. Authentication, billing, quota, or model-access failures before the first completed tool call are external-provider blockers, not M2 evidence; preserve the failed transcript if useful, but do not flip M2 to done.
 
 ### A2. Test fixture: slow tools for deterministic kill -9
 
@@ -189,7 +189,7 @@ Same kill -9 flow, but prompt for `slow_summarize_once` and wait for `tool_name=
 
 ### A6. Close-out
 
-- [ ] Run `scripts/m2-live-gate.sh` with the live provider key/model and preserve `examples/hello/.beater/m2-gate/<timestamp-pid>/evidence.md` plus the referenced raw logs.
+- [ ] Run `scripts/m2-live-gate.sh --dry-run`, then run `scripts/m2-live-gate.sh` with the live provider key/model and preserve `examples/hello/.beater/m2-gate/<timestamp-pid>/evidence.md` plus the referenced raw logs.
 - [ ] Flip M2 to **done** in README.md + ARCHITECTURE.md §9
 - [x] Keep the slow-tool fixtures under `examples/hello` as living crash/resume fixtures
 

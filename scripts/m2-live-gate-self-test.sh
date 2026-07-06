@@ -86,4 +86,45 @@ bash -c 'set -euo pipefail; source "$1"; sleep 30 & pid=$!; track_pid "$pid"; cl
 
 bash -c 'set -euo pipefail; source "$1"; sleep 30 & pid=$!; track_pid "$pid"; untrack_pid "$pid"; cleanup; kill -0 "$pid" 2>/dev/null; alive=$?; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; exit "$alive"' _ "$SCRIPT"
 
+DRY_APP="$TMP/dry-app"
+mkdir -p "$DRY_APP/agents/support/tools"
+touch "$DRY_APP/agents/support/agent.ts"
+touch "$DRY_APP/agents/support/tools/summarize_numbers.py"
+touch "$DRY_APP/agents/support/tools/slow_summarize.py"
+touch "$DRY_APP/agents/support/tools/slow_summarize_once.py"
+
+BEATER_APP="$DRY_APP" \
+BEATER_BIN="/bin/sh" \
+M2_GATE_OUT="$TMP/dry-out" \
+BEATER_LLM_PROVIDER="openai-compatible" \
+BEATER_LLM_MODEL="model-fixture" \
+BEATER_OPENAI_API_KEY="fixture-key" \
+bash "$SCRIPT" --dry-run >"$TMP/dry-run.out"
+
+grep -q "M2 live gate preflight passed" "$TMP/dry-run.out" || {
+  cat "$TMP/dry-run.out" >&2
+  fail "dry-run did not report preflight success"
+}
+grep -q "No provider API calls were made." "$TMP/dry-run.out" || {
+  cat "$TMP/dry-run.out" >&2
+  fail "dry-run did not make the no-network behavior explicit"
+}
+[[ ! -e "$TMP/dry-out" ]] || fail "dry-run created the output directory"
+
+mkdir -p "$TMP/non-empty-out"
+touch "$TMP/non-empty-out/existing"
+if BEATER_APP="$DRY_APP" \
+  BEATER_BIN="/bin/sh" \
+  M2_GATE_OUT="$TMP/non-empty-out" \
+  BEATER_LLM_PROVIDER="openai-compatible" \
+  BEATER_LLM_MODEL="model-fixture" \
+  BEATER_OPENAI_API_KEY="fixture-key" \
+  bash "$SCRIPT" --dry-run >"$TMP/non-empty.out" 2>"$TMP/non-empty.err"; then
+  fail "dry-run should reject non-empty output directories"
+fi
+grep -q "output directory already contains files" "$TMP/non-empty.err" || {
+  cat "$TMP/non-empty.err" >&2
+  fail "non-empty dry-run failure did not explain the issue"
+}
+
 echo "m2 live gate self-test passed"

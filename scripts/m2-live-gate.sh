@@ -16,6 +16,7 @@ LLM_PROVIDER=""
 LLM_MODEL=""
 LLM_MODEL_DISPLAY="agent.ts default"
 LLM_BASE_URL=""
+DRY_RUN=0
 
 A3_RUN_ID=""
 A4_RUN_ID=""
@@ -29,6 +30,46 @@ CLEANUP_PIDS=()
 fail() {
   echo "error: $*" >&2
   exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/m2-live-gate.sh [--dry-run]
+
+Runs the live M2 gate from final.md: A3 happy path, A4 idempotent
+crash/resume, and A5 non-idempotent needs_review.
+
+Options:
+  --dry-run   Validate local provider/app/output prerequisites without making
+              provider API calls, creating evidence output, or starting agents.
+  -h, --help  Show this help text.
+
+Configuration is read from environment variables:
+  BEATER_APP, BEATER_BIN, M2_GATE_OUT
+  M2_GATE_PROVIDER or BEATER_LLM_PROVIDER
+  M2_GATE_MODEL or BEATER_LLM_MODEL
+  ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL
+  BEATER_OPENAI_API_KEY or OPENAI_API_KEY
+  BEATER_OPENAI_BASE_URL or OPENAI_BASE_URL
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        DRY_RUN=1
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "unknown argument: $1"
+        ;;
+    esac
+    shift
+  done
 }
 
 need() {
@@ -154,6 +195,38 @@ configure_provider() {
   if [[ -n "$LLM_MODEL" ]]; then
     export BEATER_LLM_MODEL="$LLM_MODEL"
   fi
+}
+
+check_prerequisites() {
+  need sqlite3
+  need sed
+  need grep
+  need tee
+  need find
+
+  configure_provider
+
+  [[ -x "$BIN" ]] || fail "missing executable $BIN; run: cargo build -p beater-cli"
+  [[ -d "$APP" ]] || fail "missing app directory: $APP"
+  [[ -f "$APP/agents/support/agent.ts" ]] || fail "missing support agent fixture: $APP/agents/support/agent.ts"
+  [[ -f "$APP/agents/support/tools/summarize_numbers.py" ]] || fail "missing happy-path tool fixture: $APP/agents/support/tools/summarize_numbers.py"
+  [[ -f "$APP/agents/support/tools/slow_summarize.py" ]] || fail "missing idempotent crash fixture: $APP/agents/support/tools/slow_summarize.py"
+  [[ -f "$APP/agents/support/tools/slow_summarize_once.py" ]] || fail "missing non-idempotent crash fixture: $APP/agents/support/tools/slow_summarize_once.py"
+  if [[ -d "$OUT" ]] && find "$OUT" -mindepth 1 -print -quit | grep -q .; then
+    fail "output directory already contains files: $OUT"
+  fi
+}
+
+print_preflight() {
+  echo "M2 live gate preflight passed"
+  echo "App: $APP"
+  echo "Binary: $BIN"
+  echo "Journal: $JOURNAL"
+  echo "Output: $OUT"
+  echo "LLM provider: $LLM_PROVIDER"
+  echo "LLM model: $LLM_MODEL_DISPLAY"
+  echo "LLM base URL: $LLM_BASE_URL"
+  echo "No provider API calls were made."
 }
 
 run_status() {
@@ -412,21 +485,14 @@ EOF
 
 main() {
   set -euo pipefail
+  parse_args "$@"
   cd "$ROOT"
   trap cleanup EXIT
 
-  need sqlite3
-  need sed
-  need grep
-  need tee
-  need find
-
-  configure_provider
-
-  [[ -x "$BIN" ]] || fail "missing executable $BIN; run: cargo build -p beater-cli"
-  [[ -d "$APP" ]] || fail "missing app directory: $APP"
-  if [[ -d "$OUT" ]] && find "$OUT" -mindepth 1 -print -quit | grep -q .; then
-    fail "output directory already contains files: $OUT"
+  check_prerequisites
+  if [[ "$DRY_RUN" == "1" ]]; then
+    print_preflight
+    return 0
   fi
 
   mkdir -p "$OUT"
