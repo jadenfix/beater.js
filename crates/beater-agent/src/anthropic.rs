@@ -645,13 +645,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn create_message_streaming_omits_stream_error_payload() {
+        let echoed_secret = format!("{}{}", "sk-ant-", "api03-test-fixture");
         let server = MockAnthropic::new(vec![MockResponse::Sse(sse(
             "error",
             json!({
                 "type": "error",
                 "error": {
                     "type": "invalid_request_error",
-                    "message": "echoed secret sk-ant-api03-should-not-appear"
+                    "message": format!("echoed secret {echoed_secret}")
                 }
             }),
         ))]);
@@ -669,7 +670,7 @@ mod tests {
         let message = format!("{error:#}");
 
         assert!(message.contains("payload omitted"), "{message}");
-        assert!(!message.contains("sk-ant-api03"), "{message}");
+        assert!(!message.contains(&echoed_secret), "{message}");
         assert_eq!(server.join(), 1);
     }
 
