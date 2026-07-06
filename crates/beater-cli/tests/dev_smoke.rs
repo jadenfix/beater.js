@@ -317,6 +317,19 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
         manifest.contains("\"path\":\"/api/actions/contact\""),
         "{manifest}"
     );
+    assert!(manifest.contains("\"capabilities\""), "{manifest}");
+    assert!(manifest.contains("\"prompts\":true"), "{manifest}");
+    assert!(manifest.contains("\"resources\":true"), "{manifest}");
+    assert!(manifest.contains("\"beater://routes\""), "{manifest}");
+    assert!(manifest.contains("\"beater://actions\""), "{manifest}");
+    assert!(
+        manifest.contains("\"name\":\"beater.review_pr\""),
+        "{manifest}"
+    );
+    assert!(
+        manifest.contains("\"name\":\"beater.choose_stack\""),
+        "{manifest}"
+    );
 
     let llms = http_request(port, "GET", "/llms.txt", None).expect("GET /llms.txt");
     assert!(llms.starts_with("HTTP/1.1 200"), "{llms}");
@@ -1074,6 +1087,11 @@ fn dev_server_requires_mcp_bearer_token_when_configured() {
         "{manifest}"
     );
     assert!(manifest.contains("\"required\":true"), "{manifest}");
+    assert!(manifest.contains("\"prompts\":true"), "{manifest}");
+    assert!(
+        manifest.contains("\"name\":\"beater.review_pr\""),
+        "{manifest}"
+    );
     assert!(
         !manifest.contains("https://ops.example.test") && !manifest.contains("trustedOrigins"),
         "{manifest}"
