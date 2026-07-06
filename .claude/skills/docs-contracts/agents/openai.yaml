@@ -1,0 +1,6 @@
+interface:
+  display_name: "Docs Contracts"
+  short_description: "Keep public docs and contracts honest"
+  default_prompt: "Use $docs-contracts to sync the docs, final.md evidence, and public contracts for this beater.js change."
+policy:
+  allow_implicit_invocation: true

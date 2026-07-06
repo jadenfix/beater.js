@@ -1,0 +1,6 @@
+interface:
+  display_name: "Systems Engineering"
+  short_description: "Choose better architecture and algorithms"
+  default_prompt: "Use $systems-engineering to choose the language, framework, algorithm, and proof for this beater.js change."
+policy:
+  allow_implicit_invocation: true

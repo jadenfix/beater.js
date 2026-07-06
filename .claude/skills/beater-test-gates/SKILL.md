@@ -1,11 +1,25 @@
 ---
 name: beater-test-gates
-description: Run beater.js verification gates on this local macOS workspace, including the PyO3 configuration needed for embedded Python tests.
+description: Select and run beater.js verification gates on this local macOS workspace, including docs-only checks, focused Cargo tests, browser/provider gates, deploy gates, and the PyO3 configuration needed for embedded Python tests.
 ---
 
 # beater.js test gates
 
-Use this skill when a change needs local verification in `jadenfix/beater.js`, especially if `cargo test` touches `pyo3` or `beater-py`, or when checking the local e2e gates listed in `final.md`.
+Use this skill when a change needs verification in `jadenfix/beater.js`, especially if `cargo test` touches `pyo3` or `beater-py`, when checking the local e2e gates listed in `final.md`, or when a PR needs an explicit evidence plan before claiming done.
+
+## Gate selection
+
+Pick the smallest gate that proves the risk, then escalate only when the risk crosses a boundary:
+
+- Docs/contracts only: check the affected public docs and use `docs-contracts`; do not claim runtime behavior without runtime evidence.
+- Rust library or CLI logic: run the focused package/test first, then full workspace gate if the touched path is broad.
+- Python, PyO3, or embedded tool behavior: use the PyO3 config shown below so tests link the intended framework.
+- V8 route/SSR/RSC/client behavior: use the focused Cargo test plus the relevant script gate in `scripts/`.
+- Browser provider behavior: run the browser provider gate because helper-only tests do not prove the real Playwright path.
+- Deploy/build behavior: run the Docker cold-start gate or wait for CI, because `beater build` claims must prove the generated bundle/image path.
+- Security/network/control-plane behavior: prove the production call path with auth, origin/host, timeout, retry, and denial cases.
+
+Record ordinary PR evidence in the PR body after the command has passed. Update `final.md` only when the evidence changes a durable completion claim. If a gate is intentionally not run, name the missing external dependency or cost.
 
 ## Full workspace gate
 
@@ -77,7 +91,9 @@ If the gate fails and you need to inspect its temp app/journal, rerun with `BEAT
 
 ## Deploy gate probe
 
-The deploy proof is `scripts/docker-cold-start-gate.sh`. Before running it, check both free space and Docker availability:
+The deploy proof is `scripts/docker-cold-start-gate.sh`. It builds the release CLI in a Linux Docker builder, runs `beater build` for `examples/hello`, builds the generated Dockerfile, starts the image on a loopback-only published port, checks `/api/health`, and proves `/mcp` rejects unauthenticated calls while accepting bearer-token `tools/list`.
+
+Before running it, check both free space and Docker availability:
 
 ```sh
 df -h / /Users/jadenfix
@@ -86,6 +102,8 @@ scripts/docker-cold-start-gate.sh
 ```
 
 The Docker gate needs roughly 12 GiB free by default. It is safe to run `cargo clean` to remove generated Rust build artifacts when local disk pressure blocks progress; expect the next Rust build/test run to rebuild dependencies.
+
+CI sets `BEATER_DOCKER_COLD_START_MS=3000` to avoid runner-scheduling flakes while preserving the cold-container proof. Local runs default to `1000`.
 
 ## Known local blockers
 

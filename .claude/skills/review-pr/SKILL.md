@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: High-recall, high-precision independent review of a beater.js PR. Use when asked to review a PR in jadenfix/beater.js (e.g. "/review-pr 110"). Reviews must be done by an agent that did NOT author the PR.
+description: High-recall, high-precision independent review of a beater.js PR. Use when asked to review a PR in jadenfix/beater.js (e.g. "/review-pr 110"), especially for docs/contracts, test gates, systems-engineering decisions, security boundaries, performance claims, deployability, or completion evidence. Reviews must be done by an agent that did NOT author the PR.
 ---
 
 # beater.js PR review
@@ -13,6 +13,8 @@ You are an independent, non-author reviewer for `jadenfix/beater.js`. The argume
 - Read-only: do not modify the main clone, do not run `cargo` in a directory another agent may be building in. CI already builds per-PR; review by reading.
 - Precision: every **blocker** carries a concrete traced failure scenario (specific input/state → specific wrong behavior, with `file:line`). If you cannot trace one, it is a nit.
 - Recall: read the ENTIRE diff, the referenced issues, and the surrounding code of every touched file at current `main`. Bugs live at the seams the diff doesn't show.
+- Switching bar: the PR must make beater.js materially better on capability, correctness, performance, security, operability, or simplicity. If it only adds surface area, request changes or reject.
+- Skill routing: use `docs-contracts` for public-surface/doc/final.md/OpenAPI/action/MCP claims, `beater-test-gates` for verification selection, and `systems-engineering` for language/framework/algorithm/refactor decisions.
 
 ## Procedure
 
@@ -22,8 +24,9 @@ You are an independent, non-author reviewer for `jadenfix/beater.js`. The argume
 4. **Supersession check:** `git log origin/main --oneline -30` plus targeted `git log -p` on touched files → REJECT (superseded) if main already contains an equivalent fix.
 5. **Freshness check:** after any wait, force-push, PR body edit, or CI rerun, re-read PR state, head SHA, base SHA, check rollup, and linked issue state.
 6. **Overlap check:** `gh pr list -R jadenfix/beater.js --state open` — flag open PRs touching the same paths and whether merge order matters.
-7. Hunt for bugs using the method below.
-8. Post the review (format at the bottom) and return a structured verdict.
+7. **Skill check:** if the PR changes runtime behavior, docs/contracts, test gates, or architecture decisions, apply the relevant repo skill and name the result in the review. Runtime PRs need `beater-test-gates` evidence selection even when CI is the only gate run.
+8. Hunt for bugs using the method below.
+9. Post the review (format at the bottom) and return a structured verdict.
 
 ## How to find bugs (do this — don't just tick boxes)
 
@@ -34,6 +37,7 @@ You are an independent, non-author reviewer for `jadenfix/beater.js`. The argume
 - **Reverted-fix test:** would any test in the PR still pass if the fix were reverted? If yes, it proves nothing — a blocker for a bugfix PR.
 - **Adversarially verify** each candidate blocker: try to refute it against the code. Survives → blocker. No concrete trace → nit.
 - **Preserve durable lessons** under `Durable guidance`; a follow-up author lands accepted guidance in this file from a separate PR.
+- **Measure better, not bigger.** For new abstractions, dependencies, frameworks, languages, algorithms, or gates, ask what invariant became easier to prove and what cost was added.
 
 ## What to look for (general bug classes)
 
@@ -49,10 +53,12 @@ Resource, lifecycle & availability:
 
 Tests:
 - [ ] Tests exercise the actual failure mode (survive the reverted-fix question); limits tested at, below, above the boundary.
+- [ ] The selected gate matches the risk: docs-only changes need contract checks; runtime changes need unit/integration/e2e evidence; deploy/network changes need the live production path, not helper-only tests.
 
 Fit & simplicity:
 - [ ] The change does exactly what its issue needs — no speculative abstraction, dead branch, or unused knob.
 - [ ] It fits ARCHITECTURE.md: the four-tier model (V8 routes/SSR, CPython tools, native Rust agent loop, Wasmtime planned) stays intact; tiers communicate by serialization, not shared mutable state.
+- [ ] Language/framework/algorithm choices have a clear boundary rationale and are cheaper to own than the alternatives.
 
 ## beater.js-specific bug classes (check every one the diff touches)
 
@@ -74,6 +80,7 @@ MCP & network exposure:
 Module resolution & build:
 - [ ] `exports`-condition resolution changes are tested against real `node_modules` fixtures (node/import/module/default precedence); unsupported cases (CommonJS `require`, Node built-ins) fail with a clear error, never silently resolve to the wrong file.
 - [ ] `beater build` bundles run without the dev-tree present; `doctor` checks match what the runtime actually requires (PYO3_PYTHON, venv, V8).
+- [ ] Deploy claims prove the generated bundle/image path that downstream operators actually run, including auth and loopback/public exposure behavior.
 
 ## Verdict & posting
 
@@ -99,6 +106,8 @@ Nits:
 Durable guidance: <candidate reusable invariant for follow-up docs, or "none">
 
 Overlap: <open PRs touching same paths + merge-order note, or "none">
+
+Skills applied: <docs-contracts | beater-test-gates | systems-engineering | none, with one-line result>
 
 — independent review agent (non-author)
 ```
