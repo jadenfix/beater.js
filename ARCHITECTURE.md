@@ -147,7 +147,7 @@ CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <
 - **Isolate pool production hardening / per-request isolation** — `[app].workers = N` starts N route isolates; smoke tests prove round-robin dispatch, and `scripts/isolate-pool-scaling-gate.cjs` proved 7.65x route throughput on ten local workers. Per-request isolation hardening and worker-count tuning remain production work.
 - **LLM streaming to browser** — Anthropic SSE ingestion, partial-step journal records, protected run list/detail/events endpoints under `/_beater/agent/runs`, and the hello example's recent-run EventSource panel are in place; richer production run-management UI remains.
 - **MCP discovery/SSE + the 2026-07-28 spec** — remote MCP `tools/call`, provider session initialization, and startup `tools/list` schema import via `remoteMcpProvider` are in place; adopt the next transport spec when released.
-- **Observability/evals** — opt-in trace exporters post finished journal runs and steps to Beater native `/v1/traces/native` or OTLP/HTTP `/v1/traces`; local gates prove OTLP collector export and Beater native ingest/read paths used by the dashboard, while rendered beater-agents dashboard proof remains future work.
+- **Observability/evals** — opt-in trace exporters post finished journal runs and steps to Beater native `/v1/traces/native` or OTLP/HTTP `/v1/traces`; local gates prove OTLP collector export, Beater native ingest/read paths used by the dashboard, and a rendered dashboard page for an exported run trace. Beater's tenant-scoped protobuf OTLP ingest remains a separate compatibility target if needed.
 
 ## 9. Milestones
 
