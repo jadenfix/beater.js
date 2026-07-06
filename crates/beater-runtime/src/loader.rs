@@ -76,6 +76,11 @@ impl ModuleLoader for BeaterModuleLoader {
         if let Some(mapped) = vendor_specifier(specifier) {
             return ModuleSpecifier::parse(mapped).map_err(JsErrorBox::from_err);
         }
+        if let Some(resolved) = resolve_import_map(specifier, referrer)
+            .map_err(|error| JsErrorBox::generic(format!("{error:#}")))?
+        {
+            return Ok(resolved);
+        }
         if let Some(resolved) = resolve_package_import(specifier, referrer)
             .map_err(|error| JsErrorBox::generic(format!("{error:#}")))?
         {
@@ -92,6 +97,158 @@ impl ModuleLoader for BeaterModuleLoader {
     ) -> ModuleLoadResponse {
         ModuleLoadResponse::Sync(load_sync(specifier))
     }
+}
+
+fn resolve_import_map(specifier: &str, referrer: &str) -> anyhow::Result<Option<ModuleSpecifier>> {
+    if specifier.is_empty()
+        || specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || ModuleSpecifier::parse(specifier).is_ok()
+    {
+        return Ok(None);
+    }
+    let referrer = ModuleSpecifier::parse(referrer)?;
+    if referrer.scheme() != "file" {
+        return Ok(None);
+    }
+    let referrer_path = referrer
+        .to_file_path()
+        .map_err(|_| anyhow::anyhow!("bad file referrer for import map: {referrer}"))?;
+    let Some(app_dir) = find_app_dir(referrer_path.parent()) else {
+        return Ok(None);
+    };
+    let import_map_path = app_dir.join("import_map.json");
+    if !import_map_path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&import_map_path)?;
+    let import_map: Value = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("parse {}: {e}", import_map_path.display()))?;
+    let Some(imports) = import_map.get("imports").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+
+    if let Some(target) = imports.get(specifier).and_then(Value::as_str) {
+        return resolve_import_map_target(&app_dir, target, None);
+    }
+
+    let mut best_prefix: Option<(&str, &str)> = None;
+    for (key, target) in imports {
+        let Some(target) = target.as_str() else {
+            continue;
+        };
+        if !key.ends_with('/') || !specifier.starts_with(key) {
+            continue;
+        }
+        let remainder = &specifier[key.len()..];
+        let is_better = best_prefix
+            .map(|(best_key, _)| key.len() > best_key.len())
+            .unwrap_or(true);
+        if is_better {
+            best_prefix = Some((key.as_str(), target));
+        }
+        validate_import_map_remainder(remainder)?;
+    }
+    if let Some((key, target)) = best_prefix {
+        let remainder = &specifier[key.len()..];
+        return resolve_import_map_target(&app_dir, target, Some(remainder));
+    }
+
+    Ok(None)
+}
+
+fn find_app_dir(start: Option<&Path>) -> Option<PathBuf> {
+    start?
+        .ancestors()
+        .find(|dir| dir.join("beater.toml").is_file())
+        .map(Path::to_path_buf)
+}
+
+fn resolve_import_map_target(
+    app_dir: &Path,
+    target: &str,
+    remainder: Option<&str>,
+) -> anyhow::Result<Option<ModuleSpecifier>> {
+    if !target.starts_with("./") && !target.starts_with("../") {
+        return Ok(None);
+    }
+    if remainder.is_some() && !target.ends_with('/') {
+        anyhow::bail!("import-map prefix target must end with '/': {target}");
+    }
+    validate_import_map_relative(app_dir, target)?;
+    if let Some(remainder) = remainder {
+        validate_import_map_remainder(remainder)?;
+    }
+
+    let mut path = app_dir.join(target);
+    if let Some(remainder) = remainder {
+        path = path.join(remainder);
+    }
+    let resolved = resolve_file_or_dir(path)?;
+    ModuleSpecifier::from_file_path(&resolved)
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("bad import-map target path {}", resolved.display()))
+}
+
+fn validate_import_map_relative(app_dir: &Path, raw: &str) -> anyhow::Result<()> {
+    let path = Path::new(raw);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::Prefix(_)))
+    {
+        anyhow::bail!("import-map target must be a local relative path: {raw}");
+    }
+    let normalized = normalize_relative_components(path)?;
+    if normalized.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        anyhow::bail!(
+            "import-map target points outside app {}: {raw}",
+            app_dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_import_map_remainder(raw: &str) -> anyhow::Result<()> {
+    let path = Path::new(raw);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+        || raw
+            .chars()
+            .any(|ch| matches!(ch, '\\' | '\0') || ch.is_control())
+    {
+        anyhow::bail!("import-map prefix match points outside app: {raw}");
+    }
+    Ok(())
+}
+
+fn normalize_relative_components(path: &Path) -> anyhow::Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("path is not relative: {}", path.display())
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -530,7 +687,10 @@ fn transpile(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_sync, parse_package_import, resolve_package_import, transpile_cache};
+    use super::{
+        load_sync, parse_package_import, resolve_import_map, resolve_package_import,
+        transpile_cache,
+    };
     use deno_core::{ModuleSource, ModuleSourceCode, ModuleSpecifier};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -639,6 +799,140 @@ mod tests {
 
         assert!(code.contains("document.body.dataset.count"));
         assert!(!code.contains(": number"));
+    }
+
+    #[test]
+    fn import_map_resolves_exact_and_prefix_entries_from_app_root() {
+        let app = TempDir::new("import-map");
+        app.write("beater.toml", "[app]\nname = \"mapped\"\n");
+        app.write(
+            "import_map.json",
+            r##"{
+  "imports": {
+    "#message": "./app/lib/message.ts",
+    "#features/": "./app/features/"
+  }
+}"##,
+        );
+        app.write("app/routes/index.ts", "import message from '#message';\n");
+        app.write("app/lib/message.ts", "export default 'hello';\n");
+        app.write("app/features/math.ts", "export const value = 42;\n");
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/index.ts")).unwrap();
+
+        let exact = resolve_import_map("#message", referrer.as_str())
+            .unwrap()
+            .unwrap();
+        let prefix = resolve_import_map("#features/math", referrer.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            exact,
+            ModuleSpecifier::from_file_path(app.path().join("app/lib/message.ts")).unwrap()
+        );
+        assert_eq!(
+            prefix,
+            ModuleSpecifier::from_file_path(app.path().join("app/features/math.ts")).unwrap()
+        );
+    }
+
+    #[test]
+    fn import_map_missing_or_nonmatching_map_falls_back_to_regular_resolution() {
+        let app = TempDir::new("import-map-fallback");
+        app.write("beater.toml", "[app]\nname = \"mapped\"\n");
+        app.write(
+            "import_map.json",
+            r##"{"imports":{"#local":"./app/local.ts"}}"##,
+        );
+        app.write("app/routes/index.ts", "import { z } from 'zod';\n");
+        app.write(
+            "node_modules/zod/package.json",
+            r#"{"name":"zod","type":"module","exports":{".":"./index.js"}}"#,
+        );
+        app.write("node_modules/zod/index.js", "export const z = {};\n");
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/index.ts")).unwrap();
+
+        assert!(
+            resolve_import_map("zod", referrer.as_str())
+                .unwrap()
+                .is_none()
+        );
+        let package = resolve_package_import("zod", referrer.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            package,
+            ModuleSpecifier::from_file_path(app.path().join("node_modules/zod/index.js")).unwrap()
+        );
+    }
+
+    #[test]
+    fn import_map_is_ignored_without_app_root_marker() {
+        let app = TempDir::new("import-map-no-root");
+        app.write(
+            "import_map.json",
+            r##"{"imports":{"#local":"./app/local.ts"}}"##,
+        );
+        app.write("app/routes/index.ts", "import local from '#local';\n");
+        app.write("app/local.ts", "export default 'local';\n");
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/index.ts")).unwrap();
+
+        assert!(
+            resolve_import_map("#local", referrer.as_str())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn import_map_rejects_prefix_match_escape() {
+        let app = TempDir::new("import-map-remainder-escape");
+        app.write("beater.toml", "[app]\nname = \"mapped\"\n");
+        app.write(
+            "import_map.json",
+            r##"{"imports":{"#features/":"./app/features/"}}"##,
+        );
+        app.write(
+            "app/routes/index.ts",
+            "import secret from '#features/../secret';\n",
+        );
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/index.ts")).unwrap();
+
+        let error = resolve_import_map("#features/../secret", referrer.as_str()).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("import-map prefix match points outside app"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn import_map_rejects_target_escape() {
+        let app = TempDir::new("import-map-target-escape");
+        app.write("beater.toml", "[app]\nname = \"mapped\"\n");
+        app.write(
+            "import_map.json",
+            r##"{"imports":{"#secret":"../secret.ts"}}"##,
+        );
+        app.write("app/routes/index.ts", "import secret from '#secret';\n");
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/index.ts")).unwrap();
+
+        let error = resolve_import_map("#secret", referrer.as_str()).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("import-map target points outside app"),
+            "{error:#}"
+        );
     }
 
     #[test]

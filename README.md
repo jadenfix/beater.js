@@ -61,7 +61,7 @@ export BEATER_MCP_TRUSTED_ORIGINS="https://ops.example.com" # browser-based oper
 
 `beater dev` defaults to one JS route isolate, so TS routes and React SSR serialize unless you set `[app].workers = N` in `beater.toml`. One dev server serves one app directory. See [Runtime limits](docs/runtime-limits.md) for the exact concurrency model and scaling gate.
 
-Server-side routes can import local ESM packages from `node_modules` with bare package specifiers. The resolver handles exact and wildcard package `exports` entries, array export targets, `node`, `import`, `module`, and `default` conditions, plus `module`/`main` fallbacks; CommonJS `require`, Node built-ins, and client-side dependency bundling are still outside this wedge.
+Server-side routes can import local ESM packages from `node_modules` with bare package specifiers. The resolver handles exact and wildcard package `exports` entries, array export targets, `node`, `import`, `module`, and `default` conditions, plus `module`/`main` fallbacks. Apps can also add an `import_map.json` beside `beater.toml` with local `imports` aliases such as `"#lib": "./app/lib/index.ts"` or prefix aliases such as `"#features/": "./app/features/"`; targets are resolved inside the app root. CommonJS `require`, Node built-ins, and client-side dependency bundling are still outside this wedge.
 
 Client modules are route companions such as `app/routes/index.client.ts`. They are transpiled and served as same-origin browser modules, but they are not bundled with npm dependencies yet.
 
