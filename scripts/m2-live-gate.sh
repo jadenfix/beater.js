@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the live M2 gate from final.md: happy path, idempotent crash/resume,
-# and non-idempotent needs_review. Requires a real Anthropic API key.
+# and non-idempotent needs_review. Requires a real supported LLM provider key.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -11,6 +11,11 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_LABEL="$STAMP-pid$$"
 OUT="${M2_GATE_OUT:-$APP/.beater/m2-gate/$RUN_LABEL}"
 EVIDENCE="$OUT/evidence.md"
+
+LLM_PROVIDER=""
+LLM_MODEL=""
+LLM_MODEL_DISPLAY="agent.ts default"
+LLM_BASE_URL=""
 
 A3_RUN_ID=""
 A4_RUN_ID=""
@@ -76,6 +81,79 @@ cleanup() {
     kill -9 "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
+}
+
+canonical_provider() {
+  local raw="${1:-}"
+  local provider
+  provider="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
+  case "$provider" in
+    anthropic)
+      printf 'anthropic\n'
+      ;;
+    openai|openai-compatible)
+      printf 'openai-compatible\n'
+      ;;
+    "")
+      fail "LLM provider is empty"
+      ;;
+    *)
+      fail "unsupported LLM provider: $raw; use anthropic or openai-compatible"
+      ;;
+  esac
+}
+
+selected_provider() {
+  local requested="${M2_GATE_PROVIDER:-${BEATER_LLM_PROVIDER:-}}"
+  if [[ -z "$requested" ]]; then
+    if [[ -z "${ANTHROPIC_API_KEY:-}" && -n "${BEATER_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}" ]]; then
+      requested="openai-compatible"
+    else
+      requested="anthropic"
+    fi
+  fi
+  canonical_provider "$requested"
+}
+
+validate_provider_base_url_for_evidence() {
+  local raw="$1"
+  if [[ "$raw" == *$'\n'* || "$raw" == *$'\r'* ]]; then
+    fail "LLM base URL must not contain control characters"
+  fi
+  if [[ "$raw" == *"?"* || "$raw" == *"#"* ]]; then
+    fail "LLM base URL must not contain query parameters or fragments"
+  fi
+  if [[ "$raw" == *"://"* ]]; then
+    local authority="${raw#*://}"
+    authority="${authority%%/*}"
+    if [[ "$authority" == *"@"* ]]; then
+      fail "LLM base URL must not contain credentials"
+    fi
+  fi
+}
+
+configure_provider() {
+  LLM_PROVIDER="$(selected_provider)"
+  LLM_MODEL="${M2_GATE_MODEL:-${BEATER_LLM_MODEL:-}}"
+  LLM_MODEL_DISPLAY="${LLM_MODEL:-agent.ts default}"
+
+  case "$LLM_PROVIDER" in
+    anthropic)
+      [[ -n "${ANTHROPIC_API_KEY:-}" ]] || fail "ANTHROPIC_API_KEY is not set for provider anthropic"
+      LLM_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+      ;;
+    openai-compatible)
+      [[ -n "${BEATER_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}" ]] || fail "BEATER_OPENAI_API_KEY or OPENAI_API_KEY is not set for provider openai-compatible"
+      [[ -n "$LLM_MODEL" ]] || fail "BEATER_LLM_MODEL or M2_GATE_MODEL is required for provider openai-compatible so the Anthropic example model is not sent to a different provider"
+      LLM_BASE_URL="${BEATER_OPENAI_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}"
+      ;;
+  esac
+
+  validate_provider_base_url_for_evidence "$LLM_BASE_URL"
+  export BEATER_LLM_PROVIDER="$LLM_PROVIDER"
+  if [[ -n "$LLM_MODEL" ]]; then
+    export BEATER_LLM_MODEL="$LLM_MODEL"
+  fi
 }
 
 run_status() {
@@ -292,7 +370,9 @@ App: \`$APP\`
 Binary: \`$BIN\`
 Journal: \`$JOURNAL\`
 Output: \`$OUT\`
-Messages API base: \`${ANTHROPIC_BASE_URL:-https://api.anthropic.com}\`
+LLM provider: \`$LLM_PROVIDER\`
+LLM model: \`$LLM_MODEL_DISPLAY\`
+LLM base URL: \`$LLM_BASE_URL\`
 
 ## A3 happy path
 
@@ -341,8 +421,9 @@ main() {
   need tee
   need find
 
+  configure_provider
+
   [[ -x "$BIN" ]] || fail "missing executable $BIN; run: cargo build -p beater-cli"
-  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || fail "ANTHROPIC_API_KEY is not set"
   [[ -d "$APP" ]] || fail "missing app directory: $APP"
   if [[ -d "$OUT" ]] && find "$OUT" -mindepth 1 -print -quit | grep -q .; then
     fail "output directory already contains files: $OUT"
@@ -350,6 +431,9 @@ main() {
 
   mkdir -p "$OUT"
   echo "writing transcripts to $OUT"
+  echo "LLM provider: $LLM_PROVIDER"
+  echo "LLM model: $LLM_MODEL_DISPLAY"
+  echo "LLM base URL: $LLM_BASE_URL"
 
   run_happy_path
   run_crash_resume \

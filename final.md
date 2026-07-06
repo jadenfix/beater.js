@@ -31,7 +31,7 @@ The work below is not just about matching Node/Next request handling. The end st
 **Primary PR sequence:**
 - [x] Add the slow-tool fixtures for A2 with the smallest possible example-app surface.
 - [x] Make `scripts/m2-live-gate.sh` self-recording: raw transcripts plus `evidence.md`.
-- [ ] Run and record A3 happy path with the live Anthropic API.
+- [ ] Run and record A3 happy path with a live supported LLM provider.
 - [ ] Run and record A4 crash/resume idempotent proof.
 - [ ] Run and record A5 non-idempotent `needs_review` proof.
 - [ ] Update README.md, ARCHITECTURE.md, and this file with exact evidence.
@@ -44,7 +44,7 @@ The work below is not just about matching Node/Next request handling. The end st
 
 **Owner:** second goal-oriented agent started separately by Jaden.
 
-**Goal:** make [B] shippable by removing author-machine assumptions and adding automated confidence that does not depend on the live Anthropic API. This hardening work must also unblock the next agent era: remotely managed agents, networked tool integrations, remote MCP servers, browser-control providers, and production deployments that can be tested without vendor-specific live credentials.
+**Goal:** make [B] shippable by removing author-machine assumptions and adding automated confidence that does not depend on one live vendor API. This hardening work must also unblock the next agent era: remotely managed agents, networked tool integrations, remote MCP servers, browser-control providers, and production deployments that can be tested without vendor-specific live credentials.
 
 **Primary PR sequence:**
 - [x] Add focused unit tests for router matching, journal lifecycle/resume invariants, and loader transpile-cache behavior.
@@ -110,7 +110,7 @@ The work below is not just about matching Node/Next request handling. The end st
 | Durability machinery (code) | SQLite journal with started/completed/failed lifecycle + attempts; resume logic for dangling LLM calls and idempotent-only tool re-runs; `needs_review` parking |
 | Anthropic network hardening | the Messages client has a request timeout; focused tests prove stalled requests and truncated successful responses retry, while truncated non-retryable API errors do not |
 | Resume stop_reason safety | `resume_preserves_failed_refusal_instead_of_marking_completed`, `resume_marks_running_max_tokens_failed_and_does_not_run_truncated_tools`, `resume_marks_completed_end_turn_finished_without_reissuing_llm`, and `resume_reissues_pause_turn_instead_of_marking_completed` prove resume no longer turns refusal/max_tokens/pause_turn journal states into false completions |
-| M2 crash/resume fixtures | `slow_summarize.py` and `slow_summarize_once.py` are declared from `examples/hello/agents/support/agent.ts`; `scripts/m2-live-gate.sh` drives A3-A5 once `ANTHROPIC_API_KEY` is present and writes raw transcripts plus `evidence.md` |
+| M2 crash/resume fixtures | `slow_summarize.py` and `slow_summarize_once.py` are declared from `examples/hello/agents/support/agent.ts`; `scripts/m2-live-gate.sh` drives A3-A5 once a supported live provider key/model is present and writes raw transcripts plus `evidence.md` |
 | M2 live gate harness safety | `scripts/m2-live-gate-self-test.sh` proves cleanup kills tracked background runs, untracked PIDs survive cleanup, and strict journal count queries fail instead of passing expected-zero assertions on SQLite errors |
 | Streaming SSR | `scripts/streaming-ssr-gate.sh` starts `beater dev`, reads the raw HTTP socket, and proved shell marker at 0.026s before Suspense-delayed marker at 0.489s while `/api/health` returned in 0.002s |
 | Client hydration | `/_beater/client/index.js` serves `app/routes/index.client.ts`; the hello page loads it as a module and `scripts/client-hydration-gate.cjs` verifies the counter increments in a browser |
@@ -124,23 +124,33 @@ The work below is not just about matching Node/Next request handling. The end st
 
 ## [A] MVP e2e-done — ONE gate remains
 
-**The M2 live gate is the only thing between here and "e2e done" for the MVP.** Everything below it in this section is already coded; the gate still has not produced passing live Anthropic evidence. Attempts that fail at provider authentication, billing, quota, or model access before the first completed tool call do not count as A3-A5 evidence.
+**The M2 live gate is the only thing between here and "e2e done" for the MVP.** Everything below it in this section is already coded; the gate still has not produced passing live supported-provider evidence. Attempts that fail at provider authentication, billing, quota, or model access before the first completed tool call do not count as A3-A5 evidence.
 
-### A1. Prerequisite: funded Anthropic API access in the shell environment
+### A1. Prerequisite: funded supported-provider API access in the shell environment
 
-The only external input needed is an `ANTHROPIC_API_KEY` for an Anthropic account with enough credits/quota to run A3-A5. Install once:
+The only external input needed is a funded live provider that satisfies the canonical tool-call contract. Anthropic remains the default path:
 
 ```sh
 echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshenv
 ```
 
-Once the funded key is present and `./target/debug/beater` is built, `scripts/m2-live-gate.sh` runs A3-A5 and writes transcripts plus an `evidence.md` manifest under `examples/hello/.beater/m2-gate/<timestamp-pid>/`. Authentication, billing, quota, or model-access failures before the first completed tool call are external-provider blockers, not M2 evidence; preserve the failed transcript if useful, but do not flip M2 to done.
+OpenAI-compatible providers, including NVIDIA-style endpoints, are also valid when the provider, model, base URL, custom-origin opt-in, and key are configured together:
+
+```sh
+export BEATER_LLM_PROVIDER=openai-compatible
+export BEATER_LLM_MODEL=z-ai/glm-5.2
+export BEATER_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
+export BEATER_OPENAI_API_KEY=...
+```
+
+Once the funded provider config is present and `./target/debug/beater` is built, `scripts/m2-live-gate.sh` runs A3-A5 and writes transcripts plus an `evidence.md` manifest under `examples/hello/.beater/m2-gate/<timestamp-pid>/`. Authentication, billing, quota, or model-access failures before the first completed tool call are external-provider blockers, not M2 evidence; preserve the failed transcript if useful, but do not flip M2 to done.
 
 ### A2. Test fixture: slow tools for deterministic kill -9
 
 **Done.** `examples/hello/agents/support/tools/slow_summarize.py` waits before returning and is declared in `agent.ts` as `pyTool("slow_summarize", "./tools/slow_summarize.py", { idempotent: true })`. `slow_summarize_once.py` covers the non-idempotent path with `idempotent: false`. These fixtures are also included in the `beater new` hello template.
 
-A3-A5 are still pending until the live gate is run with `ANTHROPIC_API_KEY` against the real Anthropic Messages API.
+A3-A5 are still pending until the live gate is run against a real supported provider and records passing evidence.
 
 ### A3. Gate 1 — happy path (TS agent → Rust loop → Python tool → LLM)
 
@@ -179,7 +189,7 @@ Same kill -9 flow, but prompt for `slow_summarize_once` and wait for `tool_name=
 
 ### A6. Close-out
 
-- [ ] Run `scripts/m2-live-gate.sh` with the live key and preserve `examples/hello/.beater/m2-gate/<timestamp-pid>/evidence.md` plus the referenced raw logs.
+- [ ] Run `scripts/m2-live-gate.sh` with the live provider key/model and preserve `examples/hello/.beater/m2-gate/<timestamp-pid>/evidence.md` plus the referenced raw logs.
 - [ ] Flip M2 to **done** in README.md + ARCHITECTURE.md §9
 - [x] Keep the slow-tool fixtures under `examples/hello` as living crash/resume fixtures
 
@@ -257,7 +267,7 @@ Phase C progress so far:
 - `beater-connect` now emits `forms.html` from the same `Action` definitions that generate OpenAPI, MCP catalog metadata, llms.txt, robots.txt, and sitemap.xml; `generated_forms_post_actions_with_mcp_semantics` proves auth, scopes, confirm, dry-run, side-effect, and idempotency semantics line up with the MCP catalog.
 - Route modules can now export `agent.actions: [defineAction(...)]`; the hello contact action proves one route handler accepts a human form POST, appears in live `/mcp tools/list` with confirm/idempotency metadata, executes through `/mcp tools/call` via the same journaled route handler path, and publishes runtime `/openapi.json`, `/llms.txt`, and well-known action metadata.
 - Agent LLM calls now route through a provider adapter while preserving one canonical journal shape for messages, `tool_use`, and `tool_result` blocks. Anthropic Messages remains the default; OpenAI-compatible Chat Completions providers can be selected with `provider: "openai-compatible"` or `BEATER_LLM_PROVIDER=openai-compatible`, with provider-specific stream chunks appended as durable `step_partials` before final `llm_call` completion. `scripts/llm-provider-conformance-gate.cjs` proves both adapters through the real agent loop with loopback providers, including OpenAI tool-name sanitization and synthesized fallback tool IDs.
-- Real-provider smoke testing now has a no-secret harness separate from CI mocks: `scripts/llm-live-provider-smoke.cjs` can run one configured Anthropic or OpenAI-compatible provider, including NVIDIA-style endpoints, through `beater agent run`, a Python tool, SQLite journal checks, stream partial checks, redacted logs, and an evidence manifest. This does not replace the M2 Anthropic crash/resume gate, and broader provider-matrix evidence still requires funded live credentials.
+- Real-provider smoke testing now has a no-secret harness separate from CI mocks: `scripts/llm-live-provider-smoke.cjs` can run one configured Anthropic or OpenAI-compatible provider, including NVIDIA-style endpoints, through `beater agent run`, a Python tool, SQLite journal checks, stream partial checks, redacted logs, and an evidence manifest. This does not replace the M2 crash/resume gate, and broader provider-matrix evidence still requires funded live credentials.
 - `GET /_beater/agent/runs`, `GET /_beater/agent/runs/<run_id>`, and `GET /_beater/agent/runs/<run_id>/events` now expose protected run history, step summaries, and journaled LLM partials for browser run UIs, reusing the MCP origin/bearer policy and closing streams with a terminal event once the run reaches `completed`, `failed`, or `needs_review`.
 - The hello example now includes a route-scoped recent-runs EventSource panel that lists journaled runs, opens a selected run, and renders `llm_partial` events in the browser; dev smoke tests prove the panel and transpiled client code ship in both the checked-in fixture and scaffolded app.
 - Agent runs can now opt into Beater native trace export with `BEATER_TRACE_EXPORT_URL` or OTLP/HTTP export with `BEATER_OTLP_EXPORT_URL`/`OTEL_EXPORTER_OTLP_*`: after run/resume, beater.js projects journal runs and steps into `agent.run`, `llm.call`, and `tool.call` spans for `/v1/traces/native` or `/v1/traces`. Unit, runner integration, `scripts/otlp-trace-gate.cjs`, and `scripts/beater-dashboard-trace-gate.cjs` coverage prove projection, auth/header forwarding, scope/resource fields, tool metadata, an end-to-end local OTLP collector flow, Beater native ingest/read paths that back the dashboard, and a rendered Beater dashboard page for an exported run trace.
@@ -286,6 +296,6 @@ Phase C progress so far:
 
 ## TL;DR
 
-- **To be e2e done (MVP):** install a funded `ANTHROPIC_API_KEY`, run `scripts/m2-live-gate.sh`, preserve the emitted `evidence.md` + raw logs, then flip README.md/ARCHITECTURE.md/final.md from pending to done. The remaining MVP blocker is live-vendor evidence for M2, not missing local harness code.
+- **To be e2e done (MVP):** configure a funded supported live provider, run `scripts/m2-live-gate.sh`, preserve the emitted `evidence.md` + raw logs, then flip README.md/ARCHITECTURE.md/final.md from pending to done. The remaining MVP blocker is live-provider evidence for M2, not missing local harness code.
 - **To ship v0.1:** keep the current tests + CI, portable Python config, isolate-pool support plus scaling gate, deploy gate, Playwright gate, OTLP gate, Beater dashboard-read gate, and `beater new` path green from a clean-user checkout.
 - **To kill Node/Next:** pay off the remaining partial Phase C items, including full React Flight manifests, CommonJS `require`/Node built-in compatibility and client dependency bundling, recorded live results from the broader model/provider smoke harness beyond the local Anthropic/OpenAI-compatible mocks, next-spec MCP transport adoption, Beater tenant-scoped protobuf OTLP ingest compatibility if required, free-threaded Python, and broader C++ packaging, while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.

@@ -19,7 +19,7 @@ Pre-alpha, built in the open. Current milestone progress:
 
 - [x] **M0** — scaffold, pinned deps, architecture contract
 - [x] **M1** — `beater dev`: TS routes in embedded V8, source-mapped errors, hot reload
-- [ ] **M2** — durable agent loop + embedded-Python tools + step-lifecycle journal (code complete; live-API kill-9/resume gate pending a funded `ANTHROPIC_API_KEY`)
+- [ ] **M2** — durable agent loop + embedded-Python tools + step-lifecycle journal (code complete; live-API kill-9/resume gate pending a funded supported-provider key/model)
 - [x] **M3** — MCP server endpoint (spec 2025-11-25, verified with the official MCP inspector) + MCP route resources + agent-ready crawl layer (robots.txt, sitemap.xml, llms.txt, .well-known manifest — auto-generated from the route table)
 - [x] **M4** — streamed React 19 SSR (`renderToReadableStream`; shell chunks flush before Suspense-delayed subtrees)
 - [x] **M5** — route-scoped client module (`/_beater/client/index.js`) hydrates a counter on the hello route
@@ -38,6 +38,7 @@ python3.11 -m venv my-app/.venv                          # optional: enables thi
 ./target/debug/beater dev my-app                         # serve routes with hot reload
 BEATER_MCP_TOKEN=dev-token ./target/debug/beater dev my-app --host 0.0.0.0 --base-url https://hello.example.com
 export ANTHROPIC_API_KEY=sk-ant-...                     # default Anthropic provider for live agent runs
+# Or use an OpenAI-compatible provider such as NVIDIA with BEATER_LLM_PROVIDER, BEATER_LLM_MODEL, BEATER_OPENAI_BASE_URL, and BEATER_OPENAI_API_KEY.
 ./target/debug/beater agent run --app my-app support "summarize 3,1,4,1,5"
 ./target/debug/beater agent resume --app my-app <run_id>
 ./target/debug/beater doctor my-app                      # verify Python/venv/V8 wiring
@@ -137,6 +138,17 @@ export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
 export BEATER_OPENAI_API_KEY=...
 node scripts/llm-live-provider-smoke.cjs --dry-run
 node scripts/llm-live-provider-smoke.cjs
+```
+
+The M2 crash/resume live gate uses the same provider abstraction. It defaults to Anthropic for compatibility, but `BEATER_LLM_PROVIDER=openai-compatible` plus an explicit `BEATER_LLM_MODEL` lets NVIDIA-style endpoints satisfy A3-A5 without sending OpenAI-compatible keys to Anthropic Messages:
+
+```sh
+export BEATER_LLM_PROVIDER=openai-compatible
+export BEATER_LLM_MODEL=z-ai/glm-5.2
+export BEATER_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
+export BEATER_OPENAI_API_KEY=...
+scripts/m2-live-gate.sh
 ```
 
 More docs:
