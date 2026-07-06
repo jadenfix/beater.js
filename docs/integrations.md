@@ -2,7 +2,7 @@
 
 beater.js should expose one integration registry, not separate queues or sidecar services for web actions, local tools, remote MCP servers, and browser-control providers.
 
-The implemented registry today supports first-party Python tools, Rust built-ins, hermetic local Wasmtime tools, declared remote MCP tools, remote MCP provider discovery, a mock CDP browser provider for deterministic agent-loop and lifecycle tests, and a Playwright provider backed by the upstream Beater browser crates. Richer production credential modes such as cookies or extra headers still need to stay scoped to the provider/session before they ship.
+The implemented registry today supports first-party Python tools, Rust built-ins, hermetic local Wasmtime tools, declared remote MCP tools, remote MCP provider discovery, a mock CDP browser provider for deterministic agent-loop and lifecycle tests, and a Playwright provider backed by the upstream Beater browser crates. `/mcp` also exposes static workflow prompts for repeatable engineering tasks; those prompts are selection aids, not executable integrations. Richer production credential modes such as cookies or extra headers still need to stay scoped to the provider/session before they ship.
 
 ## Contract
 

@@ -2,6 +2,8 @@
 
 beater.js tools are first-party code declared by an agent and exposed through the same registry that powers LLM provider tool calls and `/mcp`.
 
+The same `/mcp` endpoint also exposes static workflow prompts through `prompts/list` and `prompts/get`. These prompts cover repetitive engineering work around PR review, documentation sync, systems design, and stack/algorithm selection. They are user-selected prompt templates, not hidden agent `system` prompts, and they do not execute tools or write journal rows.
+
 ## Agent declarations
 
 `agents/<name>/agent.ts` imports helpers from `beater:agent`:

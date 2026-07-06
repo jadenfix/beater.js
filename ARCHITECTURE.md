@@ -75,8 +75,8 @@ Rules:
 
 ## 6. MCP
 
-The tool registry and route resources are served at `POST /mcp` per spec 2025-11-25 (Streamable HTTP):
-- single endpoint; JSON-RPC over POST (`initialize`, `tools/list`, `tools/call`)
+The tool registry, route resources, and workflow prompts are served at `POST /mcp` per spec 2025-11-25 (Streamable HTTP):
+- single endpoint; JSON-RPC over POST (`initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`)
 - optional bearer-token auth via `BEATER_MCP_TOKEN`; missing or bad tokens fail with 401
 - `Origin` header parsed and validated → 403 on mismatch (MUST, DNS-rebinding defense); loopback origins are allowed by default, remote browser origins must be listed in `BEATER_MCP_TRUSTED_ORIGINS`
 - `OPTIONS /mcp` handles browser preflight for allowed origins and advertises `Authorization` + JSON headers
@@ -84,6 +84,7 @@ The tool registry and route resources are served at `POST /mcp` per spec 2025-11
 - `GET /mcp` → 405 (we offer no server-initiated SSE stream — explicitly allowed by spec)
 - stateless: no `MCP-Session-Id` issued
 - `resources/list` and `resources/read` expose a markdown crawlable route/action index (`beater://routes`) so AI clients can inspect the app surface without scraping HTML; routes marked `agent.crawl = false` are omitted
+- `prompts/list` and `prompts/get` expose bounded static workflow prompts for PR review, docs synchronization, systems engineering analysis, and language/framework/algorithm choice; they do not expose private agent `system` prompts or execute tools
 
 Consuming remote MCP servers as declared tool sources is implemented through direct `tools/call`, with optional bearer auth, egress policy, retries, idempotency keys, and provider session initialization. Provider `tools/list` discovery and future MCP transport upgrades remain follow-ups.
 
@@ -105,6 +106,7 @@ Every other framework treats the crawl layer as hand-maintained files or plugins
 | `/openapi.json` | route action definitions | M3 |
 | markdown views (`Accept: text/markdown` / `.md`) | rendered routes | post-SSR |
 | MCP `resources/list` / `resources/read` | route table → clean markdown | M3 |
+| MCP `prompts/list` / `prompts/get` | static workflow prompts for repeatable engineering work | M3 |
 | JSON-LD (schema.org) in pages | per-route `agent.schema` | later |
 
 Routes opt in to richer description with one export (all fields optional; `crawl` defaults true for GET pages):

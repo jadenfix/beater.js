@@ -129,6 +129,7 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
         init.contains("\"protocolVersion\":\"2025-11-25\""),
         "{init}"
     );
+    assert!(init.contains("\"prompts\":{}"), "{init}");
 
     let tools_call = http_request(
         port,
@@ -220,6 +221,50 @@ fn dev_server_serves_routes_ssr_and_mcp_without_api_key() {
         "{resources_read}"
     );
     assert!(resources_read.contains("hello.contact"), "{resources_read}");
+
+    let prompts_list = http_request(
+        port,
+        "POST",
+        "/mcp",
+        Some(r#"{"jsonrpc":"2.0","id":7,"method":"prompts/list","params":{}}"#),
+    )
+    .expect("POST /mcp prompts/list");
+    assert!(prompts_list.starts_with("HTTP/1.1 200"), "{prompts_list}");
+    assert!(
+        prompts_list.contains("\"name\":\"beater.review_pr\""),
+        "{prompts_list}"
+    );
+    assert!(
+        prompts_list.contains("\"name\":\"beater.update_docs\""),
+        "{prompts_list}"
+    );
+    assert!(
+        prompts_list.contains("\"name\":\"beater.systems_design\""),
+        "{prompts_list}"
+    );
+    assert!(
+        prompts_list.contains("\"name\":\"beater.choose_stack\""),
+        "{prompts_list}"
+    );
+
+    let prompts_get = http_request(
+        port,
+        "POST",
+        "/mcp",
+        Some(
+            r#"{"jsonrpc":"2.0","id":8,"method":"prompts/get","params":{"name":"beater.systems_design","arguments":{"problem":"route action reliability","constraints":"bounded replay and idempotency"}}}"#,
+        ),
+    )
+    .expect("POST /mcp prompts/get");
+    assert!(prompts_get.starts_with("HTTP/1.1 200"), "{prompts_get}");
+    assert!(
+        prompts_get.contains("route action reliability"),
+        "{prompts_get}"
+    );
+    assert!(
+        prompts_get.contains("bounded replay and idempotency"),
+        "{prompts_get}"
+    );
 
     let route_action_tool = http_request(
         port,

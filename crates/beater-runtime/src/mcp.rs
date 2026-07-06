@@ -62,6 +62,95 @@ pub const AETHER_PAYMENT_HASH_HEADER: &str = "x-aether-payment-hash";
 const MAX_RESOURCE_MARKDOWN_BYTES: usize = 64 * 1024;
 const MAX_RESOURCE_ROWS: usize = 512;
 const RESOURCE_TRUNCATION_NOTICE_RESERVE: usize = 256;
+const MAX_PROMPT_ARGUMENT_BYTES: usize = 2 * 1024;
+const MAX_PROMPT_TEXT_BYTES: usize = 12 * 1024;
+
+struct PromptArgument {
+    name: &'static str,
+    description: &'static str,
+    required: bool,
+}
+
+struct PromptSpec {
+    name: &'static str,
+    description: &'static str,
+    arguments: &'static [PromptArgument],
+}
+
+const REVIEW_PR_PROMPT_ARGS: &[PromptArgument] = &[
+    PromptArgument {
+        name: "scope",
+        description: "Repository, PR, diff, or file scope to review.",
+        required: true,
+    },
+    PromptArgument {
+        name: "risk_focus",
+        description: "Optional risk area to emphasize, such as security, compatibility, or performance.",
+        required: false,
+    },
+];
+
+const UPDATE_DOCS_PROMPT_ARGS: &[PromptArgument] = &[
+    PromptArgument {
+        name: "change",
+        description: "Runtime-visible contract, API, schema, command, or workflow that changed.",
+        required: true,
+    },
+    PromptArgument {
+        name: "surfaces",
+        description: "Optional docs or generated-client-facing surfaces to keep in sync.",
+        required: false,
+    },
+];
+
+const SYSTEMS_DESIGN_PROMPT_ARGS: &[PromptArgument] = &[
+    PromptArgument {
+        name: "problem",
+        description: "System, workflow, or reliability problem to solve.",
+        required: true,
+    },
+    PromptArgument {
+        name: "constraints",
+        description: "Optional constraints such as latency, durability, safety, budget, or deployment limits.",
+        required: false,
+    },
+];
+
+const CHOOSE_STACK_PROMPT_ARGS: &[PromptArgument] = &[
+    PromptArgument {
+        name: "problem",
+        description: "Problem statement requiring a language, framework, data structure, or algorithm choice.",
+        required: true,
+    },
+    PromptArgument {
+        name: "constraints",
+        description: "Optional workload, ecosystem, maintainability, or performance constraints.",
+        required: false,
+    },
+];
+
+const WORKFLOW_PROMPTS: &[PromptSpec] = &[
+    PromptSpec {
+        name: "beater.review_pr",
+        description: "Review a change with findings first, focused on bugs, regressions, security, and missing tests.",
+        arguments: REVIEW_PR_PROMPT_ARGS,
+    },
+    PromptSpec {
+        name: "beater.update_docs",
+        description: "Keep public docs, schemas, examples, and generated-client-facing contracts synchronized with a change.",
+        arguments: UPDATE_DOCS_PROMPT_ARGS,
+    },
+    PromptSpec {
+        name: "beater.systems_design",
+        description: "Analyze a systems-engineering problem through invariants, failure modes, tradeoffs, and verification.",
+        arguments: SYSTEMS_DESIGN_PROMPT_ARGS,
+    },
+    PromptSpec {
+        name: "beater.choose_stack",
+        description: "Choose the language, framework, data structure, or algorithm that best fits the problem and constraints.",
+        arguments: CHOOSE_STACK_PROMPT_ARGS,
+    },
+];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaymentHeaders {
@@ -337,13 +426,15 @@ pub async fn handle_post(
     let reply = match method {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {}, "resources": {}},
+            "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
             "serverInfo": {"name": "beater.js", "version": env!("CARGO_PKG_VERSION")},
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools_json(registry, route_catalog.actions)})),
         "resources/list" => resources_list(route_catalog.resources, route_catalog.actions),
         "resources/read" => resources_read(route_catalog.resources, route_catalog.actions, &params),
+        "prompts/list" => prompts_list(),
+        "prompts/get" => prompts_get(&params),
         "tools/call" => {
             tools_call(
                 registry,
@@ -445,6 +536,136 @@ fn tools_json(registry: &ToolRegistry, route_actions: &[RouteActionTool]) -> Val
         })
     }));
     Value::Array(tools)
+}
+
+fn prompts_list() -> Result<Value, (i64, String)> {
+    let prompts: Vec<Value> = WORKFLOW_PROMPTS
+        .iter()
+        .map(|prompt| {
+            let arguments: Vec<Value> = prompt
+                .arguments
+                .iter()
+                .map(|argument| {
+                    json!({
+                        "name": argument.name,
+                        "description": argument.description,
+                        "required": argument.required,
+                    })
+                })
+                .collect();
+            json!({
+                "name": prompt.name,
+                "description": prompt.description,
+                "arguments": arguments,
+            })
+        })
+        .collect();
+    Ok(json!({ "prompts": prompts }))
+}
+
+fn prompts_get(params: &Value) -> Result<Value, (i64, String)> {
+    let name = params["name"]
+        .as_str()
+        .ok_or((-32602, "prompts/get requires params.name".to_string()))?;
+    let prompt = WORKFLOW_PROMPTS
+        .iter()
+        .find(|prompt| prompt.name == name)
+        .ok_or_else(|| (-32602, format!("unknown prompt: {name}")))?;
+    let text = prompt_text(prompt, params)?;
+    if text.len() > MAX_PROMPT_TEXT_BYTES {
+        return Err((
+            -32602,
+            format!("prompt text exceeds {MAX_PROMPT_TEXT_BYTES} bytes"),
+        ));
+    }
+    Ok(json!({
+        "description": prompt.description,
+        "messages": [{
+            "role": "user",
+            "content": {
+                "type": "text",
+                "text": text,
+            },
+        }],
+    }))
+}
+
+fn prompt_text(prompt: &PromptSpec, params: &Value) -> Result<String, (i64, String)> {
+    match prompt.name {
+        "beater.review_pr" => {
+            let scope = required_prompt_argument(params, "scope")?;
+            let risk_focus =
+                optional_prompt_argument(params, "risk_focus")?.unwrap_or("not specified");
+            Ok(format!(
+                "Review the following beater.js change.\n\nScope: {scope}\nRisk focus: {risk_focus}\n\nUse a PR-review mindset. Findings come first, ordered by severity, with file/line references where possible. Prioritize correctness bugs, behavioral regressions, security issues, compatibility breaks, missing tests, and stale public contracts. Keep summaries brief and separate from findings. If there are no findings, state that explicitly and list residual risks or verification gaps."
+            ))
+        }
+        "beater.update_docs" => {
+            let change = required_prompt_argument(params, "change")?;
+            let surfaces = optional_prompt_argument(params, "surfaces")?.unwrap_or("README, architecture notes, API docs, OpenAPI/schema output, examples, and generated-client-facing docs");
+            Ok(format!(
+                "Update documentation for this beater.js change.\n\nChange: {change}\nSurfaces to check: {surfaces}\n\nKeep runtime-visible contracts synchronized with implementation: routes, status codes, response fields, schemas, commands, environment variables, MCP tools/resources/prompts, SDK surfaces, examples, and generated docs. Prefer the smallest docs slice that makes the public contract honest. Call out any behavior that remains partial or externally blocked."
+            ))
+        }
+        "beater.systems_design" => {
+            let problem = required_prompt_argument(params, "problem")?;
+            let constraints =
+                optional_prompt_argument(params, "constraints")?.unwrap_or("not specified");
+            Ok(format!(
+                "Analyze this beater.js systems-engineering problem.\n\nProblem: {problem}\nConstraints: {constraints}\n\nStart from invariants, threat model, failure modes, resource bounds, and operational ownership. Compare the smallest viable design against alternatives. Name the trust boundaries, retry/idempotency story, durability story, and observability needed to prove the design. Recommend the path that makes the system meaningfully better, not merely different."
+            ))
+        }
+        "beater.choose_stack" => {
+            let problem = required_prompt_argument(params, "problem")?;
+            let constraints =
+                optional_prompt_argument(params, "constraints")?.unwrap_or("not specified");
+            Ok(format!(
+                "Choose the best implementation stack for this beater.js problem.\n\nProblem: {problem}\nConstraints: {constraints}\n\nDecide the language, framework, data structure, algorithm, or execution tier by matching the workload to concrete properties: latency, memory, safety, ecosystem fit, deployment friction, failure recovery, and maintainability. Explain why the recommended choice is materially better than plausible alternatives and what evidence would prove it."
+            ))
+        }
+        _ => Err((-32602, format!("unknown prompt: {}", prompt.name))),
+    }
+}
+
+fn required_prompt_argument<'a>(params: &'a Value, name: &str) -> Result<&'a str, (i64, String)> {
+    optional_prompt_argument(params, name)?
+        .ok_or_else(|| (-32602, format!("prompts/get requires arguments.{name}")))
+}
+
+fn optional_prompt_argument<'a>(
+    params: &'a Value,
+    name: &str,
+) -> Result<Option<&'a str>, (i64, String)> {
+    let Some(arguments) = params.get("arguments") else {
+        return Ok(None);
+    };
+    let Value::Object(arguments) = arguments else {
+        return Err((
+            -32602,
+            "prompts/get params.arguments must be an object".to_string(),
+        ));
+    };
+    let Some(value) = arguments.get(name) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_str() else {
+        return Err((
+            -32602,
+            format!("prompts/get arguments.{name} must be a string"),
+        ));
+    };
+    if value.len() > MAX_PROMPT_ARGUMENT_BYTES {
+        return Err((
+            -32602,
+            format!("prompts/get arguments.{name} exceeds {MAX_PROMPT_ARGUMENT_BYTES} bytes"),
+        ));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
 }
 
 fn resources_list(
@@ -826,7 +1047,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        AETHER_PAYMENT_HASH_HEADER, AETHER_PAYMENT_HEADER, AccessConfig,
+        AETHER_PAYMENT_HASH_HEADER, AETHER_PAYMENT_HEADER, AccessConfig, MAX_PROMPT_ARGUMENT_BYTES,
         MAX_RESOURCE_MARKDOWN_BYTES, MAX_RESOURCE_ROWS, PaymentHeaders, RouteActionTool,
         RouteCatalog, RouteResource, handle_get, handle_options, handle_post, mcp_tool_use_id,
     };
@@ -998,7 +1219,194 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert!(body["result"]["capabilities"]["resources"].is_object());
+        assert!(body["result"]["capabilities"]["prompts"].is_object());
         assert!(body["result"]["capabilities"]["tools"].is_object());
+    }
+
+    #[tokio::test]
+    async fn prompts_list_and_get_expose_workflow_prompts() {
+        let app = TempApp::new("prompts-workflows");
+        let registry = ToolRegistry::empty();
+
+        let list = test_handle_post(
+            &registry,
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"list","method":"prompts/list"}"#,
+        )
+        .await;
+
+        assert_eq!(list.status(), StatusCode::OK);
+        let list = response_json(list).await;
+        let prompts = list["result"]["prompts"].as_array().unwrap();
+        let review_pr = prompts
+            .iter()
+            .find(|prompt| prompt["name"] == "beater.review_pr")
+            .expect("review prompt");
+        assert!(
+            review_pr["description"]
+                .as_str()
+                .unwrap()
+                .contains("Review a change"),
+            "{list}"
+        );
+        assert!(
+            review_pr["arguments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|argument| argument["name"] == "scope" && argument["required"] == true),
+            "{list}"
+        );
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt["name"] == "beater.update_docs"),
+            "{list}"
+        );
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt["name"] == "beater.systems_design"),
+            "{list}"
+        );
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt["name"] == "beater.choose_stack"),
+            "{list}"
+        );
+
+        let get = test_handle_post(
+            &registry,
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"get","method":"prompts/get","params":{"name":"beater.choose_stack","arguments":{"problem":"choose a cache eviction algorithm","constraints":"bounded memory and predictable latency"}}}"#,
+        )
+        .await;
+
+        assert_eq!(get.status(), StatusCode::OK);
+        let get = response_json(get).await;
+        assert_eq!(get["result"]["messages"][0]["role"], "user");
+        let text = get["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("choose a cache eviction algorithm"), "{text}");
+        assert!(
+            text.contains("bounded memory and predictable latency"),
+            "{text}"
+        );
+        assert!(
+            text.contains("language, framework, data structure, algorithm"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompts_get_rejects_unknown_and_invalid_inputs() {
+        let app = TempApp::new("prompts-invalid");
+        let registry = ToolRegistry::empty();
+
+        let unknown = test_handle_post(
+            &registry,
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"unknown","method":"prompts/get","params":{"name":"missing.prompt","arguments":{}}}"#,
+        )
+        .await;
+        assert_eq!(unknown.status(), StatusCode::OK);
+        let unknown = response_json(unknown).await;
+        assert_eq!(unknown["error"]["code"], -32602);
+        assert!(
+            unknown["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown prompt"),
+            "{unknown}"
+        );
+
+        let missing_required = test_handle_post(
+            &registry,
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"missing","method":"prompts/get","params":{"name":"beater.review_pr","arguments":{}}}"#,
+        )
+        .await;
+        assert_eq!(missing_required.status(), StatusCode::OK);
+        let missing_required = response_json(missing_required).await;
+        assert_eq!(missing_required["error"]["code"], -32602);
+        assert!(
+            missing_required["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("arguments.scope"),
+            "{missing_required}"
+        );
+
+        let invalid_arguments = test_handle_post(
+            &registry,
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"bad-arguments","method":"prompts/get","params":{"name":"beater.review_pr","arguments":[]}}"#,
+        )
+        .await;
+        assert_eq!(invalid_arguments.status(), StatusCode::OK);
+        let invalid_arguments = response_json(invalid_arguments).await;
+        assert_eq!(invalid_arguments["error"]["code"], -32602);
+        assert!(
+            invalid_arguments["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("params.arguments must be an object"),
+            "{invalid_arguments}"
+        );
+
+        let non_string_argument = test_handle_post(
+            &registry,
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            br#"{"jsonrpc":"2.0","id":"bad-scope","method":"prompts/get","params":{"name":"beater.review_pr","arguments":{"scope":42}}}"#,
+        )
+        .await;
+        assert_eq!(non_string_argument.status(), StatusCode::OK);
+        let non_string_argument = response_json(non_string_argument).await;
+        assert_eq!(non_string_argument["error"]["code"], -32602);
+        assert!(
+            non_string_argument["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("arguments.scope must be a string"),
+            "{non_string_argument}"
+        );
+
+        let oversized_body = format!(
+            r#"{{"jsonrpc":"2.0","id":"large-scope","method":"prompts/get","params":{{"name":"beater.review_pr","arguments":{{"scope":"{}"}}}}}}"#,
+            "x".repeat(MAX_PROMPT_ARGUMENT_BYTES + 1)
+        );
+        let oversized_argument = test_handle_post(
+            &registry,
+            &AccessConfig::default(),
+            app.path(),
+            &HeaderMap::new(),
+            oversized_body.as_bytes(),
+        )
+        .await;
+        assert_eq!(oversized_argument.status(), StatusCode::OK);
+        let oversized_argument = response_json(oversized_argument).await;
+        assert_eq!(oversized_argument["error"]["code"], -32602);
+        assert!(
+            oversized_argument["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("arguments.scope exceeds"),
+            "{oversized_argument}"
+        );
     }
 
     #[tokio::test]
