@@ -2,7 +2,7 @@
 //! TS/TSX/JSX via deno_ast (SWC) with inline source maps so stack traces
 //! point at the original source.
 
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -14,9 +14,8 @@ use deno_ast::{
 };
 use deno_core::error::ModuleLoaderError;
 use deno_core::{
-    resolve_import, ModuleLoadOptions, ModuleLoadReferrer, ModuleLoadResponse, ModuleLoader,
-    ModuleResolveResponse, ModuleSource, ModuleSourceCode, ModuleSpecifier, ModuleType,
-    ResolutionKind,
+    ModuleLoadOptions, ModuleLoadReferrer, ModuleLoadResponse, ModuleLoader, ModuleResolveResponse,
+    ModuleSource, ModuleSourceCode, ModuleSpecifier, ModuleType, ResolutionKind, resolve_import,
 };
 use deno_error::JsErrorBox;
 use serde_json::Value;
@@ -747,10 +746,12 @@ mod tests {
 
         assert!(first.contains("answer"));
         assert_eq!(first, second);
-        assert!(transpile_cache()
-            .lock()
-            .unwrap()
-            .contains_key(&file.canonicalize().unwrap_or(file)));
+        assert!(
+            transpile_cache()
+                .lock()
+                .unwrap()
+                .contains_key(&file.canonicalize().unwrap_or(file))
+        );
     }
 
     #[test]
@@ -853,9 +854,11 @@ mod tests {
         let referrer =
             ModuleSpecifier::from_file_path(app.path().join("app/routes/index.ts")).unwrap();
 
-        assert!(resolve_import_map("zod", referrer.as_str())
-            .unwrap()
-            .is_none());
+        assert!(
+            resolve_import_map("zod", referrer.as_str())
+                .unwrap()
+                .is_none()
+        );
         let package = resolve_package_import("zod", referrer.as_str())
             .unwrap()
             .unwrap();
@@ -878,9 +881,11 @@ mod tests {
         let referrer =
             ModuleSpecifier::from_file_path(app.path().join("app/routes/index.ts")).unwrap();
 
-        assert!(resolve_import_map("#local", referrer.as_str())
-            .unwrap()
-            .is_none());
+        assert!(
+            resolve_import_map("#local", referrer.as_str())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

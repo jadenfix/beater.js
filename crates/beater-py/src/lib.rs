@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use pyo3::prelude::*;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -209,7 +209,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{call_tool_with_timeout, PY_PERMITS};
+    use super::{PY_PERMITS, call_tool_with_timeout};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timed_out_calls_hold_permits_until_python_returns() {

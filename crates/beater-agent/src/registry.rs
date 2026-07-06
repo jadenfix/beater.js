@@ -10,20 +10,20 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::Engine as _;
 use beater_browser::{
     BrowserAction, BrowserDriver, BrowserEngine, Observation, StepOutcome, StepStatus, UrlPolicy,
 };
 use beater_browser_playwright::{PlaywrightConfig, PlaywrightDriver};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
@@ -2893,13 +2893,13 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use beater_browser::BrowserAction;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use super::{
-        browser_action_from_input, browser_action_from_input_with_secrets,
-        browser_session_active_for_tests, browser_session_count_for_tests, BrowserSecrets,
-        BrowserSessionGuard, BrowserSessionStore, ToolCallContext, ToolDecl, ToolImpl,
-        ToolNeedsReview, ToolRegistry,
+        BrowserSecrets, BrowserSessionGuard, BrowserSessionStore, ToolCallContext, ToolDecl,
+        ToolImpl, ToolNeedsReview, ToolRegistry, browser_action_from_input,
+        browser_action_from_input_with_secrets, browser_session_active_for_tests,
+        browser_session_count_for_tests,
     };
 
     #[test]
@@ -2922,17 +2922,19 @@ mod tests {
 
         let slow = registry.get("slow_summarize").expect("slow_summarize");
         assert!(slow.idempotent);
-        assert!(slow
-            .description
-            .contains("explicitly asks for slow_summarize by name"));
+        assert!(
+            slow.description
+                .contains("explicitly asks for slow_summarize by name")
+        );
 
         let once = registry
             .get("slow_summarize_once")
             .expect("slow_summarize_once");
         assert!(!once.idempotent);
-        assert!(once
-            .description
-            .contains("explicitly asks for slow_summarize_once by name"));
+        assert!(
+            once.description
+                .contains("explicitly asks for slow_summarize_once by name")
+        );
     }
 
     #[test]
@@ -3208,10 +3210,12 @@ def run(input):
         assert_eq!(requests.len(), 3);
         let init_body: Value = serde_json::from_str(&requests[0].body).unwrap();
         assert_eq!(init_body["method"], "initialize");
-        assert!(!requests[0]
-            .headers
-            .to_ascii_lowercase()
-            .contains("mcp-session-id"));
+        assert!(
+            !requests[0]
+                .headers
+                .to_ascii_lowercase()
+                .contains("mcp-session-id")
+        );
         for request in &requests[1..] {
             assert!(
                 request

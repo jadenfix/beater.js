@@ -6,7 +6,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
-use deno_core::{v8, JsRuntime, PollEventLoopOptions, RuntimeOptions};
+use deno_core::{JsRuntime, PollEventLoopOptions, RuntimeOptions, v8};
 
 use crate::loader::BeaterModuleLoader;
 use crate::worker::{beater_ext, format_js_error};

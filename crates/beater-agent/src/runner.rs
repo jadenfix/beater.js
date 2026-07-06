@@ -4,14 +4,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 
 use crate::journal::Journal;
 use crate::llm::{LlmClient, LlmSelection};
 use crate::registry::{
-    browser_session_dir, cleanup_stale_browser_sessions, AgentConfig, BeatboxConfig,
-    ToolCallContext, ToolNeedsReview, ToolRegistry,
+    AgentConfig, BeatboxConfig, ToolCallContext, ToolNeedsReview, ToolRegistry,
+    browser_session_dir, cleanup_stale_browser_sessions,
 };
 use crate::trace_export;
 
@@ -539,11 +539,11 @@ fn tool_idempotency_key(run_id: &str, tool_use_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resume, run, tool_idempotency_key, LIVE_RUN_RESUME_GRACE};
+    use super::{LIVE_RUN_RESUME_GRACE, resume, run, tool_idempotency_key};
     use crate::journal::Journal;
     use crate::registry::BeatboxConfig;
     use rusqlite::params;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::collections::VecDeque;
     use std::fs;
     use std::io::{Read, Write};
@@ -1358,10 +1358,12 @@ def run(input):
         let messages = body["messages"].as_array().unwrap();
         let tool_result = &messages.last().unwrap()["content"][0];
         assert_eq!(tool_result["tool_use_id"], "toolu_browser");
-        assert!(tool_result["content"]
-            .as_str()
-            .unwrap()
-            .contains("Mock Browser Page"));
+        assert!(
+            tool_result["content"]
+                .as_str()
+                .unwrap()
+                .contains("Mock Browser Page")
+        );
 
         let journal = Journal::open(app.path()).unwrap();
         let (run, _) = journal.list_runs().unwrap().pop().unwrap();
@@ -1441,13 +1443,17 @@ def run(input):
         let trace_requests = trace_ingest.join();
 
         assert_eq!(trace_requests.len(), 4);
-        assert!(trace_requests
-            .iter()
-            .all(|request| request.request_line == "POST /v1/traces/native HTTP/1.1"));
-        assert!(trace_requests[0]
-            .headers
-            .to_ascii_lowercase()
-            .contains("x-beater-api-key: trace-key"));
+        assert!(
+            trace_requests
+                .iter()
+                .all(|request| request.request_line == "POST /v1/traces/native HTTP/1.1")
+        );
+        assert!(
+            trace_requests[0]
+                .headers
+                .to_ascii_lowercase()
+                .contains("x-beater-api-key: trace-key")
+        );
         let spans: Vec<Value> = trace_requests
             .iter()
             .map(|request| serde_json::from_str(&request.body).unwrap())
@@ -1839,14 +1845,18 @@ def run(input):
 
         let beatbox_requests = beatbox.join();
         assert_eq!(beatbox_requests.len(), 2);
-        assert!(beatbox_requests[0]
-            .request_line
-            .starts_with("POST /v1/jobs "));
+        assert!(
+            beatbox_requests[0]
+                .request_line
+                .starts_with("POST /v1/jobs ")
+        );
         let body: Value = serde_json::from_str(&beatbox_requests[0].body).unwrap();
         assert_eq!(body["idempotency_key"], "beater:run-1:tool:toolu_1");
-        assert!(beatbox_requests[1]
-            .request_line
-            .starts_with("GET /v1/jobs/job-1 "));
+        assert!(
+            beatbox_requests[1]
+                .request_line
+                .starts_with("GET /v1/jobs/job-1 ")
+        );
 
         let _anthropic_requests = anthropic.join();
         let journal = Journal::open(app.path()).unwrap();

@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::anthropic::Anthropic;
 use crate::registry::AgentConfig;
@@ -640,8 +640,9 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_openai_event, openai_fallback_tool_id_prefix, openai_request_body, openai_tool_name,
-        validate_openai_base_url, OpenAiStreamAssembler, SseEvent, ToolNameMap,
+        OpenAiStreamAssembler, SseEvent, ToolNameMap, handle_openai_event,
+        openai_fallback_tool_id_prefix, openai_request_body, openai_tool_name,
+        validate_openai_base_url,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -846,12 +847,14 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(validate_openai_base_url(
-            "https://integrate.api.nvidia.com/v1/chat/completions",
-            false,
-            false,
-        )
-        .is_err());
+        assert!(
+            validate_openai_base_url(
+                "https://integrate.api.nvidia.com/v1/chat/completions",
+                false,
+                false,
+            )
+            .is_err()
+        );
         validate_openai_base_url("http://127.0.0.1:8080/v1/chat/completions", false, true).unwrap();
         assert!(
             validate_openai_base_url("http://example.com/v1/chat/completions", true, true).is_err()

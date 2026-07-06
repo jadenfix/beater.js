@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use beater_connect::{demo_app, ConnectBundle};
+use beater_connect::{ConnectBundle, demo_app};
 
 fn main() {
     if let Err(error) = run() {

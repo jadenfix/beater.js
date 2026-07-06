@@ -20,12 +20,12 @@ use axum::http::header::{
 };
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use deno_core::url::{Host, Url};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use beater_agent::{
-    complete_journaled_tool_call, fail_journaled_tool_call, start_journaled_tool_call, Journal,
-    ToolNeedsReview, ToolRegistry,
+    Journal, ToolNeedsReview, ToolRegistry, complete_journaled_tool_call, fail_journaled_tool_call,
+    start_journaled_tool_call,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -614,11 +614,11 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
 
     use beater_agent::{Journal, ToolDecl, ToolRegistry};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use super::{
-        handle_get, handle_options, handle_post, mcp_tool_use_id, AccessConfig, PaymentHeaders,
-        RouteActionTool, AETHER_PAYMENT_HASH_HEADER, AETHER_PAYMENT_HEADER,
+        AETHER_PAYMENT_HASH_HEADER, AETHER_PAYMENT_HEADER, AccessConfig, PaymentHeaders,
+        RouteActionTool, handle_get, handle_options, handle_post, mcp_tool_use_id,
     };
 
     struct TempApp {
@@ -1214,10 +1214,12 @@ mod tests {
         let response = handle_options(&access, &headers);
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(response
-            .headers()
-            .get("access-control-allow-origin")
-            .is_none());
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
     }
 
     fn rust_decl(name: &str) -> ToolDecl {

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use beater_agent::{BeatboxConfig, DEFAULT_BEATBOX_URL};
 use serde::Deserialize;
 
@@ -216,8 +216,8 @@ fn host_is_unspecified(host: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_base_url, normalize_base_url, resolve_beatbox_config_with_env,
-        resolve_public_base_url, BASE_URL_ENV,
+        BASE_URL_ENV, default_base_url, normalize_base_url, resolve_beatbox_config_with_env,
+        resolve_public_base_url,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -360,12 +360,14 @@ mod tests {
         assert!(
             resolve_beatbox_config_with_env(Some("file:///tmp/socket"), None, None, None).is_err()
         );
-        assert!(resolve_beatbox_config_with_env(
-            Some("https://user:pass@example.com"),
-            None,
-            None,
-            None
-        )
-        .is_err());
+        assert!(
+            resolve_beatbox_config_with_env(
+                Some("https://user:pass@example.com"),
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 }

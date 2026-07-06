@@ -372,9 +372,11 @@ mod tests {
 
         assert_eq!(manifest["mcp"]["originPolicy"]["noOrigin"], "allowed");
         assert_eq!(manifest["mcp"]["originPolicy"]["loopbackOrigins"], true);
-        assert!(manifest["mcp"]["originPolicy"]
-            .as_object()
-            .is_some_and(|policy| !policy.contains_key("trustedOrigins")));
+        assert!(
+            manifest["mcp"]["originPolicy"]
+                .as_object()
+                .is_some_and(|policy| !policy.contains_key("trustedOrigins"))
+        );
         assert!(!manifest.to_string().contains("https://ops.example.test"));
     }
 
@@ -413,13 +415,12 @@ mod tests {
             "hello.contact.delete"
         );
         assert_eq!(
-            openapi["paths"]["/api/actions/contact"]["post"]["x-beater-action"]
-                ["idempotencyRequired"],
+            openapi["paths"]["/api/actions/contact"]["post"]["x-beater-action"]["idempotencyRequired"],
             true
         );
         assert_eq!(
-            openapi["paths"]["/api/actions/contact"]["post"]["requestBody"]["content"]
-                ["application/json"]["schema"]["required"][0],
+            openapi["paths"]["/api/actions/contact"]["post"]["requestBody"]["content"]["application/json"]
+                ["schema"]["required"][0],
             "email"
         );
     }

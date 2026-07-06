@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::io;
 use std::rc::Rc;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::task::{Context as TaskContext, Poll, Waker};
 use std::thread::JoinHandle;
@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use deno_core::error::{CoreError, CoreErrorKind, JsError};
-use deno_core::{extension, op2, v8, JsRuntime, OpState, PollEventLoopOptions, RuntimeOptions};
+use deno_core::{JsRuntime, OpState, PollEventLoopOptions, RuntimeOptions, extension, op2, v8};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 

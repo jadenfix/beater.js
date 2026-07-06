@@ -1239,19 +1239,20 @@ mod tests {
             serde_json::from_str(&app.agent_card_json()).expect("agent card should be JSON");
         assert_eq!(agent_card["preferred_transport"], "openapi");
         assert!(agent_card.get("security_schemes").is_none());
-        assert!(agent_card["interfaces"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|interface| interface["type"] != "mcp"));
+        assert!(
+            agent_card["interfaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|interface| interface["type"] != "mcp")
+        );
 
         let openapi: serde_json::Value =
             serde_json::from_str(&app.openapi_json()).expect("openapi should be JSON");
         assert!(openapi["components"]["securitySchemes"].is_null());
         assert!(!app.openapi_json().contains("/oauth/"));
         assert_eq!(
-            openapi["paths"]["/agent/actions/book-demo"]["post"]["x-beater-connect"]["auth"]
-                ["type"],
+            openapi["paths"]["/agent/actions/book-demo"]["post"]["x-beater-connect"]["auth"]["type"],
             "user"
         );
     }

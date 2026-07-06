@@ -2,7 +2,7 @@
 //! SDK). Each request is exactly one journaled step; streaming requests can
 //! additionally emit durable partial records before the final message lands.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::net::IpAddr;
@@ -285,7 +285,9 @@ impl MessageStreamAssembler {
             "message_stop" => {
                 self.saw_message_stop = true;
             }
-            "error" => bail!("anthropic stream error event; payload omitted from journal to avoid leaking provider-returned secrets"),
+            "error" => bail!(
+                "anthropic stream error event; payload omitted from journal to avoid leaking provider-returned secrets"
+            ),
             _ => {}
         }
         Ok(())
@@ -383,13 +385,13 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{messages_url, validate_anthropic_base_url, Anthropic};
-    use serde_json::{json, Value};
+    use super::{Anthropic, messages_url, validate_anthropic_base_url};
+    use serde_json::{Value, json};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use std::thread;
     use std::time::Duration;
@@ -415,12 +417,14 @@ mod tests {
         validate_anthropic_base_url("https://api.anthropic.com/v1/messages", false, false).unwrap();
         validate_anthropic_base_url("https://anthropic.internal.test/v1/messages", true, false)
             .unwrap();
-        assert!(validate_anthropic_base_url(
-            "https://anthropic.internal.test/v1/messages",
-            false,
-            false
-        )
-        .is_err());
+        assert!(
+            validate_anthropic_base_url(
+                "https://anthropic.internal.test/v1/messages",
+                false,
+                false
+            )
+            .is_err()
+        );
         validate_anthropic_base_url("http://127.0.0.1:8080/v1/messages", false, true).unwrap();
         assert!(validate_anthropic_base_url("http://example.com/v1/messages", true, true).is_err());
     }

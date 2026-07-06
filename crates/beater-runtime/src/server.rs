@@ -9,8 +9,8 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
@@ -19,12 +19,12 @@ use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::middleware;
-use axum::routing::{get, post, Router};
+use axum::routing::{Router, get, post};
 use beater_agent::{BeatboxConfig, Journal, ToolCallContext, ToolRegistry};
 use bytes::Bytes;
-use futures_util::{stream, Stream};
+use futures_util::{Stream, stream};
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::config::AppConfig;
@@ -1440,28 +1440,28 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use axum::body::Body;
     use axum::extract::{Path as AxumPath, State};
     use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
     use axum::routing::get;
-    use axum::{middleware, Router};
+    use axum::{Router, middleware};
     use beater_agent::{Journal, ToolRegistry};
     use futures_util::StreamExt;
     use serde_json::json;
-    use tokio::sync::{mpsc, RwLock};
+    use tokio::sync::{RwLock, mpsc};
     use tower::ServiceExt;
 
     use super::{
-        apply_route_security_headers, cancel_on_drop_body_stream, client_module_response,
-        client_module_route_path, crawlable_route_targets, find_client_module,
-        find_rsc_server_module, handle_agent_run, handle_agent_run_events, handle_agent_runs,
-        method_not_allowed_response, route_response, route_response_body, rsc_flight_route_path,
-        secure_route_response, send_worker_msg, text_response, with_route_security_headers,
-        AgentSurfaces, DevState,
+        AgentSurfaces, DevState, apply_route_security_headers, cancel_on_drop_body_stream,
+        client_module_response, client_module_route_path, crawlable_route_targets,
+        find_client_module, find_rsc_server_module, handle_agent_run, handle_agent_run_events,
+        handle_agent_runs, method_not_allowed_response, route_response, route_response_body,
+        rsc_flight_route_path, secure_route_response, send_worker_msg, text_response,
+        with_route_security_headers,
     };
     use crate::mcp;
     use crate::router::RouteTable;
@@ -1530,12 +1530,14 @@ mod tests {
             response.headers().get("x-content-type-options"),
             Some(&HeaderValue::from_static("nosniff"))
         );
-        assert!(response
-            .headers()
-            .get("content-security-policy")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .contains("script-src 'self'"));
+        assert!(
+            response
+                .headers()
+                .get("content-security-policy")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .contains("script-src 'self'")
+        );
     }
 
     #[tokio::test]
