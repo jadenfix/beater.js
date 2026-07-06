@@ -45,6 +45,32 @@ pub struct RouteActionTool {
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 pub const DEFAULT_TOKEN_ENV: &str = "BEATER_MCP_TOKEN";
 pub const DEFAULT_TRUSTED_ORIGINS_ENV: &str = "BEATER_MCP_TRUSTED_ORIGINS";
+pub const AETHER_PAYMENT_HEADER: &str = "x-payment";
+pub const AETHER_PAYMENT_HASH_HEADER: &str = "x-aether-payment-hash";
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaymentHeaders {
+    pub payment: Option<String>,
+    pub payment_hash: Option<String>,
+}
+
+impl PaymentHeaders {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        Self {
+            payment: header_to_string(headers, AETHER_PAYMENT_HEADER),
+            payment_hash: header_to_string(headers, AETHER_PAYMENT_HASH_HEADER),
+        }
+    }
+
+    pub fn insert_into(&self, headers: &mut std::collections::HashMap<String, String>) {
+        if let Some(payment) = &self.payment {
+            headers.insert(AETHER_PAYMENT_HEADER.to_string(), payment.clone());
+        }
+        if let Some(payment_hash) = &self.payment_hash {
+            headers.insert(AETHER_PAYMENT_HASH_HEADER.to_string(), payment_hash.clone());
+        }
+    }
+}
 
 /// MCP access policy. By default the endpoint remains local-dev friendly:
 /// non-browser clients may omit Origin and no token is required. Set
@@ -209,6 +235,15 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
+fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 pub async fn handle_post(
     registry: &ToolRegistry,
     route_actions: &[RouteActionTool],
@@ -220,6 +255,7 @@ pub async fn handle_post(
         RouteActionTool,
         Value,
         beater_agent::ToolCallContext,
+        PaymentHeaders,
     )
         -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>,
 ) -> Response<Body> {
@@ -282,6 +318,7 @@ pub async fn handle_post(
 
     let method = message["method"].as_str().unwrap_or_default();
     let params = message.get("params").cloned().unwrap_or(Value::Null);
+    let payment_headers = PaymentHeaders::from_headers(headers);
     let reply = match method {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
@@ -290,7 +327,17 @@ pub async fn handle_post(
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools_json(registry, route_actions)})),
-        "tools/call" => tools_call(registry, route_actions, app_dir, &params, route_executor).await,
+        "tools/call" => {
+            tools_call(
+                registry,
+                route_actions,
+                app_dir,
+                &params,
+                payment_headers,
+                route_executor,
+            )
+            .await
+        }
         other => Err((-32601, format!("method not found: {other}"))),
     };
 
@@ -342,7 +389,7 @@ pub fn handle_options(access: &AccessConfig, headers: &HeaderMap) -> Response<Bo
             .header(ACCESS_CONTROL_ALLOW_METHODS, "POST, GET, OPTIONS")
             .header(
                 ACCESS_CONTROL_ALLOW_HEADERS,
-                "authorization, content-type, accept, mcp-protocol-version, mcp-session-id",
+                "authorization, content-type, accept, mcp-protocol-version, mcp-session-id, x-payment, x-aether-payment-hash",
             )
             .header(ACCESS_CONTROL_MAX_AGE, "600")
             .body(Body::empty())
@@ -388,10 +435,12 @@ async fn tools_call(
     route_actions: &[RouteActionTool],
     app_dir: &Path,
     params: &Value,
+    payment_headers: PaymentHeaders,
     route_executor: impl Fn(
         RouteActionTool,
         Value,
         beater_agent::ToolCallContext,
+        PaymentHeaders,
     )
         -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>,
 ) -> Result<Value, (i64, String)> {
@@ -443,7 +492,13 @@ async fn tools_call(
     let seq = call.seq;
     let context = call.context;
     let result = if let Some(action) = route_action {
-        route_executor(action, arguments.clone(), context.clone()).await
+        route_executor(
+            action,
+            arguments.clone(),
+            context.clone(),
+            payment_headers.clone(),
+        )
+        .await
     } else {
         registry
             .execute_with_context(name, &arguments, &context)
@@ -537,7 +592,7 @@ fn with_cors(
     headers.insert(VARY, HeaderValue::from_static("origin"));
     headers.insert(
         ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static("www-authenticate"),
+        HeaderValue::from_static("www-authenticate, x-payment, x-aether-payment-hash"),
     );
     response
 }
@@ -561,7 +616,10 @@ mod tests {
     use beater_agent::{Journal, ToolDecl, ToolRegistry};
     use serde_json::{Value, json};
 
-    use super::{AccessConfig, handle_get, handle_options, handle_post, mcp_tool_use_id};
+    use super::{
+        AETHER_PAYMENT_HASH_HEADER, AETHER_PAYMENT_HEADER, AccessConfig, PaymentHeaders,
+        RouteActionTool, handle_get, handle_options, handle_post, mcp_tool_use_id,
+    };
 
     struct TempApp {
         path: PathBuf,
@@ -603,7 +661,7 @@ mod tests {
             app_dir,
             headers,
             body,
-            |_action, _arguments, _context| {
+            |_action, _arguments, _context, _payment_headers| {
                 Pin::from(Box::new(async {
                     anyhow::bail!("test did not configure route action execution")
                 })
@@ -879,6 +937,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tools_call_forwards_aether_payment_headers_to_route_actions() {
+        let app = TempApp::new("route-action-payment-headers");
+        let registry = ToolRegistry::empty();
+        let route_actions = vec![RouteActionTool {
+            name: "billing.checkout".to_string(),
+            description: "Checkout".to_string(),
+            input_schema: json!({"type": "object"}),
+            method: "POST".to_string(),
+            path: "/api/checkout".to_string(),
+            side_effect: "purchase".to_string(),
+            confirm: false,
+            dry_run: false,
+            idempotency_required: false,
+            auth: Value::Null,
+        }];
+        let seen = Arc::new(Mutex::new(PaymentHeaders::default()));
+        let seen_for_executor = Arc::clone(&seen);
+        let mut headers = HeaderMap::new();
+        headers.insert(AETHER_PAYMENT_HEADER, "payment-payload".parse().unwrap());
+        headers.insert(AETHER_PAYMENT_HASH_HEADER, "0x1234".parse().unwrap());
+
+        let response = handle_post(
+            &registry,
+            &route_actions,
+            &AccessConfig::default(),
+            app.path(),
+            &headers,
+            br#"{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"billing.checkout","arguments":{"confirm":true}}}"#,
+            move |_action, _arguments, _context, payment_headers| {
+                let seen = Arc::clone(&seen_for_executor);
+                Pin::from(Box::new(async move {
+                    *seen.lock().unwrap() = payment_headers;
+                    Ok("{\"ok\":true}".to_string())
+                }) as Box<dyn Future<Output = anyhow::Result<String>> + Send>)
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["result"]["isError"], false);
+        let payment_headers = seen.lock().unwrap().clone();
+        assert_eq!(payment_headers.payment.as_deref(), Some("payment-payload"));
+        assert_eq!(payment_headers.payment_hash.as_deref(), Some("0x1234"));
+    }
+
+    #[tokio::test]
     async fn tools_call_journals_successful_tool_execution() {
         let app = TempApp::new("journal-success");
         let registry = ToolRegistry::build(Path::new(""), &[rust_decl("get_time")])
@@ -1079,15 +1183,23 @@ mod tests {
                 .unwrap(),
             "https://ops.example.com"
         );
-        assert!(
-            response
-                .headers()
-                .get("access-control-allow-headers")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .contains("authorization")
-        );
+        let allow_headers = response
+            .headers()
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(allow_headers.contains("authorization"));
+        assert!(allow_headers.contains(AETHER_PAYMENT_HEADER));
+        assert!(allow_headers.contains(AETHER_PAYMENT_HASH_HEADER));
+        let expose_headers = response
+            .headers()
+            .get("access-control-expose-headers")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(expose_headers.contains(AETHER_PAYMENT_HEADER));
+        assert!(expose_headers.contains(AETHER_PAYMENT_HASH_HEADER));
     }
 
     #[test]

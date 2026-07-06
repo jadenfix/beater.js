@@ -289,10 +289,11 @@ async fn handle_mcp_post(
         &state.app_dir,
         &headers,
         &body,
-        move |action, arguments, context| {
+        move |action, arguments, context, payment_headers| {
             let state = action_state.clone();
-            Box::pin(async move { execute_route_action(&state, action, arguments, context).await })
-                as Pin<Box<dyn Future<Output = Result<String>> + Send>>
+            Box::pin(async move {
+                execute_route_action(&state, action, arguments, context, payment_headers).await
+            }) as Pin<Box<dyn Future<Output = Result<String>> + Send>>
         },
     )
     .await
@@ -765,6 +766,7 @@ async fn execute_route_action(
     action: mcp::RouteActionTool,
     arguments: serde_json::Value,
     context: ToolCallContext,
+    payment_headers: mcp::PaymentHeaders,
 ) -> Result<String> {
     if action.confirm && arguments.get("confirm").and_then(|value| value.as_bool()) != Some(true) {
         anyhow::bail!("route action {} requires confirm: true", action.name);
@@ -801,6 +803,7 @@ async fn execute_route_action(
     if let Some(idempotency_key) = &context.idempotency_key {
         headers.insert("idempotency-key".to_string(), idempotency_key.clone());
     }
+    payment_headers.insert_into(&mut headers);
     let request_json = json!({
         "id": NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed).to_string(),
         "method": action.method.clone(),
