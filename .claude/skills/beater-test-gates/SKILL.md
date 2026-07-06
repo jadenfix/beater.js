@@ -139,6 +139,27 @@ scripts/beater-dashboard-trace-gate.cjs
 
 If no sibling Beater checkout exists, set `BEATERD_BIN=/path/to/beaterd`. If the gate fails and you need to inspect its temp app or Beater data directory, rerun with `BEATER_KEEP_GATE_WORKDIR=1`.
 
+To require the rendered dashboard page too, install the dashboard dependencies if needed, run the sibling dashboard against a fixed Beater API port, then run the gate with the probe enabled:
+
+```sh
+cd ../beater/web/dashboard
+npm ci
+NEXT_PUBLIC_BEATER_API_BASE_URL=http://127.0.0.1:18080 \
+  BEATER_API_BASE_URL=http://127.0.0.1:18080 \
+  npm run dev -- --hostname 127.0.0.1 --port 3100
+```
+
+In the beater.js repo:
+
+```sh
+BEATERD_HTTP_PORT=18080 \
+  BEATER_DASHBOARD_PROBE=1 \
+  BEATER_DASHBOARD_URL=http://127.0.0.1:3100 \
+  scripts/beater-dashboard-trace-gate.cjs
+```
+
+That rendered probe passed on 2026-07-06 against the sibling Beater dashboard for an exported run trace with four spans.
+
 ## Deploy gate probe
 
 The deploy proof is `scripts/docker-cold-start-gate.sh`. It builds the release CLI in a Linux Docker builder, runs `beater build` for `examples/hello`, builds the generated Dockerfile, starts the image on a loopback-only published port, checks `/api/health`, and proves `/mcp` rejects unauthenticated calls while accepting bearer-token `tools/list`.

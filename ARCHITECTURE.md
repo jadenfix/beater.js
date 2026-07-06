@@ -136,7 +136,7 @@ CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <
 
 ## 8. Not yet (each with its future path)
 
-- **Full npm ecosystem / node-compat** — server routes can import local ESM packages from `node_modules` with bare specifiers; CommonJS `require`, Node built-ins, package install/build hooks, import maps, and client-side dependency bundling remain.
+- **Full npm ecosystem / node-compat** — server routes can import local ESM packages from `node_modules` with bare specifiers, exact and wildcard `exports`, array export targets, server-side conditions, and `module`/`main` fallbacks; CommonJS `require`, Node built-ins, package install/build hooks, import maps, and client-side dependency bundling remain.
 - **WHATWG fetch classes in routes** — comes with broader npm-compat.
 - **Full RSC** — the chunked isolate→host streaming plumbing, route-scoped client modules, and initial `text/x-component` flight transport are the substrate; add official React Flight client references/manifests after broader npm-compat.
 - **Wasmtime sandbox expansion** — local `wasmtime` tools now run hermetic scalar wasm with empty imports; broader WASI/capability handles for files, sockets, and richer value passing remain future work.
@@ -147,7 +147,7 @@ CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <
 - **Isolate pool production hardening / per-request isolation** — `[app].workers = N` starts N route isolates; smoke tests prove round-robin dispatch, and `scripts/isolate-pool-scaling-gate.cjs` proved 7.65x route throughput on ten local workers. Per-request isolation hardening and worker-count tuning remain production work.
 - **LLM streaming to browser** — provider-adapted LLM streaming, partial-step journal records, protected run list/detail/events endpoints under `/_beater/agent/runs`, and the hello example's recent-run EventSource panel are in place; richer production run-management UI remains.
 - **MCP discovery/SSE + the 2026-07-28 spec** — remote MCP `tools/call`, provider session initialization, and startup `tools/list` schema import via `remoteMcpProvider` are in place; adopt the next transport spec when released.
-- **Observability/evals** — opt-in trace exporters post finished journal runs and steps to Beater native `/v1/traces/native` or OTLP/HTTP `/v1/traces`; local gates prove OTLP collector export and Beater native ingest/read paths used by the dashboard, while rendered beater-agents dashboard proof remains future work.
+- **Observability/evals** — opt-in trace exporters post finished journal runs and steps to Beater native `/v1/traces/native` or OTLP/HTTP `/v1/traces`; local gates prove OTLP collector export, Beater native ingest/read paths used by the dashboard, and a rendered dashboard page for an exported run trace. Beater's tenant-scoped protobuf OTLP ingest remains a separate compatibility target if needed.
 
 ## 9. Milestones
 

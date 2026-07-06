@@ -288,6 +288,16 @@ fn resolve_export_target_with_match(
             }
             Ok(None)
         }
+        Value::Array(targets) => {
+            for target in targets {
+                if let Some(resolved) =
+                    resolve_export_target_with_match(package_dir, target, pattern_match)?
+                {
+                    return Ok(Some(resolved));
+                }
+            }
+            Ok(None)
+        }
         _ => Ok(None),
     }
 }
@@ -843,6 +853,110 @@ mod tests {
             with_browser,
             ModuleSpecifier::from_file_path(app.path().join("node_modules/with-browser/import.js"))
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn package_import_resolves_array_export_targets() {
+        let app = TempDir::new("package-array-export");
+        app.write("app/routes/api/schema.ts", "import value from 'fixture';\n");
+        app.write(
+            "node_modules/fixture/package.json",
+            r#"{
+  "name": "fixture",
+  "type": "module",
+  "exports": {
+    ".": [
+      null,
+      {"browser": "./browser.js"},
+      {"types": "./index.d.ts"},
+      "./index.js"
+    ]
+  }
+}"#,
+        );
+        app.write("node_modules/fixture/index.js", "export default 'array';\n");
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/schema.ts")).unwrap();
+
+        let resolved = resolve_package_import("fixture", referrer.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            resolved,
+            ModuleSpecifier::from_file_path(app.path().join("node_modules/fixture/index.js"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn package_import_resolves_wildcard_array_export_targets() {
+        let app = TempDir::new("package-wildcard-array-export");
+        app.write(
+            "app/routes/api/schema.ts",
+            "import add from 'fixture/features/add';\n",
+        );
+        app.write(
+            "node_modules/fixture/package.json",
+            r#"{
+  "name": "fixture",
+  "type": "module",
+  "exports": {
+    "./features/*": [
+      null,
+      {"browser": "./browser/*.js"},
+      "./dist/*.js"
+    ]
+  }
+}"#,
+        );
+        app.write(
+            "node_modules/fixture/dist/add.js",
+            "export default 'wildcard-array';\n",
+        );
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/schema.ts")).unwrap();
+
+        let resolved = resolve_package_import("fixture/features/add", referrer.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            resolved,
+            ModuleSpecifier::from_file_path(app.path().join("node_modules/fixture/dist/add.js"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn package_import_rejects_array_export_target_escape() {
+        let app = TempDir::new("package-array-escape");
+        app.write("app/routes/api/schema.ts", "import value from 'fixture';\n");
+        app.write(
+            "node_modules/fixture/package.json",
+            r#"{
+  "name": "fixture",
+  "type": "module",
+  "exports": {
+    ".": [
+      {"browser": "./browser.js"},
+      "./../private.js",
+      "./index.js"
+    ]
+  }
+}"#,
+        );
+        app.write("node_modules/private.js", "export default 'outside';\n");
+        app.write("node_modules/fixture/index.js", "export default 'safe';\n");
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/schema.ts")).unwrap();
+
+        let error = resolve_package_import("fixture", referrer.as_str()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("points outside its package"),
+            "{error:#}"
         );
     }
 
