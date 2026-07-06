@@ -84,6 +84,43 @@
     Promise.resolve().then(cb);
   };
 
+  if (!globalThis.process) {
+    const env = Object.freeze({
+      NODE_ENV: "production",
+    });
+    const versions = Object.freeze({
+      node: "0.0.0",
+      v8: "embedded",
+    });
+    const release = Object.freeze({
+      name: "beater",
+    });
+    const processShim = Object.freeze({
+      env,
+      versions,
+      release,
+      version: "v0.0.0",
+      platform: "beater",
+      arch: "wasm32",
+      browser: false,
+      cwd() {
+        return "/";
+      },
+      nextTick(callback, ...args) {
+        if (typeof callback !== "function") {
+          throw new TypeError("process.nextTick callback must be a function");
+        }
+        queueMicrotask(() => callback(...args));
+      },
+    });
+    Object.defineProperty(globalThis, "process", {
+      value: processShim,
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
   globalThis.performance ??= { now: () => Date.now() };
 
   // Minimal UTF-8 TextEncoder — enough for React SSR and stream chunk

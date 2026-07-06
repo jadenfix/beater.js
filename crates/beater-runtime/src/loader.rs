@@ -53,6 +53,7 @@ fn vendor_specifier(specifier: &str) -> Option<&'static str> {
         "react/jsx-runtime" | "react/jsx-dev-runtime" => Some("beater:vendor/react-jsx-runtime"),
         "react-dom/server" => Some("beater:vendor/react-dom-server"),
         "node:buffer" | "buffer" => Some("beater:vendor/node-buffer"),
+        "node:process" | "process" => Some("beater:vendor/node-process"),
         _ => None,
     }
 }
@@ -68,6 +69,7 @@ fn vendor_source(specifier: &str) -> Option<&'static str> {
             Some(include_str!("../assets/vendor/react-dom-server.mjs"))
         }
         "beater:vendor/node-buffer" => Some(include_str!("../assets/vendor/node-buffer.mjs")),
+        "beater:vendor/node-process" => Some(include_str!("../assets/vendor/node-process.mjs")),
         _ => None,
     }
 }
@@ -1379,12 +1381,37 @@ mod tests {
     }
 
     #[test]
+    fn node_process_vendor_specifiers_resolve_to_checked_in_shim() {
+        assert_eq!(
+            super::vendor_specifier("node:process"),
+            Some("beater:vendor/node-process")
+        );
+        assert_eq!(
+            super::vendor_specifier("process"),
+            Some("beater:vendor/node-process")
+        );
+
+        let source = super::vendor_source("beater:vendor/node-process").unwrap();
+        assert!(source.contains("NODE_ENV: \"production\""));
+        assert!(source.contains("export default process"));
+    }
+
+    #[test]
     fn node_buffer_vendor_module_loads_from_beater_scheme() {
         let specifier = ModuleSpecifier::parse("beater:vendor/node-buffer").unwrap();
         let source = source_text(load_sync(&specifier).unwrap());
 
         assert!(source.contains("Buffer.from"));
         assert!(source.contains("Buffer.concat"));
+    }
+
+    #[test]
+    fn node_process_vendor_module_loads_from_beater_scheme() {
+        let specifier = ModuleSpecifier::parse("beater:vendor/node-process").unwrap();
+        let source = source_text(load_sync(&specifier).unwrap());
+
+        assert!(source.contains("process.nextTick"));
+        assert!(source.contains("globalThis.process"));
     }
 
     #[test]

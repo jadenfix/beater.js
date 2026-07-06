@@ -1,6 +1,6 @@
 ---
 name: beater-test-gates
-description: Select and run beater.js verification gates on this local macOS workspace, including docs-only checks, focused Cargo tests, browser/provider gates, deploy gates, and the PyO3 configuration needed for embedded Python tests.
+description: Select and run beater.js verification gates on this local macOS workspace, including docs-only checks, focused Cargo tests, npm/node compatibility, LLM provider conformance, browser/provider gates, deploy gates, CI queue checks, and the PyO3 configuration needed for embedded Python tests.
 ---
 
 # beater.js test gates
@@ -15,11 +15,13 @@ Pick the smallest gate that proves the risk, then escalate only when the risk cr
 - Rust library or CLI logic: run the focused package/test first, then full workspace gate if the touched path is broad.
 - Python, PyO3, or embedded tool behavior: use the PyO3 config shown below so tests link the intended framework.
 - V8 route/SSR/RSC/client behavior: use the focused Cargo test plus the relevant script gate in `scripts/`.
+- npm/node compatibility: run `scripts/npm-compat-gate.sh` after loader, resolver, builtin shim, `.cjs`, or import-map work.
+- LLM provider plumbing: run `scripts/llm-provider-conformance-gate.cjs` for local Anthropic and OpenAI-compatible mock proof; run the live smoke gate only when a funded key/model is configured.
 - Browser provider behavior: run the browser provider gate because helper-only tests do not prove the real Playwright path.
 - Deploy/build behavior: run the Docker cold-start gate or wait for CI, because `beater build` claims must prove the generated bundle/image path.
 - Security/network/control-plane behavior: prove the production call path with auth, origin/host, timeout, retry, and denial cases.
 
-Record ordinary PR evidence in the PR body after the command has passed. Update `final.md` only when the evidence changes a durable completion claim. If a gate is intentionally not run, name the missing external dependency or cost.
+Record ordinary PR evidence in the PR body after the command has passed. Update `final.md` only when the evidence changes a durable completion claim and cite the exact command, artifact, commit, or CI run that proves it. If a gate is intentionally not run, name the missing external dependency or cost.
 
 ## Full workspace gate
 
@@ -35,11 +37,14 @@ printf '%s\n' \
   'lib_name=python3.9' \
   'lib_dir=/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib' \
   'executable=/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9' > "$tmp_config"
-cargo fmt --check
+cargo fmt --all -- --check
 git diff --check
 PYO3_CONFIG_FILE="$tmp_config" \
   DYLD_FRAMEWORK_PATH=/Library/Developer/CommandLineTools/Library/Frameworks \
-  cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+PYO3_CONFIG_FILE="$tmp_config" \
+  DYLD_FRAMEWORK_PATH=/Library/Developer/CommandLineTools/Library/Frameworks \
+  cargo test --workspace
 rm -f "$tmp_config"
 ```
 
@@ -88,6 +93,77 @@ scripts/playwright-browser-gate.cjs
 ```
 
 If the gate fails and you need to inspect its temp app/journal, rerun with `BEATER_KEEP_GATE_WORKDIR=1`.
+
+## npm/node compatibility gate
+
+`scripts/npm-compat-gate.sh` is the local e2e proof for the current server-side npm/node wedge. It scaffolds a temp app, installs `zod`, verifies bare ESM package imports, app-local import-map aliases, leaf `.cjs` default wrapping, supported vendored Node built-ins such as `node:buffer`/`buffer` and sanitized `node:process`/`process`, and fail-closed unsupported `require()`.
+
+Build the local binary with the PyO3 settings first, then run the gate:
+
+```sh
+tmp_config=$(mktemp /tmp/beater-pyo3-config.XXXXXX)
+printf '%s\n' \
+  'implementation=CPython' \
+  'version=3.9' \
+  'shared=true' \
+  'abi3=false' \
+  'lib_name=python3.9' \
+  'lib_dir=/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib' \
+  'executable=/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9' > "$tmp_config"
+PYO3_CONFIG_FILE="$tmp_config" \
+  DYLD_FRAMEWORK_PATH=/Library/Developer/CommandLineTools/Library/Frameworks \
+  cargo build --bin beater
+rm -f "$tmp_config"
+scripts/npm-compat-gate.sh
+```
+
+The script handles the Darwin `DYLD_FRAMEWORK_PATH` needed by the built CLI. If it fails and you need the temp app, rerun with `BEATER_KEEP_GATE_WORKDIR=1`.
+
+## LLM provider gates
+
+`scripts/llm-provider-conformance-gate.cjs` is the local provider-contract proof. It runs the real CLI against local Anthropic and OpenAI-compatible SSE mocks, verifies request/response shape, provider-specific headers, retry/error behavior, and avoids requiring live credentials.
+
+Build the local binary with the PyO3 settings first, then run:
+
+```sh
+tmp_config=$(mktemp /tmp/beater-pyo3-config.XXXXXX)
+printf '%s\n' \
+  'implementation=CPython' \
+  'version=3.9' \
+  'shared=true' \
+  'abi3=false' \
+  'lib_name=python3.9' \
+  'lib_dir=/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib' \
+  'executable=/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9' > "$tmp_config"
+PYO3_CONFIG_FILE="$tmp_config" \
+  DYLD_FRAMEWORK_PATH=/Library/Developer/CommandLineTools/Library/Frameworks \
+  cargo build --bin beater
+rm -f "$tmp_config"
+scripts/llm-provider-conformance-gate.cjs
+```
+
+`scripts/llm-live-provider-smoke.cjs` and `scripts/m2-live-gate.sh` are the funded-provider proofs. Before running either, check that the selected provider has a real key and model configured, and do not print secret values:
+
+```sh
+for name in \
+  ANTHROPIC_API_KEY \
+  BEATER_LLM_PROVIDER \
+  BEATER_LLM_MODEL \
+  BEATER_OPENAI_API_KEY \
+  OPENAI_API_KEY \
+  BEATER_OPENAI_BASE_URL \
+  BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL; do
+  if [ -n "${!name:-}" ]; then
+    printf '%s=set\n' "$name"
+  else
+    printf '%s=unset\n' "$name"
+  fi
+done
+scripts/llm-live-provider-smoke.cjs
+scripts/m2-live-gate.sh
+```
+
+If the required key/model is absent, record the gate as not run because a funded provider credential is missing. Do not mark M2 live evidence complete in `final.md` from mock-only output.
 
 ## OTLP trace gate
 
@@ -176,7 +252,21 @@ The Docker gate needs roughly 12 GiB free by default. It is safe to run `cargo c
 
 CI sets `BEATER_DOCKER_COLD_START_MS=3000` to avoid runner-scheduling flakes while preserving the cold-container proof. Local runs default to `1000`.
 
+## Post-push CI and queue check
+
+After pushing to `main`, prove the branch is still clean and no repo queue remains open:
+
+```sh
+git status --short --branch
+gh run list --repo jadenfix/beater.js --branch main --limit 3 --json databaseId,status,conclusion,headSha,displayTitle,url
+gh run watch <run-id> --repo jadenfix/beater.js --exit-status
+gh issue list --repo jadenfix/beater.js --state open --json number,title,url
+gh pr list --repo jadenfix/beater.js --state open --json number,title,url
+```
+
+Use the newest run for the pushed commit. If CI is still in progress, keep watching until it reaches success or a concrete failure is available to debug.
+
 ## Known local blockers
 
 - Docker Desktop may fail locally with a missing daemon socket or containerd metadata I/O errors; do not treat that as proof the Docker cold-start gate is good or bad.
-- Live Anthropic gates require `ANTHROPIC_API_KEY`; without it, only mock/unit/smoke coverage can run.
+- Live provider gates require a funded key and model for the selected provider; without them, only mock/unit/conformance coverage can run.

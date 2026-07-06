@@ -1027,6 +1027,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn bootstrap_process_global_is_sanitized_and_drives_next_tick() {
+        let mut runtime = runtime_with_bootstrap();
+        let promise = runtime
+            .execute_script(
+                "beater:process-global",
+                r#"
+                (async () => {
+                const assert = (condition, message) => {
+                  if (!condition) throw new Error(message);
+                };
+                assert(process === globalThis.process, "process global identity");
+                assert(process.env.NODE_ENV === "production", "NODE_ENV should be production");
+                assert(process.env.ANTHROPIC_API_KEY === undefined, "host env must not leak");
+                assert(Object.isFrozen(process.env), "process.env should be immutable");
+                assert(process.cwd() === "/", "cwd should be synthetic");
+                assert(process.versions.node === "0.0.0", "node version should be shimmed");
+
+                const order = [];
+                process.nextTick((value) => order.push(value), "tick");
+                order.push("sync");
+                await Promise.resolve();
+                assert(order.join(",") === "sync,tick", `nextTick order ${order}`);
+                })()
+                "#,
+            )
+            .expect("process global regression script");
+        let resolved = runtime.resolve(promise);
+        runtime
+            .with_event_loop_promise(resolved, PollEventLoopOptions::default())
+            .await
+            .expect("process global regression should pass");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn stream_chunk_op_waits_for_bounded_channel_capacity() {
         let mut runtime = runtime_with_bootstrap();
         let (tx, mut rx) = stream_body_channel();

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Prove the Phase C npm/node-compat wedge: a route can import a real ESM
-# package, a leaf CommonJS default export, and a first Node built-in shim from
-# node_modules with bare specifiers, while unsupported CommonJS require() fails
-# closed.
+# package, a leaf CommonJS default export, and server-side Node built-in shims
+# from node_modules with bare specifiers, while unsupported CommonJS require()
+# fails closed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -88,6 +88,37 @@ export function encode(value) {
 }
 JS
 
+mkdir -p "$APP/node_modules/processed"
+cat >"$APP/node_modules/processed/package.json" <<'JSON'
+{
+  "name": "processed",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  }
+}
+JSON
+
+cat >"$APP/node_modules/processed/index.js" <<'JS'
+import process, { env, nextTick } from "node:process";
+
+export async function inspect() {
+  const order = [];
+  nextTick((value) => order.push(value), "tick");
+  order.push("sync");
+  await Promise.resolve();
+  return {
+    nodeEnv: env.NODE_ENV,
+    secretVisible: env.ANTHROPIC_API_KEY !== undefined,
+    frozenEnv: Object.isFrozen(env),
+    sameGlobal: globalThis.process === process,
+    cwd: process.cwd(),
+    version: process.versions.node,
+    order,
+  };
+}
+JS
+
 cat >"$APP/app/routes/api/zod.ts" <<'TS'
 import { z } from "zod";
 
@@ -138,6 +169,18 @@ export function GET() {
     status: 200,
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(encode("beater")),
+  };
+}
+TS
+
+cat >"$APP/app/routes/api/processed.ts" <<'TS'
+import { inspect } from "processed";
+
+export async function GET() {
+  return {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(await inspect()),
   };
 }
 TS
@@ -223,6 +266,26 @@ if buffer_payload != expected_buffer:
     sys.exit(f"unexpected /api/buffered payload: {buffer_payload!r}")
 
 conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+conn.request("GET", "/api/processed")
+response = conn.getresponse()
+body = response.read().decode("utf-8")
+conn.close()
+if response.status != 200:
+    sys.exit(f"expected 200 from /api/processed, got {response.status}: {body}")
+process_payload = json.loads(body)
+expected_process = {
+    "nodeEnv": "production",
+    "secretVisible": False,
+    "frozenEnv": True,
+    "sameGlobal": True,
+    "cwd": "/",
+    "version": "0.0.0",
+    "order": ["sync", "tick"],
+}
+if process_payload != expected_process:
+    sys.exit(f"unexpected /api/processed payload: {process_payload!r}")
+
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
 conn.request("GET", "/api/cjs-require")
 response = conn.getresponse()
 body = response.read().decode("utf-8")
@@ -236,6 +299,7 @@ print(
     f"zod import returned {zod_payload['value']}; "
     f"cjs doubled {cjs_payload['doubled']}; "
     f"buffer base64 {buffer_payload['base64']}; "
+    f"process env {process_payload['nodeEnv']}; "
     "require failed closed"
 )
 PY
