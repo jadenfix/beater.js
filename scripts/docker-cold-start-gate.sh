@@ -160,6 +160,7 @@ PORT=$(free_port)
 start=$(now_ms)
 CID=$(docker run -d \
   -e "BEATER_MCP_TOKEN=$MCP_TOKEN" \
+  -e "BEATER_BASE_URL=http://127.0.0.1:$PORT" \
   -p "127.0.0.1:$PORT:3000" \
   "$IMAGE")
 
