@@ -81,8 +81,27 @@ function startFixtureServer() {
 <html>
   <head><title>Beater Playwright Gate</title></head>
   <body>
-    <main id="checkout">checkout ready</main>
+    <main id="checkout">checkout locked</main>
+    <label>Password <input id="password" type="password" /></label>
     <button id="checkout-button">Pay</button>
+    <script>
+      const checkout = document.querySelector("#checkout");
+      const password = document.querySelector("#password");
+      if (sessionStorage.getItem("checkoutAuth") === "ok") {
+        checkout.textContent = "authenticated checkout ready";
+      }
+      password.addEventListener("input", () => {
+        if (password.value.length > 0) {
+          sessionStorage.setItem("checkoutAuth", "ok");
+          checkout.textContent = "authenticated checkout ready";
+        }
+      });
+      document.querySelector("#checkout-button").addEventListener("click", () => {
+        checkout.textContent = sessionStorage.getItem("checkoutAuth") === "ok"
+          ? "authenticated checkout ready"
+          : "checkout denied";
+      });
+    </script>
   </body>
 </html>`);
   });
@@ -167,7 +186,18 @@ function startAnthropicServer(fixtureBase) {
       content: [
         {
           type: "tool_use",
-          id: "toolu_playwright_gate",
+          id: "toolu_playwright_gate_password",
+          name: "browser.checkout",
+          input: {
+            url: fixtureBase,
+            action: "type",
+            selector: "#password",
+            textSecret: "password",
+          },
+        },
+        {
+          type: "tool_use",
+          id: "toolu_playwright_gate_click",
           name: "browser.checkout",
           input: {
             url: fixtureBase,
@@ -247,6 +277,9 @@ export default defineAgent({
       },
       session: {scope: "run", cleanup: "always"},
       allowedOrigins: ["${allowedOrigin}"],
+      secrets: {
+        password: {type: "env", env: "BEATER_GATE_BROWSER_PASSWORD"},
+      },
       timeoutMs: 30000,
       idempotent: false,
     }),
@@ -274,6 +307,7 @@ async function main() {
       ANTHROPIC_API_KEY: "test-key",
       ANTHROPIC_BASE_URL: anthropic.base,
       BEATER_PLAYWRIGHT_RUNNER: runner,
+      BEATER_GATE_BROWSER_PASSWORD: "gate-password",
     };
     if (process.platform === "darwin" && !env.DYLD_FRAMEWORK_PATH) {
       env.DYLD_FRAMEWORK_PATH = macPythonFrameworkPath;
@@ -297,8 +331,11 @@ async function main() {
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-    if (rows.length !== 2) {
-      throw new Error(`expected two browser tool rows, saw ${rows.length}: ${stdout}`);
+    if (rows.length !== 3) {
+      throw new Error(`expected three browser tool rows, saw ${rows.length}: ${stdout}`);
+    }
+    if (JSON.stringify(rows).includes("gate-password")) {
+      throw new Error("browser secret leaked into journal rows");
     }
     const payloads = rows.map((row) => {
       const toolResult = JSON.parse(row.result);
@@ -323,9 +360,17 @@ async function main() {
       payloads[0].session?.calls !== 1 ||
       payloads[0].session?.reused !== false ||
       payloads[1].session?.calls !== 2 ||
-      payloads[1].session?.reused !== true
+      payloads[1].session?.reused !== true ||
+      payloads[2].session?.calls !== 3 ||
+      payloads[2].session?.reused !== true
     ) {
       throw new Error(`browser session was not reused: ${JSON.stringify(payloads)}`);
+    }
+    if (payloads[0].outcome?.action?.args?.text !== "<redacted:password>") {
+      throw new Error(`browser secret action was not redacted: ${JSON.stringify(payloads[0])}`);
+    }
+    if (!String(payloads[2].text ?? "").includes("authenticated checkout ready")) {
+      throw new Error(`authenticated checkout state missing: ${JSON.stringify(payloads[2])}`);
     }
     if (anthropic.requests.length !== 2) {
       throw new Error(`expected 2 Anthropic requests, saw ${anthropic.requests.length}`);

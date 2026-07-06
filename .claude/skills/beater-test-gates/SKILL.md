@@ -52,7 +52,7 @@ PYO3_CONFIG_FILE="$tmp_config" \
 
 ## Browser provider gate
 
-`scripts/playwright-browser-gate.cjs` is the live provider proof for `browserTool(..., {provider: "playwright"})`. It installs the upstream Playwright runner dependencies in a temp directory, starts a local browser fixture and Anthropic-compatible SSE mock, runs `beater agent run`, and verifies two completed Chromium tool results reused one run-scoped session in SQLite.
+`scripts/playwright-browser-gate.cjs` is the live provider proof for `browserTool(..., {provider: "playwright"})`. It installs the upstream Playwright runner dependencies in a temp directory, starts a local authenticated browser fixture and Anthropic-compatible SSE mock, runs `beater agent run`, and verifies three completed Chromium tool results reused one run-scoped session without leaking the password in SQLite.
 
 Build the local binary with the same PyO3 settings first, then run the gate:
 

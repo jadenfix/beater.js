@@ -153,15 +153,14 @@ Implemented behavior:
 - app-scoped Playwright runs write per-session runner markers under `.beater/browser-sessions`; `beater agent resume` removes stale markers and terminates marked runners for the run before replay/review
 - `provider: "playwright"` reuses the pinned upstream `beater-browser` / `beater-browser-playwright` crates and launches Chromium through the upstream Node runner
 - the Playwright input path supports `input.url` plus one optional driver action such as `click`, `type`, `extract`, `wait`, `scroll`, `select`, or `goto`
-- non-empty `secrets` are rejected by `mock_cdp` and `playwright`; credential scoping remains production work
+- browser `secrets` support named env-backed sources; `type` actions can use `textSecret` to resolve the secret at execution time while journal/result action payloads stay redacted
 - a mocked agent-loop test proves an agent can complete a browser task through a tool declaration
-- `scripts/playwright-browser-gate.cjs` installs the upstream runner dependencies in a temp directory, runs a local browser fixture plus Anthropic-compatible SSE mock, and verifies two completed `playwright` tool results reused one run-scoped session in the journal
+- `scripts/playwright-browser-gate.cjs` installs the upstream runner dependencies in a temp directory, runs a local authenticated browser fixture plus Anthropic-compatible SSE mock, and verifies completed `playwright` tool results reused one run-scoped session without leaking the password in the journal
 - destructive actions require non-idempotent handling or explicit review semantics
 
 Production Playwright/CDP release criteria:
 
-- credentials are scoped to the provider/session
-- richer browser e2e tests cover authenticated actions and credential use
+- richer credential modes such as cookies or extra HTTP headers are scoped to the provider/session when added
 
 ## Coexistence
 

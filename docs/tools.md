@@ -151,7 +151,7 @@ Use `idempotent: false` for tools that send email, charge money, mutate external
 
 ## Integration roadmap
 
-Remote MCP servers and browser-control providers enter through the same registry shape: name, description, input schema, implementation kind, timeout/retry policy, secret source, egress allowlist, and idempotency. They should not bypass the journal. Remote MCP tools are mock-server tested. Browser tools include a mock CDP provider for contract, cleanup, and agent-loop tests plus a Playwright provider with a real-browser gate; production Playwright/CDP work still needs scoped credentials and authenticated e2e coverage.
+Remote MCP servers and browser-control providers enter through the same registry shape: name, description, input schema, implementation kind, timeout/retry policy, secret source, egress allowlist, and idempotency. They should not bypass the journal. Remote MCP tools are mock-server tested. Browser tools include a mock CDP provider for contract, cleanup, and agent-loop tests plus a Playwright provider with a real-browser authenticated gate; richer cookie/header credential modes remain future production work.
 
 ## Remote MCP tools
 
@@ -219,8 +219,10 @@ For native browser execution, set `provider: "playwright"`. The Playwright provi
 
 The optional action also accepts the upstream driver shape, for example `{"action": {"action": "type", "args": {"selector": "#email", "text": "a@example.com"}}}`. Install the upstream runner dependencies before live use; default tests do not launch Playwright.
 
-Browser tools default to non-idempotent because they create sessions and may perform side effects. `allowedOrigins` is enforced before navigation. With `session: {scope: "run", cleanup: "always"}`, browser tool results use the journal run id as the session id and reuse that session across multiple browser calls in the same run. Sessions are closed when an agent run or synthetic MCP run reaches a terminal state. App-scoped Playwright runs also write runner markers under `.beater/browser-sessions`; `beater agent resume` removes stale markers and terminates marked runners for the run before replay/review. `mock_cdp` and `playwright` currently reject non-empty `secrets`; credential scoping remains production work.
+Browser tools default to non-idempotent because they create sessions and may perform side effects. `allowedOrigins` is enforced before navigation. With `session: {scope: "run", cleanup: "always"}`, browser tool results use the journal run id as the session id and reuse that session across multiple browser calls in the same run. Sessions are closed when an agent run or synthetic MCP run reaches a terminal state. App-scoped Playwright runs also write runner markers under `.beater/browser-sessions`; `beater agent resume` removes stale markers and terminates marked runners for the run before replay/review.
 
-Run `scripts/playwright-browser-gate.cjs` for the live provider proof. It installs the upstream Playwright runner dependencies in a temp directory, drives a real Chromium session through `beater agent run`, and verifies two completed browser tool results reused one run-scoped session in the journal.
+Browser `secrets` may name env-backed values, for example `secrets: {password: {type: "env", env: "SHOP_PASSWORD"}}`. A `type` action can use `textSecret: "password"` instead of `text`; beater reads the environment value at execution time, passes it only to the browser action, and records the result action as `"<redacted:password>"`.
+
+Run `scripts/playwright-browser-gate.cjs` for the live provider proof. It installs the upstream Playwright runner dependencies in a temp directory, drives an authenticated real Chromium session through `beater agent run`, and verifies three completed browser tool results reused one run-scoped session without leaking the password in the journal.
 
 See [Integration Registry](integrations.md) for the full contract and target declaration shapes.

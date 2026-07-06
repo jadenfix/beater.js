@@ -1278,6 +1278,7 @@ pub struct BrowserTool {
     allowed_origins: Vec<String>,
     sessions: Arc<AsyncMutex<HashMap<String, BrowserSessionState>>>,
     store: Option<Arc<BrowserSessionStore>>,
+    secrets: BrowserSecrets,
 }
 
 enum BrowserSessionState {
@@ -1309,6 +1310,22 @@ enum BrowserSessionScope {
 
 enum BrowserSessionCleanup {
     Always,
+}
+
+#[derive(Clone, Default)]
+struct BrowserSecrets {
+    sources: HashMap<String, BrowserSecretSource>,
+}
+
+#[derive(Clone)]
+struct BrowserSecretSource {
+    env: String,
+}
+
+#[derive(Debug)]
+struct ResolvedBrowserAction {
+    action: BrowserAction,
+    redacted: BrowserAction,
 }
 
 enum RemoteMcpAuth {
@@ -1382,16 +1399,7 @@ impl BrowserTool {
             .map(|origin| canonical_origin(origin))
             .collect::<Result<Vec<_>>>()
             .with_context(|| format!("browser tool {} has invalid allowedOrigins", decl.name))?;
-        if !browser_secrets_empty(&decl.secrets) {
-            let provider_name = match provider {
-                BrowserProvider::MockCdp => "mock_cdp",
-                BrowserProvider::Playwright => "playwright",
-            };
-            bail!(
-                "browser tool {} provider {provider_name} does not support secrets",
-                decl.name
-            );
-        }
+        let secrets = BrowserSecrets::from_decl(&decl.name, &decl.secrets)?;
         Ok(Self {
             provider,
             timeout: Duration::from_millis(timeout_ms),
@@ -1399,6 +1407,7 @@ impl BrowserTool {
             allowed_origins,
             sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             store,
+            secrets,
         })
     }
 
@@ -1490,8 +1499,12 @@ impl BrowserTool {
             .context("playwright browser tool requires string input.url")?;
         self.ensure_url_allowed(url)?;
 
-        let action = browser_action_from_input(input)?;
-        if let Some(BrowserAction::Goto { url }) = &action {
+        let action = browser_action_from_input_with_secrets(input, &self.secrets)?;
+        if let Some(ResolvedBrowserAction {
+            action: BrowserAction::Goto { url },
+            ..
+        }) = &action
+        {
             self.ensure_url_allowed(url)?;
         }
         if self.session.is_persistent(context) {
@@ -1527,7 +1540,7 @@ impl BrowserTool {
             *calls += 1;
             let calls = *calls;
             return self
-                .execute_playwright_with_driver(driver, input, session_id, calls, reused)
+                .execute_playwright_with_driver(driver, input, session_id, calls, reused, action)
                 .await;
         }
 
@@ -1543,7 +1556,7 @@ impl BrowserTool {
             }
         };
         let result = self
-            .execute_playwright_with_driver(&mut driver, input, guard.id(), 1, false)
+            .execute_playwright_with_driver(&mut driver, input, guard.id(), 1, false, action)
             .await;
         let close_result = driver.close().await.map_err(anyhow::Error::new);
         if let Some(lease) = &lease {
@@ -1564,20 +1577,23 @@ impl BrowserTool {
         session_id: &str,
         calls: u64,
         reused: bool,
+        action: Option<ResolvedBrowserAction>,
     ) -> Result<String> {
         let url = input
             .get("url")
             .and_then(Value::as_str)
             .context("playwright browser tool requires string input.url")?;
-        let action = browser_action_from_input(input)?;
         let result = async {
             let mut observation = driver.goto(url).await.map_err(anyhow::Error::new)?;
             let mut outcome = None;
             if let Some(action) = action {
-                let step_outcome = driver.act(&action).await.map_err(anyhow::Error::new)?;
+                let step_outcome = driver
+                    .act(&action.action)
+                    .await
+                    .map_err(anyhow::Error::new)?;
                 observation = step_outcome.observation.clone();
                 outcome = Some(json!({
-                    "action": action,
+                    "action": action.redacted,
                     "status": browser_step_status(&step_outcome),
                     "error": step_outcome.error,
                     "grounding": step_outcome.grounding,
@@ -1670,6 +1686,131 @@ fn non_empty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+impl BrowserSecrets {
+    fn from_decl(tool_name: &str, value: &Value) -> Result<Self> {
+        if matches!(value, Value::Null)
+            || value
+                .as_object()
+                .map(serde_json::Map::is_empty)
+                .unwrap_or(false)
+        {
+            return Ok(Self::default());
+        }
+        let object = value
+            .as_object()
+            .with_context(|| format!("browser tool {tool_name} secrets must be an object"))?;
+        let mut sources = HashMap::new();
+        for (name, spec) in object {
+            let name = name.trim();
+            ensure!(
+                !name.is_empty(),
+                "browser tool {tool_name} secret names must not be empty"
+            );
+            let env = browser_secret_env(tool_name, name, spec)?;
+            sources.insert(name.to_string(), BrowserSecretSource { env });
+        }
+        Ok(Self { sources })
+    }
+
+    fn resolve(&self, name: &str) -> Result<String> {
+        let source = self
+            .sources
+            .get(name)
+            .with_context(|| format!("browser action referenced unknown secret {name:?}"))?;
+        non_empty_env(&source.env)
+            .with_context(|| format!("browser secret {name:?} env {} is missing", source.env))
+    }
+}
+
+fn browser_secret_env(tool_name: &str, name: &str, spec: &Value) -> Result<String> {
+    let env = match spec {
+        Value::String(env) => env.as_str(),
+        Value::Object(object) => {
+            let kind = object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("env");
+            ensure!(
+                kind == "env",
+                "browser tool {tool_name} secret {name:?} unsupported type {kind:?}; supported type: env"
+            );
+            object
+                .get("env")
+                .and_then(Value::as_str)
+                .with_context(|| {
+                    format!("browser tool {tool_name} secret {name:?} requires string env")
+                })?
+        }
+        _ => bail!("browser tool {tool_name} secret {name:?} must be a string env or object"),
+    }
+    .trim();
+    ensure!(
+        !env.is_empty(),
+        "browser tool {tool_name} secret {name:?} env must not be empty"
+    );
+    Ok(env.to_string())
+}
+
+fn browser_action_from_input_with_secrets(
+    input: &Value,
+    secrets: &BrowserSecrets,
+) -> Result<Option<ResolvedBrowserAction>> {
+    let Some(action_value) = input.get("action") else {
+        return Ok(None);
+    };
+    if let Some(secret_name) = browser_type_secret_name(action_value, input)? {
+        let selector = browser_type_selector(action_value, input)?.to_string();
+        let text = secrets.resolve(secret_name)?;
+        let redacted_text = format!("<redacted:{secret_name}>");
+        return Ok(Some(ResolvedBrowserAction {
+            action: BrowserAction::Type {
+                selector: selector.clone(),
+                text,
+            },
+            redacted: BrowserAction::Type {
+                selector,
+                text: redacted_text,
+            },
+        }));
+    }
+    let action = browser_action_from_input(input)?;
+    Ok(action.map(|action| ResolvedBrowserAction {
+        redacted: action.clone(),
+        action,
+    }))
+}
+
+fn browser_type_secret_name<'a>(
+    action_value: &'a Value,
+    input: &'a Value,
+) -> Result<Option<&'a str>> {
+    if action_value.as_str() == Some("type") {
+        return Ok(input.get("textSecret").and_then(Value::as_str));
+    }
+    if action_value.is_object() {
+        let verb = action_value
+            .get("type")
+            .or_else(|| action_value.get("action"))
+            .and_then(Value::as_str);
+        if verb == Some("type") {
+            let source = action_value.get("args").unwrap_or(action_value);
+            return Ok(source
+                .get("textSecret")
+                .or_else(|| source.get("text_secret"))
+                .and_then(Value::as_str));
+        }
+    }
+    Ok(None)
+}
+
+fn browser_type_selector<'a>(action_value: &'a Value, input: &'a Value) -> Result<&'a str> {
+    if action_value.as_str() == Some("type") {
+        return required_browser_str(input, "selector");
+    }
+    let source = action_value.get("args").unwrap_or(action_value);
+    required_browser_str(source, "selector")
 }
 
 fn browser_action_from_input(input: &Value) -> Result<Option<BrowserAction>> {
@@ -2650,14 +2791,6 @@ fn origin_from_url(raw_url: &str) -> Result<String> {
     ))
 }
 
-fn browser_secrets_empty(secrets: &Value) -> bool {
-    matches!(secrets, Value::Null)
-        || secrets
-            .as_object()
-            .map(serde_json::Map::is_empty)
-            .unwrap_or(false)
-}
-
 fn egress_allows(endpoint: &reqwest::Url, egress: &[String]) -> bool {
     let Some(host) = endpoint.host_str() else {
         return false;
@@ -2758,8 +2891,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        BrowserSessionGuard, BrowserSessionStore, ToolCallContext, ToolDecl, ToolImpl,
-        ToolNeedsReview, ToolRegistry, browser_action_from_input, browser_session_active_for_tests,
+        BrowserSecrets, BrowserSessionGuard, BrowserSessionStore, ToolCallContext, ToolDecl,
+        ToolImpl, ToolNeedsReview, ToolRegistry, browser_action_from_input,
+        browser_action_from_input_with_secrets, browser_session_active_for_tests,
         browser_session_count_for_tests,
     };
 
@@ -3258,7 +3392,7 @@ def run(input):
     }
 
     #[test]
-    fn browser_playwright_provider_builds_and_rejects_secrets() {
+    fn browser_playwright_provider_builds_and_accepts_scoped_secrets() {
         let mut decl = browser_decl();
         decl.provider = Some("playwright".to_string());
         ToolRegistry::build(PathBuf::new().as_path(), &[decl])
@@ -3266,15 +3400,96 @@ def run(input):
 
         let mut decl = browser_decl();
         decl.provider = Some("playwright".to_string());
-        decl.secrets = json!({"cookies": "BROWSER_COOKIES"});
+        decl.secrets = json!({"password": {"type": "env", "env": "SHOP_PASSWORD"}});
+        ToolRegistry::build(PathBuf::new().as_path(), &[decl])
+            .expect("playwright browser registry should accept env-scoped secrets");
+
+        let mut decl = browser_decl();
+        decl.provider = Some("playwright".to_string());
+        decl.secrets = json!({"password": {"type": "literal", "value": "secret"}});
         let error = match ToolRegistry::build(PathBuf::new().as_path(), &[decl]) {
-            Ok(_) => panic!("playwright provider should reject unscoped secrets"),
+            Ok(_) => panic!("browser provider should reject unsupported secret source types"),
             Err(error) => error,
         };
         assert!(
-            format!("{error:#}").contains("provider playwright does not support secrets"),
+            format!("{error:#}").contains("unsupported type"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn browser_type_action_resolves_secret_and_redacts_result_action() {
+        let env = unique_env("BEATER_BROWSER_SECRET");
+        unsafe {
+            std::env::set_var(&env, "correct horse battery staple");
+        }
+        let secrets = BrowserSecrets::from_decl(
+            "browser.checkout",
+            &json!({"password": {"env": env.clone()}}),
+        )
+        .unwrap();
+
+        let action = browser_action_from_input_with_secrets(
+            &json!({
+                "action": "type",
+                "selector": "#password",
+                "textSecret": "password"
+            }),
+            &secrets,
+        )
+        .unwrap()
+        .expect("action should resolve");
+
+        assert_eq!(
+            action.action,
+            BrowserAction::Type {
+                selector: "#password".to_string(),
+                text: "correct horse battery staple".to_string(),
+            }
+        );
+        assert_eq!(
+            action.redacted,
+            BrowserAction::Type {
+                selector: "#password".to_string(),
+                text: "<redacted:password>".to_string(),
+            }
+        );
+        let nested = browser_action_from_input_with_secrets(
+            &json!({
+                "action": {
+                    "action": "type",
+                    "args": {"selector": "#password", "textSecret": "password"}
+                }
+            }),
+            &secrets,
+        )
+        .unwrap()
+        .expect("nested action should resolve");
+        assert_eq!(nested.action, action.action);
+        assert_eq!(nested.redacted, action.redacted);
+        unsafe {
+            std::env::remove_var(env);
+        }
+    }
+
+    #[test]
+    fn browser_type_action_missing_secret_env_fails_before_driver() {
+        let env = unique_env("BEATER_BROWSER_MISSING_SECRET");
+        unsafe {
+            std::env::remove_var(&env);
+        }
+        let secrets =
+            BrowserSecrets::from_decl("browser.checkout", &json!({"password": env})).unwrap();
+
+        let error = browser_action_from_input_with_secrets(
+            &json!({
+                "action": {"type": "type", "selector": "#password", "textSecret": "password"}
+            }),
+            &secrets,
+        )
+        .expect_err("missing env should fail");
+
+        assert!(format!("{error:#}").contains("env"), "{error:#}");
     }
 
     #[test]
@@ -3505,18 +3720,12 @@ def run(input):
     }
 
     #[test]
-    fn browser_mock_cdp_rejects_secrets() {
+    fn browser_mock_cdp_accepts_scoped_secrets() {
         let mut decl = browser_decl();
         decl.secrets = json!({"profile": {"env": "BROWSER_PROFILE_ID"}});
 
-        let error = match ToolRegistry::build(PathBuf::new().as_path(), &[decl]) {
-            Ok(_) => panic!("mock_cdp should reject secrets"),
-            Err(error) => error,
-        };
-        assert!(
-            format!("{error:#}").contains("does not support secrets"),
-            "{error:#}"
-        );
+        ToolRegistry::build(PathBuf::new().as_path(), &[decl])
+            .expect("mock browser registry should accept env-scoped secrets");
     }
 
     #[tokio::test(flavor = "current_thread")]
