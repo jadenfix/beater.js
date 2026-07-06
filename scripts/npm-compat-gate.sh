@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prove the Phase C npm/node-compat wedge: a route can import a real ESM
-# package from node_modules with a bare specifier.
+# package plus a leaf CommonJS default export from node_modules with bare
+# specifiers, while unsupported CommonJS require() fails closed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,6 +36,27 @@ fi
 "$BIN" new "$APP" >/dev/null
 npm install --prefix "$APP" zod@4.4.3 >/dev/null
 
+mkdir -p "$APP/node_modules/legacy-cjs"
+cat >"$APP/node_modules/legacy-cjs/package.json" <<'JSON'
+{"name":"legacy-cjs","main":"index.cjs"}
+JSON
+cat >"$APP/node_modules/legacy-cjs/index.cjs" <<'JS'
+module.exports = {
+  label: "legacy-cjs",
+  double(value) {
+    return value * 2;
+  },
+};
+JS
+
+mkdir -p "$APP/node_modules/require-cjs"
+cat >"$APP/node_modules/require-cjs/package.json" <<'JSON'
+{"name":"require-cjs","main":"index.cjs"}
+JSON
+cat >"$APP/node_modules/require-cjs/index.cjs" <<'JS'
+module.exports = require("fs");
+JS
+
 cat >"$APP/app/routes/api/zod.ts" <<'TS'
 import { z } from "zod";
 
@@ -46,6 +68,33 @@ export function GET() {
     status: 200,
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({ ok: true, value: parsed.value }),
+  };
+}
+TS
+
+cat >"$APP/app/routes/api/cjs.ts" <<'TS'
+import legacy from "legacy-cjs";
+
+export function GET() {
+  return {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({
+      label: legacy.label,
+      doubled: legacy.double(21),
+    }),
+  };
+}
+TS
+
+cat >"$APP/app/routes/api/cjs-require.ts" <<'TS'
+import blocked from "require-cjs";
+
+export function GET() {
+  return {
+    status: 200,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+    body: String(blocked),
   };
 }
 TS
@@ -99,5 +148,31 @@ if response.status != 200:
 payload = json.loads(body)
 if payload != {"ok": True, "value": "beater"}:
     sys.exit(f"unexpected /api/zod payload: {payload!r}")
-print(f"npm compat passed: zod import returned {payload['value']}")
+
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+conn.request("GET", "/api/cjs")
+response = conn.getresponse()
+body = response.read().decode("utf-8")
+conn.close()
+if response.status != 200:
+    sys.exit(f"expected 200 from /api/cjs, got {response.status}: {body}")
+cjs_payload = json.loads(body)
+if cjs_payload != {"label": "legacy-cjs", "doubled": 42}:
+    sys.exit(f"unexpected /api/cjs payload: {cjs_payload!r}")
+
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+conn.request("GET", "/api/cjs-require")
+response = conn.getresponse()
+body = response.read().decode("utf-8")
+conn.close()
+if response.status < 500:
+    sys.exit(f"expected /api/cjs-require to fail closed, got {response.status}: {body}")
+if "CommonJS require" not in body:
+    sys.exit(f"expected /api/cjs-require failure to mention CommonJS require, got: {body}")
+print(
+    "npm compat passed: "
+    f"zod import returned {payload['value']}; "
+    f"cjs doubled {cjs_payload['doubled']}; "
+    "require failed closed"
+)
 PY

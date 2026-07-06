@@ -136,7 +136,7 @@ CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <
 
 ## 8. Not yet (each with its future path)
 
-- **Full npm ecosystem / node-compat** — server routes can import local ESM packages from `node_modules` with bare specifiers, exact and wildcard `exports`, array export targets, server-side conditions, `module`/`main` fallbacks, and app-local `import_map.json` aliases; CommonJS `require`, Node built-ins, package install/build hooks, and client-side dependency bundling remain.
+- **Full npm ecosystem / node-compat** — server routes can import local ESM packages from `node_modules` with bare specifiers, exact and wildcard `exports`, array export targets, server-side conditions, `module`/`main` fallbacks, app-local `import_map.json` aliases, and leaf `.cjs` modules as default exports of `module.exports`; CommonJS `require` fails closed, while Node built-ins, package install/build hooks, and client-side dependency bundling remain.
 - **WHATWG fetch classes in routes** — comes with broader npm-compat.
 - **Full RSC** — the chunked isolate→host streaming plumbing, route-scoped client modules, and initial `text/x-component` flight transport are the substrate; add official React Flight client references/manifests after broader npm-compat.
 - **Wasmtime sandbox expansion** — local `wasmtime` tools now run hermetic scalar wasm with empty imports; broader WASI/capability handles for files, sockets, and richer value passing remain future work.
@@ -160,5 +160,5 @@ CLI: `beater new <app>` · `beater dev` · `beater build` · `beater agent run <
 | M4 | React streaming SSR (`renderToReadableStream`) | the web half | **done** |
 | M5 | route-scoped client module (`/_beater/client/<route>.js`) + hydrated counter | interactivity | **done** |
 | M6 | route-scoped RSC transport (`/_beater/rsc/<route>.flight`) + browser-rendered server island | RSC substrate | transport done; official React Flight manifests pending |
-| M7 | bare ESM package imports from local `node_modules` in server routes | adoption wedge | **done** |
+| M7 | bare ESM package imports plus leaf `.cjs` default imports from local `node_modules` in server routes with `require` failing closed | adoption wedge | **done** |
 | M8 | `beater build` host bundle + Docker context | deploy substrate | **done:** CI passed the Docker cold-start gate with the generated Linux image serving `/api/health` in 413ms and enforcing MCP bearer auth |

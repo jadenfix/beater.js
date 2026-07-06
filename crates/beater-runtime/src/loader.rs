@@ -490,7 +490,9 @@ fn is_active_export_condition(condition: &str) -> bool {
 fn resolve_package_relative(package_dir: &Path, raw: &str) -> anyhow::Result<PathBuf> {
     validate_package_relative(package_dir, raw)?;
     let relative = raw.strip_prefix("./").unwrap_or(raw);
-    resolve_file_or_dir(package_dir.join(relative))
+    let resolved = resolve_file_or_dir(package_dir.join(relative))?;
+    ensure_package_boundary(package_dir, &resolved, raw)?;
+    Ok(resolved)
 }
 
 fn validate_package_relative(package_dir: &Path, raw: &str) -> anyhow::Result<()> {
@@ -509,12 +511,24 @@ fn validate_package_relative(package_dir: &Path, raw: &str) -> anyhow::Result<()
     Ok(())
 }
 
+fn ensure_package_boundary(package_dir: &Path, resolved: &Path, raw: &str) -> anyhow::Result<()> {
+    let package_root = package_dir.canonicalize()?;
+    let resolved = resolved.canonicalize()?;
+    if !resolved.starts_with(&package_root) {
+        anyhow::bail!(
+            "package {} points outside its package after resolving symlinks: {raw}",
+            package_dir.display()
+        );
+    }
+    Ok(())
+}
+
 fn resolve_file_or_dir(path: PathBuf) -> anyhow::Result<PathBuf> {
     if path.is_file() {
         return Ok(path);
     }
     if path.extension().is_none() {
-        for ext in ["js", "mjs", "ts", "tsx", "jsx", "json"] {
+        for ext in ["js", "mjs", "cjs", "ts", "tsx", "jsx", "json"] {
             let candidate = path.with_extension(ext);
             if candidate.is_file() {
                 return Ok(candidate);
@@ -529,7 +543,7 @@ fn resolve_file_or_dir(path: PathBuf) -> anyhow::Result<PathBuf> {
         if let Some(main) = package_json.get("main").and_then(Value::as_str) {
             return resolve_package_relative(&path, main);
         }
-        for ext in ["js", "mjs", "ts", "tsx", "jsx", "json"] {
+        for ext in ["js", "mjs", "cjs", "ts", "tsx", "jsx", "json"] {
             let candidate = path.join(format!("index.{ext}"));
             if candidate.is_file() {
                 return Ok(candidate);
@@ -556,9 +570,11 @@ fn load_sync(specifier: &ModuleSpecifier) -> Result<ModuleSource, ModuleLoaderEr
         .map_err(|_| JsErrorBox::generic(format!("not a loadable specifier: {specifier}")))?;
     let media_type = MediaType::from_specifier(specifier);
     let (code, module_type) = match media_type {
-        MediaType::JavaScript | MediaType::Mjs | MediaType::Cjs => {
-            (read_source(&path)?, ModuleType::JavaScript)
-        }
+        MediaType::JavaScript | MediaType::Mjs => (read_source(&path)?, ModuleType::JavaScript),
+        MediaType::Cjs => (
+            wrap_commonjs_as_esm(specifier, &path, &read_source(&path)?),
+            ModuleType::JavaScript,
+        ),
         MediaType::Json => (read_source(&path)?, ModuleType::Json),
         MediaType::TypeScript
         | MediaType::Mts
@@ -589,9 +605,11 @@ pub fn transpile_client_module(path: &Path) -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("not a loadable client module: {}", path.display()))?;
     let media_type = MediaType::from_specifier(&specifier);
     match media_type {
-        MediaType::JavaScript | MediaType::Mjs | MediaType::Cjs => {
-            Ok(std::fs::read_to_string(path)?)
-        }
+        MediaType::JavaScript | MediaType::Mjs => Ok(std::fs::read_to_string(path)?),
+        MediaType::Cjs => Err(anyhow::anyhow!(
+            "CommonJS client modules are not supported: {}",
+            path.display()
+        )),
         MediaType::TypeScript
         | MediaType::Mts
         | MediaType::Cts
@@ -607,6 +625,33 @@ pub fn transpile_client_module(path: &Path) -> anyhow::Result<String> {
 fn read_source(path: &Path) -> Result<String, ModuleLoaderError> {
     std::fs::read_to_string(path)
         .map_err(|e| JsErrorBox::generic(format!("failed to read {}: {e}", path.display())))
+}
+
+fn wrap_commonjs_as_esm(specifier: &ModuleSpecifier, path: &Path, source: &str) -> String {
+    let filename = serde_json::to_string(&path.to_string_lossy()).expect("string literal");
+    let dirname = serde_json::to_string(
+        &path
+            .parent()
+            .map(|parent| parent.to_string_lossy())
+            .unwrap_or_default(),
+    )
+    .expect("string literal");
+    let source_url = specifier.as_str();
+    let function_source = serde_json::to_string(&format!("{source}\n//# sourceURL={source_url}"))
+        .expect("string literal");
+    format!(
+        r#"const module = {{ exports: {{}} }};
+const exports = module.exports;
+const require = (specifier) => {{
+  throw new Error(`CommonJS require(${{JSON.stringify(specifier)}}) is not supported by beater.js yet`);
+}};
+const __beaterCjsSource = {function_source};
+Function("exports", "require", "module", "__filename", "__dirname", __beaterCjsSource)
+  .call(module.exports, exports, require, module, {filename}, {dirname});
+export default module.exports;
+export const __cjsExports = module.exports;
+"#
+    )
 }
 
 fn transpile_cached(
@@ -799,6 +844,198 @@ mod tests {
 
         assert!(code.contains("document.body.dataset.count"));
         assert!(!code.contains(": number"));
+    }
+
+    #[test]
+    fn transpile_client_module_rejects_cjs() {
+        let dir = TempDir::new("client-cjs");
+        let file = dir.path().join("index.client.cjs");
+        fs::write(&file, "module.exports = {};\n").unwrap();
+
+        let error = super::transpile_client_module(&file).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("CommonJS client modules are not supported")
+        );
+    }
+
+    #[test]
+    fn cjs_modules_are_wrapped_as_default_exports() {
+        let dir = TempDir::new("cjs-default");
+        let file = dir.path().join("node_modules/legacy/index.cjs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(
+            &file,
+            "module.exports = { label: 'legacy-cjs', double: (n) => n * 2 };\n",
+        )
+        .unwrap();
+        let specifier = ModuleSpecifier::from_file_path(&file).unwrap();
+
+        let code = source_text(load_sync(&specifier).unwrap());
+
+        assert!(code.contains("module = { exports: {} }"));
+        assert!(code.contains("Function(\"exports\", \"require\", \"module\""));
+        assert!(code.contains("export default module.exports"));
+        assert!(code.contains("legacy-cjs"));
+    }
+
+    #[test]
+    fn cjs_require_fails_closed_in_wrapper() {
+        let dir = TempDir::new("cjs-require");
+        let file = dir.path().join("node_modules/legacy/index.cjs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "const fs = require('fs'); module.exports = fs;\n").unwrap();
+        let specifier = ModuleSpecifier::from_file_path(&file).unwrap();
+
+        let code = source_text(load_sync(&specifier).unwrap());
+
+        assert!(code.contains("CommonJS require("));
+        assert!(code.contains("is not supported by beater.js yet"));
+        assert!(code.contains("__beaterCjsSource"));
+    }
+
+    #[test]
+    fn package_import_resolves_cjs_main_entrypoint() {
+        let app = TempDir::new("package-cjs-main");
+        app.write(
+            "app/routes/api/legacy.ts",
+            "import legacy from 'legacy-cjs';\n",
+        );
+        app.write(
+            "node_modules/legacy-cjs/package.json",
+            r#"{"name":"legacy-cjs","main":"index.cjs"}"#,
+        );
+        app.write(
+            "node_modules/legacy-cjs/index.cjs",
+            "module.exports = {ok: true};\n",
+        );
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/legacy.ts")).unwrap();
+
+        let resolved = resolve_package_import("legacy-cjs", referrer.as_str())
+            .unwrap()
+            .unwrap();
+        let code = source_text(load_sync(&resolved).unwrap());
+
+        assert_eq!(
+            resolved,
+            ModuleSpecifier::from_file_path(app.path().join("node_modules/legacy-cjs/index.cjs"))
+                .unwrap()
+        );
+        assert!(code.contains("export default module.exports"));
+    }
+
+    #[test]
+    fn package_import_resolves_extensionless_cjs_main() {
+        let app = TempDir::new("package-cjs-extensionless-main");
+        app.write(
+            "app/routes/api/legacy.ts",
+            "import legacy from 'legacy-cjs';\n",
+        );
+        app.write(
+            "node_modules/legacy-cjs/package.json",
+            r#"{"name":"legacy-cjs","main":"index"}"#,
+        );
+        app.write(
+            "node_modules/legacy-cjs/index.cjs",
+            "module.exports = {ok: true};\n",
+        );
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/legacy.ts")).unwrap();
+
+        let resolved = resolve_package_import("legacy-cjs", referrer.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            resolved,
+            ModuleSpecifier::from_file_path(app.path().join("node_modules/legacy-cjs/index.cjs"))
+                .unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_import_rejects_cjs_symlink_escape() {
+        let app = TempDir::new("package-cjs-symlink-escape");
+        app.write(
+            "app/routes/api/legacy.ts",
+            "import legacy from 'legacy-cjs';\n",
+        );
+        app.write("outside.cjs", "module.exports = { secret: true };\n");
+        app.write(
+            "node_modules/legacy-cjs/package.json",
+            r#"{"name":"legacy-cjs","main":"index.cjs"}"#,
+        );
+        std::os::unix::fs::symlink(
+            app.path().join("outside.cjs"),
+            app.path().join("node_modules/legacy-cjs/index.cjs"),
+        )
+        .unwrap();
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/legacy.ts")).unwrap();
+
+        let error = resolve_package_import("legacy-cjs", referrer.as_str()).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("points outside its package after resolving symlinks")
+        );
+    }
+
+    #[test]
+    fn package_import_resolves_cjs_exports_entrypoint() {
+        let app = TempDir::new("package-cjs-exports");
+        app.write(
+            "app/routes/api/legacy.ts",
+            "import legacy from 'legacy-cjs';\n",
+        );
+        app.write(
+            "node_modules/legacy-cjs/package.json",
+            r#"{"name":"legacy-cjs","exports":{".":"./index.cjs"}}"#,
+        );
+        app.write(
+            "node_modules/legacy-cjs/index.cjs",
+            "module.exports = {ok: true};\n",
+        );
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/legacy.ts")).unwrap();
+
+        let resolved = resolve_package_import("legacy-cjs", referrer.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            resolved,
+            ModuleSpecifier::from_file_path(app.path().join("node_modules/legacy-cjs/index.cjs"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn package_import_does_not_activate_require_only_condition() {
+        let app = TempDir::new("package-cjs-require-condition");
+        app.write(
+            "app/routes/api/legacy.ts",
+            "import legacy from 'legacy-cjs';\n",
+        );
+        app.write(
+            "node_modules/legacy-cjs/package.json",
+            r#"{"name":"legacy-cjs","exports":{".":{"require":"./index.cjs"}}}"#,
+        );
+        app.write(
+            "node_modules/legacy-cjs/index.cjs",
+            "module.exports = {ok: true};\n",
+        );
+        let referrer =
+            ModuleSpecifier::from_file_path(app.path().join("app/routes/api/legacy.ts")).unwrap();
+
+        let error = resolve_package_import("legacy-cjs", referrer.as_str()).unwrap_err();
+
+        assert!(error.to_string().contains("does not export ."), "{error:#}");
     }
 
     #[test]
