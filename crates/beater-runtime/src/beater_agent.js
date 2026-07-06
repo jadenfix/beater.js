@@ -7,6 +7,7 @@ export function defineAgent(cfg) {
   }
   return {
     name: cfg.name ?? "agent",
+    provider: cfg.provider ?? "anthropic",
     model: cfg.model ?? "claude-opus-4-8",
     system: cfg.system ?? "",
     tools: cfg.tools ?? [],

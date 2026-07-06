@@ -44,6 +44,8 @@ Operational implications:
 - redact secrets before passing them to agents or tools
 - add redaction hooks before production deployments that handle private data
 
+LLM provider API keys are read from the environment and must not be stored in `agent.ts` or `beater.toml`. Anthropic uses `ANTHROPIC_API_KEY`; custom Anthropic HTTPS origins require `BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL=1`, and insecure Anthropic HTTP is accepted only for loopback fixtures with `BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK=1`. OpenAI-compatible providers use `BEATER_OPENAI_API_KEY` or `OPENAI_API_KEY`; custom HTTPS origins require `BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1`, and insecure HTTP is accepted only for loopback fixtures with `BEATER_OPENAI_ALLOW_INSECURE_LOOPBACK=1`. Secret-bearing LLM clients disable redirects and proxy routing, and provider error bodies are omitted from agent errors so a misconfigured endpoint cannot echo secrets into the terminal or journal.
+
 The optional trace exporters read from the same journal data and post prompts, tool inputs, model responses, and tool outputs to the configured Beater native or OTLP ingest endpoint. Treat `BEATER_TRACE_EXPORT_URL`, `BEATER_OTLP_EXPORT_URL`, and `OTEL_EXPORTER_OTLP_*` as sensitive deployment decisions, set `BEATER_API_KEY` or OTLP headers through the environment or secret manager when required, and do not enable export for private data until redaction policy is in place.
 
 ## Remote Integrations

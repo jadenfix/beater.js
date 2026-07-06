@@ -5,8 +5,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use anyhow::{ensure, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 const JOURNAL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

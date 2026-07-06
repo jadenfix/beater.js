@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use reqwest::header::{HeaderName, HeaderValue};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::journal::{Journal, RunRow, StepRow};
 
@@ -677,15 +677,13 @@ mod tests {
         assert_eq!(spans[0]["status"]["code"], "STATUS_CODE_ERROR");
         assert_eq!(spans[1]["parentSpanId"], spans[0]["spanId"]);
         assert_eq!(spans[2]["name"], "beater.js tool get_time");
-        assert!(
-            spans[2]["attributes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|attr| {
-                    attr["key"] == "beater.tool_use_id" && attr["value"]["stringValue"] == "toolu_1"
-                })
-        );
+        assert!(spans[2]["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|attr| {
+                attr["key"] == "beater.tool_use_id" && attr["value"]["stringValue"] == "toolu_1"
+            }));
         assert!(spans[2]["events"].as_array().unwrap().iter().any(|event| {
             event["name"] == "beater.output"
                 && event["attributes"][0]["value"]["stringValue"]

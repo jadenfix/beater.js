@@ -4,14 +4,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Value};
 
-use crate::anthropic::Anthropic;
 use crate::journal::Journal;
+use crate::llm::{LlmClient, LlmSelection};
 use crate::registry::{
-    AgentConfig, BeatboxConfig, ToolCallContext, ToolNeedsReview, ToolRegistry,
-    browser_session_dir, cleanup_stale_browser_sessions,
+    browser_session_dir, cleanup_stale_browser_sessions, AgentConfig, BeatboxConfig,
+    ToolCallContext, ToolNeedsReview, ToolRegistry,
 };
 use crate::trace_export;
 
@@ -21,9 +21,10 @@ const LIVE_RUN_RESUME_GRACE: Duration = Duration::from_secs(30);
 
 struct Ctx {
     journal: Journal,
-    client: Anthropic,
+    client: LlmClient,
     registry: ToolRegistry,
     config: AgentConfig,
+    model: String,
     run_id: String,
 }
 
@@ -77,7 +78,8 @@ pub fn run(
         "agent.ts declares name {:?} but directory is {agent_name:?}",
         config.name
     );
-    let client = Anthropic::from_env()?;
+    let llm = LlmSelection::from_config(&config);
+    let client = LlmClient::from_provider(&llm.provider)?;
     let journal = Journal::open(app_dir)?;
     let run_id = uuid::Uuid::new_v4().to_string();
     journal.create_run(&run_id, agent_name, prompt)?;
@@ -88,6 +90,7 @@ pub fn run(
         client,
         registry,
         config,
+        model: llm.model,
         run_id,
     };
     let messages = vec![json!({"role": "user", "content": prompt})];
@@ -120,12 +123,14 @@ pub fn resume(
     let config_value = load_config(&run.agent)?;
     let (config, registry) = setup(app_dir, config_value, venv.as_ref(), &beatbox)?;
     let steps = journal.steps(run_id)?;
+    let llm = LlmSelection::from_config(&config);
 
     let ctx = Ctx {
         journal,
-        client: Anthropic::from_env()?,
+        client: LlmClient::from_provider(&llm.provider)?,
         registry,
         config,
+        model: llm.model,
         run_id: run_id.to_string(),
     };
     let result = runtime()?.block_on(resume_async(&ctx, run, steps));
@@ -325,7 +330,7 @@ pub fn list_runs(app_dir: &Path) -> Result<()> {
 async fn agent_loop(ctx: &Ctx, mut messages: Vec<Value>, mut next_llm_attempt: i64) -> Result<()> {
     for _ in 0..MAX_LOOP_STEPS {
         let body = json!({
-            "model": ctx.config.model,
+            "model": ctx.model,
             "max_tokens": MAX_TOKENS,
             "system": ctx.config.system,
             "thinking": {"type": "adaptive"},
@@ -368,10 +373,12 @@ async fn agent_loop(ctx: &Ctx, mut messages: Vec<Value>, mut next_llm_attempt: i
         match response["stop_reason"].as_str().unwrap_or_default() {
             "tool_use" => {
                 let mut tool_results = Vec::new();
+                let mut saw_tool_use = false;
                 for block in content.as_array().into_iter().flatten() {
                     if block["type"] != "tool_use" {
                         continue;
                     }
+                    saw_tool_use = true;
                     let id = block["id"].as_str().unwrap_or_default();
                     let name = block["name"].as_str().unwrap_or_default();
                     println!("→ tool {name} {}", block["input"]);
@@ -397,6 +404,11 @@ async fn agent_loop(ctx: &Ctx, mut messages: Vec<Value>, mut next_llm_attempt: i
                             }));
                         }
                     }
+                }
+                if !saw_tool_use {
+                    ctx.journal.set_run_status(&ctx.run_id, "failed")?;
+                    close_browser_sessions_best_effort(ctx).await;
+                    bail!("model returned stop_reason \"tool_use\" with no tool_use blocks");
                 }
                 messages.push(json!({"role": "user", "content": tool_results}));
             }
@@ -527,11 +539,11 @@ fn tool_idempotency_key(run_id: &str, tool_use_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LIVE_RUN_RESUME_GRACE, resume, run, tool_idempotency_key};
+    use super::{resume, run, tool_idempotency_key, LIVE_RUN_RESUME_GRACE};
     use crate::journal::Journal;
     use crate::registry::BeatboxConfig;
     use rusqlite::params;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::collections::VecDeque;
     use std::fs;
     use std::io::{Read, Write};
@@ -618,6 +630,7 @@ def run(input):
             unsafe {
                 std::env::set_var("ANTHROPIC_API_KEY", "test-key");
                 std::env::set_var("ANTHROPIC_BASE_URL", base_url);
+                std::env::set_var("BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK", "1");
             }
             Self
         }
@@ -628,6 +641,7 @@ def run(input):
             unsafe {
                 std::env::remove_var("ANTHROPIC_API_KEY");
                 std::env::remove_var("ANTHROPIC_BASE_URL");
+                std::env::remove_var("BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK");
                 std::env::remove_var("BEATER_TRACE_EXPORT_URL");
                 std::env::remove_var("BEATER_TENANT_ID");
                 std::env::remove_var("BEATER_PROJECT_ID");
@@ -1344,12 +1358,10 @@ def run(input):
         let messages = body["messages"].as_array().unwrap();
         let tool_result = &messages.last().unwrap()["content"][0];
         assert_eq!(tool_result["tool_use_id"], "toolu_browser");
-        assert!(
-            tool_result["content"]
-                .as_str()
-                .unwrap()
-                .contains("Mock Browser Page")
-        );
+        assert!(tool_result["content"]
+            .as_str()
+            .unwrap()
+            .contains("Mock Browser Page"));
 
         let journal = Journal::open(app.path()).unwrap();
         let (run, _) = journal.list_runs().unwrap().pop().unwrap();
@@ -1429,17 +1441,13 @@ def run(input):
         let trace_requests = trace_ingest.join();
 
         assert_eq!(trace_requests.len(), 4);
-        assert!(
-            trace_requests
-                .iter()
-                .all(|request| request.request_line == "POST /v1/traces/native HTTP/1.1")
-        );
-        assert!(
-            trace_requests[0]
-                .headers
-                .to_ascii_lowercase()
-                .contains("x-beater-api-key: trace-key")
-        );
+        assert!(trace_requests
+            .iter()
+            .all(|request| request.request_line == "POST /v1/traces/native HTTP/1.1"));
+        assert!(trace_requests[0]
+            .headers
+            .to_ascii_lowercase()
+            .contains("x-beater-api-key: trace-key"));
         let spans: Vec<Value> = trace_requests
             .iter()
             .map(|request| serde_json::from_str(&request.body).unwrap())
@@ -1831,18 +1839,14 @@ def run(input):
 
         let beatbox_requests = beatbox.join();
         assert_eq!(beatbox_requests.len(), 2);
-        assert!(
-            beatbox_requests[0]
-                .request_line
-                .starts_with("POST /v1/jobs ")
-        );
+        assert!(beatbox_requests[0]
+            .request_line
+            .starts_with("POST /v1/jobs "));
         let body: Value = serde_json::from_str(&beatbox_requests[0].body).unwrap();
         assert_eq!(body["idempotency_key"], "beater:run-1:tool:toolu_1");
-        assert!(
-            beatbox_requests[1]
-                .request_line
-                .starts_with("GET /v1/jobs/job-1 ")
-        );
+        assert!(beatbox_requests[1]
+            .request_line
+            .starts_with("GET /v1/jobs/job-1 "));
 
         let _anthropic_requests = anthropic.join();
         let journal = Journal::open(app.path()).unwrap();

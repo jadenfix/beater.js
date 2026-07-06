@@ -2,9 +2,10 @@
 //! SDK). Each request is exactly one journaled step; streaming requests can
 //! additionally emit durable partial records before the final message lands.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use serde_json::Value;
+use std::net::IpAddr;
 use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -22,12 +23,19 @@ impl Anthropic {
             .context("ANTHROPIC_API_KEY is not set — required for `beater agent run`")?;
         let base_url =
             std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        validate_anthropic_base_url(
+            &messages_url(&base_url),
+            env_flag("BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL"),
+            env_flag("BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK"),
+        )?;
         Self::new(api_key, &base_url, DEFAULT_REQUEST_TIMEOUT)
     }
 
     fn new(api_key: String, base_url: &str, request_timeout: Duration) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(request_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()
             .context("building anthropic http client")?;
         Ok(Self {
@@ -57,11 +65,10 @@ impl Anthropic {
             .context("sending anthropic streaming request")?;
         let status = resp.status();
         if !status.is_success() {
-            let text = resp
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("failed to read response body: {error}"));
-            bail!("anthropic api error {status}: {text}");
+            let body_len = resp.text().await.map(|body| body.len()).unwrap_or_default();
+            bail!(
+                "anthropic api error {status}; response body omitted from journal to avoid leaking provider-returned secrets ({body_len} bytes)"
+            );
         }
 
         let mut decoder = SseDecoder::default();
@@ -179,6 +186,7 @@ impl SseEvent {
 struct MessageStreamAssembler {
     message: Option<Value>,
     content: Vec<Option<ContentBlockState>>,
+    saw_message_stop: bool,
 }
 
 #[derive(Default)]
@@ -268,8 +276,10 @@ impl MessageStreamAssembler {
                     merge_object_field(message, "usage", &event["usage"]);
                 }
             }
-            "message_stop" => {}
-            "error" => bail!("anthropic stream error: {}", event["error"]),
+            "message_stop" => {
+                self.saw_message_stop = true;
+            }
+            "error" => bail!("anthropic stream error event; payload omitted from journal to avoid leaking provider-returned secrets"),
             _ => {}
         }
         Ok(())
@@ -280,6 +290,9 @@ impl MessageStreamAssembler {
             .message
             .take()
             .context("anthropic stream ended before message_start")?;
+        if !self.saw_message_stop {
+            bail!("anthropic stream ended before message_stop");
+        }
         message["content"] = Value::Array(
             self.content
                 .into_iter()
@@ -317,15 +330,60 @@ fn messages_url(base_url: &str) -> String {
     }
 }
 
+fn validate_anthropic_base_url(
+    url: &str,
+    allow_custom: bool,
+    allow_insecure_loopback: bool,
+) -> Result<()> {
+    let url = reqwest::Url::parse(url).context("Anthropic base URL is invalid")?;
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("Anthropic base URL must not contain credentials");
+    }
+    let host = url
+        .host_str()
+        .context("Anthropic base URL must include a host")?;
+    if url.scheme() == "https" && host.eq_ignore_ascii_case("api.anthropic.com") {
+        return Ok(());
+    }
+    if url.scheme() == "https" {
+        if allow_custom {
+            return Ok(());
+        }
+        bail!(
+            "custom Anthropic base URL {host:?} requires BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL=1"
+        );
+    }
+    if url.scheme() == "http" && is_loopback_host(host) && allow_insecure_loopback {
+        return Ok(());
+    }
+    bail!(
+        "Anthropic base URL must use https, or http loopback with BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK=1"
+    );
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Anthropic, messages_url};
-    use serde_json::{Value, json};
+    use super::{messages_url, validate_anthropic_base_url, Anthropic};
+    use serde_json::{json, Value};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
     use std::thread;
     use std::time::Duration;
@@ -344,6 +402,21 @@ mod tests {
             messages_url("http://127.0.0.1:8123/"),
             "http://127.0.0.1:8123/v1/messages"
         );
+    }
+
+    #[test]
+    fn base_url_requires_secure_or_explicit_fixture_origin() {
+        validate_anthropic_base_url("https://api.anthropic.com/v1/messages", false, false).unwrap();
+        validate_anthropic_base_url("https://anthropic.internal.test/v1/messages", true, false)
+            .unwrap();
+        assert!(validate_anthropic_base_url(
+            "https://anthropic.internal.test/v1/messages",
+            false,
+            false
+        )
+        .is_err());
+        validate_anthropic_base_url("http://127.0.0.1:8080/v1/messages", false, true).unwrap();
+        assert!(validate_anthropic_base_url("http://example.com/v1/messages", true, true).is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -520,6 +593,83 @@ mod tests {
         assert_eq!(response["content"][0]["name"], "echo");
         assert_eq!(response["content"][0]["input"]["value"], "ok");
         assert_eq!(response["stop_reason"], "tool_use");
+        assert_eq!(server.join(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn create_message_streaming_rejects_truncated_stream_without_message_stop() {
+        let server = MockAnthropic::new(vec![MockResponse::Sse(
+            [
+                sse(
+                    "message_start",
+                    json!({
+                        "type": "message_start",
+                        "message": {
+                            "id": "msg_1",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": "mock",
+                            "content": [],
+                            "stop_reason": null,
+                            "stop_sequence": null,
+                            "usage": {"input_tokens": 1, "output_tokens": 0}
+                        }
+                    }),
+                ),
+                sse(
+                    "message_delta",
+                    json!({
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                        "usage": {"output_tokens": 1}
+                    }),
+                ),
+            ]
+            .join(""),
+        )]);
+        let client = Anthropic::new(
+            "test-key".to_string(),
+            &server.base_url,
+            Duration::from_secs(5),
+        )
+        .expect("test client should build");
+
+        let error = client
+            .create_message_streaming(&json!({"model": "mock", "messages": []}), |_| Ok(()))
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("before message_stop"));
+        assert_eq!(server.join(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn create_message_streaming_omits_stream_error_payload() {
+        let server = MockAnthropic::new(vec![MockResponse::Sse(sse(
+            "error",
+            json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "echoed secret sk-ant-api03-should-not-appear"
+                }
+            }),
+        ))]);
+        let client = Anthropic::new(
+            "test-key".to_string(),
+            &server.base_url,
+            Duration::from_secs(5),
+        )
+        .expect("test client should build");
+
+        let error = client
+            .create_message_streaming(&json!({"model": "mock", "messages": []}), |_| Ok(()))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("payload omitted"), "{message}");
+        assert!(!message.contains("sk-ant-api03"), "{message}");
         assert_eq!(server.join(), 1);
     }
 

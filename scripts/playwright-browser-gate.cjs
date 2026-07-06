@@ -306,6 +306,7 @@ async function main() {
       ...process.env,
       ANTHROPIC_API_KEY: "test-key",
       ANTHROPIC_BASE_URL: anthropic.base,
+      BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK: "1",
       BEATER_PLAYWRIGHT_RUNNER: runner,
       BEATER_GATE_BROWSER_PASSWORD: "gate-password",
     };

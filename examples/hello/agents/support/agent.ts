@@ -4,6 +4,7 @@ import { defineAgent, pyTool, rustTool, sandboxTool } from "beater:agent";
 
 export default defineAgent({
   name: "support",
+  provider: "anthropic",
   model: "claude-opus-4-8",
   system:
     "You are a concise support agent. Use tools whenever math or data is involved; do not compute by hand.",

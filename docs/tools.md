@@ -1,6 +1,6 @@
 # Tools
 
-beater.js tools are first-party code declared by an agent and exposed through the same registry that powers Anthropic tool calls and `/mcp`.
+beater.js tools are first-party code declared by an agent and exposed through the same registry that powers LLM provider tool calls and `/mcp`.
 
 ## Agent declarations
 
@@ -19,6 +19,7 @@ import {
 
 export default defineAgent({
   name: "support",
+  provider: "anthropic",
   model: "claude-opus-4-8",
   system: "Use tools for data work.",
   tools: [

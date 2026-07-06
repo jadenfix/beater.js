@@ -19,7 +19,7 @@ Pre-alpha, built in the open. Current milestone progress:
 
 - [x] **M0** — scaffold, pinned deps, architecture contract
 - [x] **M1** — `beater dev`: TS routes in embedded V8, source-mapped errors, hot reload
-- [x] **M2** — durable agent loop + embedded-Python tools + step-lifecycle journal (code complete; live-API kill-9/resume gate pending an `ANTHROPIC_API_KEY`)
+- [ ] **M2** — durable agent loop + embedded-Python tools + step-lifecycle journal (code complete; live-API kill-9/resume gate pending a funded `ANTHROPIC_API_KEY`)
 - [x] **M3** — MCP server endpoint (spec 2025-11-25, verified with the official MCP inspector) + agent-ready crawl layer (robots.txt, sitemap.xml, llms.txt, .well-known manifest — auto-generated from the route table)
 - [x] **M4** — streamed React 19 SSR (`renderToReadableStream`; shell chunks flush before Suspense-delayed subtrees)
 - [x] **M5** — route-scoped client module (`/_beater/client/index.js`) hydrates a counter on the hello route
@@ -37,7 +37,7 @@ cargo build --workspace
 python3.11 -m venv my-app/.venv                          # optional: enables third-party Python packages
 ./target/debug/beater dev my-app                         # serve routes with hot reload
 BEATER_MCP_TOKEN=dev-token ./target/debug/beater dev my-app --host 0.0.0.0 --base-url https://hello.example.com
-export ANTHROPIC_API_KEY=sk-ant-...                     # required for live agent runs
+export ANTHROPIC_API_KEY=sk-ant-...                     # default Anthropic provider for live agent runs
 ./target/debug/beater agent run --app my-app support "summarize 3,1,4,1,5"
 ./target/debug/beater agent resume --app my-app <run_id>
 ./target/debug/beater doctor my-app                      # verify Python/venv/V8 wiring
@@ -99,7 +99,29 @@ export PYO3_PYTHON="$(brew --prefix python@3.11)/bin/python3.11"
 export PYO3_PYTHON="$(command -v python3.11)"
 ```
 
-Agent tests and local mock runs can point at a non-Anthropic endpoint with `ANTHROPIC_BASE_URL`; production runs still require `ANTHROPIC_API_KEY`.
+## LLM providers
+
+Agents default to Anthropic:
+
+```ts
+export default defineAgent({
+  name: "support",
+  provider: "anthropic",
+  model: "claude-opus-4-8",
+});
+```
+
+The runner keeps one canonical journal/tool shape and adapts at the network boundary. Anthropic uses `ANTHROPIC_API_KEY` plus optional `ANTHROPIC_BASE_URL`; custom Anthropic HTTPS origins require `BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL=1`, and HTTP loopback mocks require `BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK=1`. OpenAI-compatible chat-completions providers use:
+
+```sh
+export BEATER_LLM_PROVIDER=openai-compatible
+export BEATER_LLM_MODEL=z-ai/glm-5.2
+export BEATER_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
+export BEATER_OPENAI_API_KEY=...
+```
+
+`BEATER_LLM_PROVIDER` and `BEATER_LLM_MODEL` override `agent.ts` for smoke tests and deployments. `BEATER_OPENAI_*` take precedence over `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
 
 More docs:
 
