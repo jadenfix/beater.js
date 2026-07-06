@@ -1288,7 +1288,7 @@ enum BrowserSessionState {
     },
     Playwright {
         _guard: BrowserSessionGuard,
-        driver: PlaywrightDriver,
+        driver: Box<PlaywrightDriver>,
         lease: Option<BrowserProcessLease>,
         calls: u64,
     },
@@ -1525,7 +1525,7 @@ impl BrowserTool {
                     session_id.to_string(),
                     BrowserSessionState::Playwright {
                         _guard: BrowserSessionGuard::start(session_id),
-                        driver,
+                        driver: Box::new(driver),
                         lease,
                         calls: 0,
                     },
@@ -1583,7 +1583,7 @@ impl BrowserTool {
             .get("url")
             .and_then(Value::as_str)
             .context("playwright browser tool requires string input.url")?;
-        let result = async {
+        async {
             let mut observation = driver.goto(url).await.map_err(anyhow::Error::new)?;
             let mut outcome = None;
             if let Some(action) = action {
@@ -1621,8 +1621,7 @@ impl BrowserTool {
                 .to_string(),
             )
         }
-        .await;
-        result
+        .await
     }
 
     fn ensure_url_allowed(&self, raw_url: &str) -> Result<()> {
