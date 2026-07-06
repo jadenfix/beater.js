@@ -71,7 +71,7 @@ The work below is not just about matching Node/Next request handling. The end st
 - [x] Add npm/node-compat adoption wedge.
 - [x] Add isolate pool behind the existing worker protocol.
 - [x] Add `beater build` runnable host-bundle foundation.
-- [ ] Prove the deploy story with a Linux container image and `docker run` cold-start gate.
+- [x] Prove the deploy story with a Linux container image and `docker run` cold-start gate.
 
 **Likely touched files:** `crates/beater-runtime/**`, `crates/beater-cli/**`, `examples/hello/app/**`, `README.md`, `ARCHITECTURE.md`, `final.md`, and focused scripts under `scripts/**`.
 
@@ -121,17 +121,17 @@ The work below is not just about matching Node/Next request handling. The end st
 
 ## [A] MVP e2e-done — ONE gate remains
 
-**The M2 live gate is the only thing between here and "e2e done" for the MVP.** Everything below it in this section is already coded; it has never been exercised against the live Anthropic API.
+**The M2 live gate is the only thing between here and "e2e done" for the MVP.** Everything below it in this section is already coded; the gate still has not produced passing live Anthropic evidence. Attempts that fail at provider authentication, billing, quota, or model access before the first completed tool call do not count as A3-A5 evidence.
 
-### A1. Prerequisite: `ANTHROPIC_API_KEY` in the shell environment
+### A1. Prerequisite: funded Anthropic API access in the shell environment
 
-The only external input needed. Install once:
+The only external input needed is an `ANTHROPIC_API_KEY` for an Anthropic account with enough credits/quota to run A3-A5. Install once:
 
 ```sh
 echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshenv
 ```
 
-Once the key is present and `./target/debug/beater` is built, `scripts/m2-live-gate.sh` runs A3-A5 and writes transcripts plus an `evidence.md` manifest under `examples/hello/.beater/m2-gate/<timestamp-pid>/`.
+Once the funded key is present and `./target/debug/beater` is built, `scripts/m2-live-gate.sh` runs A3-A5 and writes transcripts plus an `evidence.md` manifest under `examples/hello/.beater/m2-gate/<timestamp-pid>/`. Authentication, billing, quota, or model-access failures before the first completed tool call are external-provider blockers, not M2 evidence; preserve the failed transcript if useful, but do not flip M2 to done.
 
 ### A2. Test fixture: slow tools for deterministic kill -9
 
@@ -204,8 +204,8 @@ The MVP proves the thesis on this machine. A release requires removing the machi
 - [x] Mockable outbound LLM networking: `ANTHROPIC_BASE_URL` lets resume and integration tests run against local servers instead of live vendor APIs.
 - [x] Network bind control: `--host` / `[app] host` makes container, VM, and remote-management smoke tests possible.
 - [x] Remote-management mode: documented bearer-token auth for `/mcp`, explicit trusted-host/origin rules, browser preflight/CORS support, public base URL metadata, and a safe way to expose a dev/prod agent endpoint beyond localhost.
-- [x] Networked integration contract (v0.1 direct `tools/call`): `remote_mcp` tool sources, request timeouts/retries, bearer-secret handling, `tool_use_id` idempotency keys, in-memory provider session initialization, review parking, and egress policy are tested against mock servers. Provider `tools/list` discovery remains Phase C item 8.
-- [x] Agentic browsing foundation (v0.1 mock CDP): `browserTool` provider contract, allowed-origin policy, per-tool-call mock session cleanup on success/failure/timeout, and mocked agent-loop e2e prove an agent can complete a browser task through a tool declaration. Real run-attached Playwright/CDP providers remain Phase C item 9.
+- [x] Networked integration contract (v0.1 direct `tools/call`): `remote_mcp` tool sources, request timeouts/retries, bearer-secret handling, `tool_use_id` idempotency keys, in-memory provider session initialization, startup `tools/list` schema import through `remoteMcpProvider`, review parking, and egress policy are tested against mock servers. Next-spec MCP transport adoption remains Phase C item 8.
+- [x] Agentic browsing foundation: `browserTool` provider contract, allowed-origin policy, per-tool-call mock session cleanup on success/failure/timeout, deterministic mock CDP coverage, and the Playwright provider gate prove an agent can complete a real browser task through a tool declaration with run-scoped session reuse and secret redaction. Richer production credential modes remain future hardening.
 - [x] Integration registry docs: `docs/integrations.md` shows how first-party Python/Rust tools, remote MCP servers, and browser providers coexist in one agent config without queues or sidecar services.
 
 ### Security floor (currently: dev-mode assumptions everywhere)
@@ -279,6 +279,6 @@ Phase C progress so far:
 
 ## TL;DR
 
-- **To be e2e done (MVP):** install `ANTHROPIC_API_KEY`, run `scripts/m2-live-gate.sh`, preserve the emitted `evidence.md` + raw logs, then flip README.md/ARCHITECTURE.md/final.md from pending to done. Everything else is already built and verified.
-- **To ship v0.1:** tests + CI, portable Python config, isolate-pool support plus scaling gate, `beater new`.
-- **To kill Node/Next:** pay off the remaining partial Phase C items while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.
+- **To be e2e done (MVP):** install a funded `ANTHROPIC_API_KEY`, run `scripts/m2-live-gate.sh`, preserve the emitted `evidence.md` + raw logs, then flip README.md/ARCHITECTURE.md/final.md from pending to done. The remaining MVP blocker is live-vendor evidence for M2, not missing local harness code.
+- **To ship v0.1:** keep the current tests + CI, portable Python config, isolate-pool support plus scaling gate, deploy gate, Playwright gate, OTLP gate, Beater dashboard-read gate, and `beater new` path green from a clean-user checkout.
+- **To kill Node/Next:** pay off the remaining partial Phase C items, including full React Flight manifests, broader npm/node compatibility and client dependency bundling, next-spec MCP transport adoption, rendered beater-agents dashboard proof for traces, free-threaded Python, and broader C++ packaging, while keeping remote management, networking, integrations, and agentic browsing as first-class platform requirements rather than later add-ons.
