@@ -974,6 +974,7 @@ def run(input):
     fn config(idempotent: bool) -> Value {
         json!({
             "name": "support",
+            "provider": "anthropic",
             "model": "mock",
             "system": "test",
             "tools": [{
@@ -988,6 +989,7 @@ def run(input):
     fn browser_config() -> Value {
         json!({
             "name": "support",
+            "provider": "anthropic",
             "model": "mock",
             "system": "test",
             "tools": [{
@@ -1014,6 +1016,7 @@ def run(input):
     fn sandbox_config(idempotent: bool) -> Value {
         json!({
             "name": "support",
+            "provider": "anthropic",
             "model": "mock",
             "system": "test",
             "tools": [{

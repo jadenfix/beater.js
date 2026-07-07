@@ -5,13 +5,14 @@ export function defineAgent(cfg) {
   if (!cfg || typeof cfg !== "object") {
     throw new Error("defineAgent(config) requires a config object");
   }
-  return {
+  const agent = {
     name: cfg.name ?? "agent",
-    provider: cfg.provider ?? "anthropic",
-    model: cfg.model ?? "claude-opus-4-8",
     system: cfg.system ?? "",
     tools: cfg.tools ?? [],
   };
+  if (cfg.provider != null) agent.provider = cfg.provider;
+  if (cfg.model != null) agent.model = cfg.model;
+  return agent;
 }
 
 export function defineAction(cfg) {

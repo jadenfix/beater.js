@@ -21,7 +21,7 @@ import {
 
 export default defineAgent({
   name: "support",
-  provider: "anthropic",
+  provider: "anthropic", // or "nvidia" / "openai-compatible"
   model: "claude-opus-4-8",
   system: "Use tools for data work.",
   tools: [
