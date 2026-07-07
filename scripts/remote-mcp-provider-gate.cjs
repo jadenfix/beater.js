@@ -67,6 +67,7 @@ function startRemoteMcpServer() {
   const token = "remote-mcp-fixture-token";
   const sessions = new Set();
   const requests = [];
+  const issuedSessions = [];
   let nextSession = 1;
   const server = http.createServer(async (req, res) => {
     const bodyText = await readBody(req);
@@ -99,6 +100,7 @@ function startRemoteMcpServer() {
     if (body.method === "initialize") {
       const session = `remote-session-${nextSession++}`;
       sessions.add(session);
+      issuedSessions.push({ id: body.id, session });
       writeJson(
         res,
         200,
@@ -195,6 +197,7 @@ function startRemoteMcpServer() {
     egress: `127.0.0.1:${port}`,
     token,
     requests,
+    issuedSessions,
     close: () => new Promise((resolve) => server.close(resolve)),
   }));
 }
@@ -293,6 +296,9 @@ function httpRequest(port, method, urlPath, body, headers = {}) {
       },
     );
     req.once("error", reject);
+    req.setTimeout(5000, () => {
+      req.destroy(new Error(`timeout ${method} ${urlPath}`));
+    });
     if (payload) req.write(payload);
     req.end();
   });
@@ -366,13 +372,30 @@ async function main() {
     if (unauth.status !== 401) {
       throw new Error(`expected unauthenticated local /mcp to return 401, got ${unauth.status}`);
     }
+    const badAuth = await httpRequest(
+      port,
+      "POST",
+      "/mcp",
+      {
+        jsonrpc: "2.0",
+        id: "bad-auth",
+        method: "tools/list",
+        params: {},
+      },
+      { authorization: "Bearer wrong-local-token" },
+    );
+    if (badAuth.status !== 401) {
+      throw new Error(`expected wrong local /mcp bearer token to return 401, got ${badAuth.status}`);
+    }
 
     const init = await mcp(port, "init", "initialize", {});
     if (init.result?.protocolVersion !== "2025-11-25") {
       throw new Error(`unexpected initialize result: ${JSON.stringify(init)}`);
     }
+    assertNoSecretLeak(init, [remote.token, "local-mcp-fixture-token"]);
 
     const list = await mcp(port, "list", "tools/list", {});
+    assertNoSecretLeak(list, [remote.token, "local-mcp-fixture-token"]);
     const tool = list.result?.tools?.find((candidate) => candidate.name === "crm.lookup");
     if (!tool) {
       throw new Error(`crm.lookup was not imported from remote provider: ${JSON.stringify(list)}`);
@@ -402,7 +425,11 @@ async function main() {
     const discoveryInit = remote.requests.find((request) => request.body?.id === "beater:discover:init");
     const discoveryList = remote.requests.find((request) => request.body?.id === "beater:discover:tools");
     const executeInit = remote.requests.find((request) => request.body?.id === "beater:init");
-    const executeCall = remote.requests.find((request) => request.body?.method === "tools/call");
+    const executeCalls = remote.requests.filter((request) => request.body?.method === "tools/call");
+    if (executeCalls.length !== 1) {
+      throw new Error(`expected exactly one remote tools/call, saw ${executeCalls.length}`);
+    }
+    const executeCall = executeCalls[0];
     for (const [label, request] of [
       ["discovery initialize", discoveryInit],
       ["discovery tools/list", discoveryList],
@@ -414,11 +441,20 @@ async function main() {
         throw new Error(`remote ${label} did not receive bearer auth`);
       }
     }
-    if (!discoveryList.headers["mcp-session-id"]) {
-      throw new Error("remote discovery tools/list did not receive MCP session id");
+    const discoverySession = remote.issuedSessions.find(
+      (session) => session.id === "beater:discover:init",
+    )?.session;
+    const executionSession = remote.issuedSessions.find(
+      (session) => session.id === "beater:init",
+    )?.session;
+    if (!discoverySession || !executionSession || discoverySession === executionSession) {
+      throw new Error(`unexpected issued remote sessions: ${JSON.stringify(remote.issuedSessions)}`);
     }
-    if (!executeCall.headers["mcp-session-id"]) {
-      throw new Error("remote tools/call did not receive MCP session id");
+    if (discoveryList.headers["mcp-session-id"] !== discoverySession) {
+      throw new Error("remote discovery tools/list did not receive its initialize session id");
+    }
+    if (executeCall.headers["mcp-session-id"] !== executionSession) {
+      throw new Error("remote tools/call did not receive its execution initialize session id");
     }
     const remoteCallId = executeCall.body?.id;
     const idempotencyKey = executeCall.headers["idempotency-key"];
