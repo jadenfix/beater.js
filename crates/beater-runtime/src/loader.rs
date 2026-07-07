@@ -59,6 +59,7 @@ fn vendor_specifier(specifier: &str) -> Option<&'static str> {
         "node:os" | "os" => Some("beater:vendor/node-os"),
         "node:path" | "path" => Some("beater:vendor/node-path"),
         "node:process" | "process" => Some("beater:vendor/node-process"),
+        "node:querystring" | "querystring" => Some("beater:vendor/node-querystring"),
         "node:url" | "url" => Some("beater:vendor/node-url"),
         "node:util/types" | "util/types" => Some("beater:vendor/node-util-types"),
         "node:util" | "util" => Some("beater:vendor/node-util"),
@@ -85,6 +86,9 @@ fn vendor_source(specifier: &str) -> Option<&'static str> {
         "beater:vendor/node-os" => Some(include_str!("../assets/vendor/node-os.mjs")),
         "beater:vendor/node-path" => Some(include_str!("../assets/vendor/node-path.mjs")),
         "beater:vendor/node-process" => Some(include_str!("../assets/vendor/node-process.mjs")),
+        "beater:vendor/node-querystring" => {
+            Some(include_str!("../assets/vendor/node-querystring.mjs"))
+        }
         "beater:vendor/node-url" => Some(include_str!("../assets/vendor/node-url.mjs")),
         "beater:vendor/node-util-types" => {
             Some(include_str!("../assets/vendor/node-util-types.mjs"))
@@ -1511,6 +1515,23 @@ mod tests {
     }
 
     #[test]
+    fn node_querystring_vendor_specifiers_resolve_to_checked_in_shim() {
+        assert_eq!(
+            super::vendor_specifier("node:querystring"),
+            Some("beater:vendor/node-querystring")
+        );
+        assert_eq!(
+            super::vendor_specifier("querystring"),
+            Some("beater:vendor/node-querystring")
+        );
+
+        let source = super::vendor_source("beater:vendor/node-querystring").unwrap();
+        assert!(source.contains("deterministic querystring shim"));
+        assert!(source.contains("export function parse"));
+        assert!(source.contains("export const encode = stringify"));
+    }
+
+    #[test]
     fn node_util_vendor_specifiers_resolve_to_checked_in_shim() {
         assert_eq!(
             super::vendor_specifier("node:util"),
@@ -1581,6 +1602,16 @@ mod tests {
         assert!(source.contains("sep = \"/\""));
         assert!(source.contains("default path"));
         assert!(source.contains("posix"));
+    }
+
+    #[test]
+    fn node_querystring_vendor_module_loads_from_beater_scheme() {
+        let specifier = ModuleSpecifier::parse("beater:vendor/node-querystring").unwrap();
+        let source = source_text(load_sync(&specifier).unwrap());
+
+        assert!(source.contains("parse(query"));
+        assert!(source.contains("stringify(object"));
+        assert!(source.contains("default querystring"));
     }
 
     #[test]

@@ -565,6 +565,79 @@ export async function inspectAssert() {
 }
 JS
 
+mkdir -p "$APP/node_modules/queried"
+cat >"$APP/node_modules/queried/package.json" <<'JSON'
+{
+  "name": "queried",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  }
+}
+JSON
+
+cat >"$APP/node_modules/queried/index.js" <<'JS'
+import querystring, {
+  decode,
+  encode,
+  escape,
+  parse,
+  stringify,
+  unescape,
+} from "node:querystring";
+import bareQuerystring from "querystring";
+
+export function inspectQuerystring() {
+  const parsed = parse("a=1&a=2&space=hello+world&encoded=%23tag&empty");
+  const custom = parse("name:beater;kind:agent", ";", ":");
+  const limited = parse("x=1&y=2&z=3", "&", "=", { maxKeys: 2 });
+  const emptySegments = parse("&a=1&&b=2&");
+  const emptySegmentsLimited = parse("&&x=1&&y=2", "&", "=", { maxKeys: 1 });
+  const separatorHeavy = parse(`${"&".repeat(5000)}last=1&ignored=2`, "&", "=", { maxKeys: 1 });
+  const unlimited = parse("k=1&k=2&k=3", "&", "=", { maxKeys: 0 });
+  const passthroughMalformed = unescape("%E0%A4%A");
+  const mixedMalformed = unescape("ok%21%E0%A4%A%23tail");
+  const originalEscape = querystring.escape;
+  const originalUnescape = querystring.unescape;
+  querystring.escape = (value) => `enc<${String(value)}>`;
+  querystring.unescape = (value) => `dec<${String(value)}>`;
+  const overridden = {
+    parsed: parse("name=beater"),
+    stringified: stringify({ name: "beater" }),
+  };
+  querystring.escape = originalEscape;
+  querystring.unescape = originalUnescape;
+  return {
+    bareDefaultMatches: bareQuerystring.parse === parse,
+    custom,
+    defaultStatics:
+      querystring.stringify === stringify &&
+      querystring.parse === parse &&
+      querystring.encode === encode &&
+      querystring.decode === decode,
+    escaped: escape("a b+c&d"),
+    emptySegments,
+    emptySegmentsLimited,
+    limited,
+    mixedMalformed,
+    overridden,
+    passthroughMalformed,
+    parsed,
+    separatorHeavy,
+    stringified: stringify({
+      a: ["1", "2"],
+      bool: true,
+      count: 7,
+      empty: "",
+      none: null,
+      space: "hello world",
+    }),
+    unescaped: unescape("hello%20world%21"),
+    unlimited,
+  };
+}
+JS
+
 mkdir -p "$APP/node_modules/pathed"
 cat >"$APP/node_modules/pathed/package.json" <<'JSON'
 {
@@ -815,6 +888,18 @@ export async function GET() {
     status: 200,
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(await inspectAssert()),
+  };
+}
+TS
+
+cat >"$APP/app/routes/api/queried.ts" <<'TS'
+import { inspectQuerystring } from "queried";
+
+export function GET() {
+  return {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(inspectQuerystring()),
   };
 }
 TS
@@ -1116,6 +1201,55 @@ if assert_payload != expected_assert:
     sys.exit(f"unexpected /api/asserted payload: {assert_payload!r}")
 
 conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+conn.request("GET", "/api/queried")
+response = conn.getresponse()
+body = response.read().decode("utf-8")
+conn.close()
+if response.status != 200:
+    sys.exit(f"expected 200 from /api/queried, got {response.status}: {body}")
+query_payload = json.loads(body)
+expected_query = {
+    "bareDefaultMatches": True,
+    "custom": {
+        "kind": "agent",
+        "name": "beater",
+    },
+    "defaultStatics": True,
+    "escaped": "a%20b%2Bc%26d",
+    "emptySegments": {
+        "a": "1",
+        "b": "2",
+    },
+    "emptySegmentsLimited": {},
+    "limited": {
+        "x": "1",
+        "y": "2",
+    },
+    "mixedMalformed": "ok!\ufffd%A#tail",
+    "overridden": {
+        "parsed": {
+            "dec<name>": "dec<beater>",
+        },
+        "stringified": "enc<name>=enc<beater>",
+    },
+    "passthroughMalformed": "\ufffd%A",
+    "parsed": {
+        "a": ["1", "2"],
+        "encoded": "#tag",
+        "empty": "",
+        "space": "hello world",
+    },
+    "separatorHeavy": {},
+    "stringified": "a=1&a=2&bool=true&count=7&empty=&none=&space=hello%20world",
+    "unescaped": "hello world!",
+    "unlimited": {
+        "k": ["1", "2", "3"],
+    },
+}
+if query_payload != expected_query:
+    sys.exit(f"unexpected /api/queried payload: {query_payload!r}")
+
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
 conn.request("GET", "/api/pathed")
 response = conn.getresponse()
 body = response.read().decode("utf-8")
@@ -1283,6 +1417,7 @@ print(
     f"events seen {','.join(events_payload['seen'])}; "
     f"util format {util_payload['format']}; "
     f"assert strict {assert_payload['strictFailure']['operator']}; "
+    f"query {query_payload['stringified']}; "
     f"path resolved {path_payload['resolved']}; "
     f"os platform {os_payload['platform']}; "
     f"url file {url_payload['filePath']}; "
