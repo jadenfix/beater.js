@@ -120,6 +120,8 @@ Implemented behavior:
 - `session: {scope: "run", cleanup: "always"}` lazily sends `initialize`, stores the returned `Mcp-Session-Id` in memory for the tool, and sends it on later `tools/call` requests
 - non-idempotent calls park as `needs_review` on crash-resume and after ambiguous network/provider failures
 
+Run `scripts/remote-mcp-provider-gate.cjs` after `cargo build -p beater-cli` for a no-secret e2e proof through the real dev server. It creates a temporary app that imports a loopback `remoteMcpProvider`, requires bearer auth on both the local `/mcp` endpoint and the remote provider, verifies startup `initialize` + `tools/list` discovery, calls the imported `<prefix>.<tool>` through local `/mcp tools/call`, and checks the remote provider received session and journaled idempotency headers without leaking fixture tokens into MCP responses or SQLite journal rows.
+
 Planned next steps:
 
 - resumable transport metadata beyond the current in-memory provider session id
