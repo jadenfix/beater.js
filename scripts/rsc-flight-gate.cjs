@@ -38,11 +38,30 @@ const app = process.env.BEATER_APP ?? path.join(root, "examples/hello");
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage();
+      const manifest = page.waitForResponse(
+        (response) =>
+          response.url() === `${base}/_beater/rsc/manifest.json` && response.status() === 200,
+      );
       const flight = page.waitForResponse(
         (response) =>
           response.url() === `${base}/_beater/rsc/index.flight` && response.status() === 200,
       );
       await page.goto(base, { waitUntil: "networkidle" });
+      const manifestResponse = await manifest;
+      const manifestContentType = manifestResponse.headers()["content-type"] ?? "";
+      if (!manifestContentType.includes("application/json")) {
+        throw new Error(`RSC manifest content-type was ${manifestContentType}`);
+      }
+      const manifestPayload = await manifestResponse.json();
+      const indexRoute = manifestPayload.routes?.find((route) => route.route === "/");
+      if (
+        manifestPayload.protocol !== "beater-rsc-manifest" ||
+        indexRoute?.flight !== "/_beater/rsc/index.flight" ||
+        indexRoute?.client !== "/_beater/client/index.js" ||
+        indexRoute?.transport !== "beater-flight"
+      ) {
+        throw new Error(`RSC manifest did not advertise the index route: ${JSON.stringify(manifestPayload)}`);
+      }
       const flightResponse = await flight;
       const contentType = flightResponse.headers()["content-type"] ?? "";
       if (!contentType.includes("text/x-component")) {
@@ -63,7 +82,7 @@ const app = process.env.BEATER_APP ?? path.join(root, "examples/hello");
       if (value !== "1") {
         throw new Error(`client counter did not remain hydrated after RSC render: ${value}`);
       }
-      console.log(`RSC flight passed: ${base} rendered server island and counter=${value}`);
+      console.log(`RSC flight passed: ${base} advertised manifest, rendered server island, and counter=${value}`);
     } finally {
       await browser.close();
     }

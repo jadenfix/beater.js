@@ -146,6 +146,7 @@ pub async fn serve(
         .route("/llms.txt", get(handle_llms))
         .route("/openapi.json", get(handle_openapi))
         .route("/.well-known/beater.json", get(handle_well_known))
+        .route("/_beater/rsc/manifest.json", get(handle_rsc_manifest))
         .route("/_beater/agent/runs", get(handle_agent_runs))
         .route("/_beater/agent/runs/{run_id}", get(handle_agent_run))
         .route(
@@ -626,6 +627,19 @@ async fn handle_well_known(State(state): State<DevState>) -> Response<Body> {
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
+        .body(Body::from(manifest.to_string()))
+        .expect("static response")
+}
+
+async fn handle_rsc_manifest(State(state): State<DevState>) -> Response<Body> {
+    let manifest = {
+        let table = state.routes.read().await;
+        rsc_manifest(&state.app_dir, &table)
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .header("cache-control", "no-store")
         .body(Body::from(manifest.to_string()))
         .expect("static response")
 }
@@ -1382,12 +1396,83 @@ fn find_rsc_server_module(
         .find(|path| path.is_file())
 }
 
+fn rsc_manifest(app_dir: &Path, routes: &RouteTable) -> serde_json::Value {
+    let mut entries = Vec::new();
+    for route in routes.iter() {
+        if route.kind != RouteKind::Page
+            || route
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, Segment::Param(_)))
+        {
+            continue;
+        }
+        let Some(route_path) = rsc_route_path_from_page_route(app_dir, route) else {
+            continue;
+        };
+        if find_rsc_server_module(app_dir, routes, &route_path).is_none() {
+            continue;
+        }
+        let id = route_path.to_string_lossy().replace('\\', "/");
+        let client = find_client_module(app_dir, &route_path)
+            .is_some()
+            .then(|| format!("{CLIENT_MODULE_PREFIX}{id}.js"));
+        entries.push(json!({
+            "id": id,
+            "route": route.pattern,
+            "transport": "beater-flight",
+            "version": 0,
+            "flight": format!("{RSC_FLIGHT_PREFIX}{id}.flight"),
+            "client": client,
+            "contentType": "text/x-component; charset=utf-8",
+        }));
+    }
+    entries.sort_by(|left, right| {
+        left["route"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["route"].as_str().unwrap_or_default())
+    });
+    json!({
+        "protocol": "beater-rsc-manifest",
+        "version": 0,
+        "routes": entries,
+    })
+}
+
+fn rsc_route_path_from_page_route(app_dir: &Path, route: &crate::router::Route) -> Option<PathBuf> {
+    if route.kind != RouteKind::Page {
+        return None;
+    }
+    let routes_dir = app_dir.join("app").join("routes");
+    let rel = route.file.strip_prefix(&routes_dir).ok()?;
+    let mut route_path = rel.to_path_buf();
+    let stem = route_path.file_stem()?.to_os_string();
+    route_path.set_file_name(stem);
+    if !route_path.components().all(|component| {
+        let std::path::Component::Normal(segment) = component else {
+            return false;
+        };
+        segment
+            .to_str()
+            .is_some_and(valid_route_scoped_internal_segment)
+    }) {
+        return None;
+    }
+    Some(route_path)
+}
+
 fn has_matching_page_route(app_dir: &Path, routes: &RouteTable, route_path: &Path) -> bool {
     let routes_dir = app_dir.join("app").join("routes");
     let candidates = ["tsx", "jsx"].map(|ext| route_module_path(&routes_dir, route_path, ext));
-    routes
-        .iter()
-        .any(|route| route.kind == RouteKind::Page && candidates.contains(&route.file))
+    routes.iter().any(|route| {
+        route.kind == RouteKind::Page
+            && candidates.contains(&route.file)
+            && !route
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, Segment::Param(_)))
+    })
 }
 
 fn route_module_path(routes_dir: &Path, route_path: &Path, ext: &str) -> PathBuf {
@@ -1421,17 +1506,20 @@ fn route_scoped_internal_path(path: &str, prefix: &str, suffix: &str) -> Option<
 
     let mut route_path = PathBuf::new();
     for segment in rel.split('/') {
-        if segment.is_empty()
-            || segment == "."
-            || segment == ".."
-            || segment.contains('\\')
-            || segment.contains(':')
-        {
+        if !valid_route_scoped_internal_segment(segment) {
             return None;
         }
         route_path.push(segment);
     }
     Some(route_path)
+}
+
+fn valid_route_scoped_internal_segment(segment: &str) -> bool {
+    !(segment.is_empty()
+        || segment == "."
+        || segment == ".."
+        || segment.contains('\\')
+        || segment.contains(':'))
 }
 
 #[cfg(test)]
@@ -1618,8 +1706,8 @@ mod tests {
         client_module_response, client_module_route_path, crawlable_route_targets,
         find_client_module, find_rsc_server_module, handle_agent_run, handle_agent_run_events,
         handle_agent_runs, method_not_allowed_response, route_action_tool, route_response,
-        route_response_body, rsc_flight_route_path, secure_route_response, send_worker_msg,
-        text_response, with_route_security_headers,
+        route_response_body, rsc_flight_route_path, rsc_manifest, secure_route_response,
+        send_worker_msg, text_response, with_route_security_headers,
     };
     use crate::mcp;
     use crate::router::RouteTable;
@@ -2355,6 +2443,83 @@ mod tests {
         let table = RouteTable::scan(app.path()).unwrap();
 
         assert!(find_rsc_server_module(app.path(), &table, Path::new("admin/secret")).is_none());
+    }
+
+    #[test]
+    fn rsc_server_module_requires_static_page_route() {
+        let app = TempDir::new("find-rsc-dynamic");
+        app.write(
+            "app/routes/blog/[slug].tsx",
+            "export default function Blog() {}",
+        );
+        app.write(
+            "app/routes/blog/[slug].server.tsx",
+            "export default function BlogFlight() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        assert!(find_rsc_server_module(app.path(), &table, Path::new("blog/[slug]")).is_none());
+    }
+
+    #[test]
+    fn rsc_manifest_lists_static_server_routes_with_client_references_and_nested_index() {
+        let app = TempDir::new("rsc-manifest");
+        app.write("app/routes/index.tsx", "export default function Home() {}");
+        app.write(
+            "app/routes/index.server.tsx",
+            "export default function HomeFlight() {}",
+        );
+        app.write("app/routes/index.client.ts", "console.log('client');");
+        app.write(
+            "app/routes/blog/[slug].tsx",
+            "export default function Blog() {}",
+        );
+        app.write(
+            "app/routes/blog/[slug].server.tsx",
+            "export default function BlogFlight() {}",
+        );
+        app.write(
+            "app/routes/admin.server.tsx",
+            "export default function StrayFlight() {}",
+        );
+        app.write(
+            "app/routes/dashboard/index.tsx",
+            "export default function Dashboard() {}",
+        );
+        app.write(
+            "app/routes/dashboard/index.server.tsx",
+            "export default function DashboardFlight() {}",
+        );
+        app.write(
+            "app/routes/bad:name.tsx",
+            "export default function BadName() {}",
+        );
+        app.write(
+            "app/routes/bad:name.server.tsx",
+            "export default function BadNameFlight() {}",
+        );
+        let table = RouteTable::scan(app.path()).unwrap();
+
+        let manifest = rsc_manifest(app.path(), &table);
+        let routes = manifest["routes"].as_array().unwrap();
+
+        assert_eq!(manifest["protocol"], "beater-rsc-manifest");
+        assert_eq!(manifest["version"], 0);
+        assert_eq!(routes.len(), 2, "{manifest}");
+        let root = routes.iter().find(|route| route["route"] == "/").unwrap();
+        assert_eq!(root["id"], "index");
+        assert_eq!(root["transport"], "beater-flight");
+        assert_eq!(root["version"], 0);
+        assert_eq!(root["flight"], "/_beater/rsc/index.flight");
+        assert_eq!(root["client"], "/_beater/client/index.js");
+        assert_eq!(root["contentType"], "text/x-component; charset=utf-8");
+        let dashboard = routes
+            .iter()
+            .find(|route| route["route"] == "/dashboard")
+            .unwrap();
+        assert_eq!(dashboard["id"], "dashboard/index");
+        assert_eq!(dashboard["flight"], "/_beater/rsc/dashboard/index.flight");
+        assert_eq!(dashboard["client"], serde_json::Value::Null);
     }
 
     #[test]
