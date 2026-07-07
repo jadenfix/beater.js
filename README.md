@@ -168,8 +168,8 @@ Apache-2.0
 
 ## Ecosystem
 
-beater.js is part of the [ecosystem](https://github.com/jadenfix/ecosystem) — a family of Rust-first, local-first agent-infrastructure projects. It is fully standalone: one Rust binary that serves your app and runs durable polyglot agents, with no sibling project required. Within the family it can connect for:
+temp.js is part of the [Tempera ecosystem](https://github.com/jadenfix/ecosystem) — a family of Rust-first, local-first agent-infrastructure projects. It is fully standalone: one Rust binary that serves your app and runs durable polyglot agents, with no sibling project required. Within the family it can connect for:
 
-- feeding its journaled runs to [beater-memory](https://github.com/jadenfix/beater-memory) (journal import exists today) and its traces to [beater](https://github.com/jadenfix/beater) for evals and CI gates
-- using the local Wasmtime tier for hermetic untrusted scalar wasm tools, with [beatbox](https://github.com/jadenfix/beatbox) still available as the remote sandbox lane
-- giving its agents web hands via [tempo](https://github.com/jadenfix/tempo) and running under [beaterOS](https://github.com/jadenfix/beaterOS) authority and policy
+- feeding its journaled runs to [remi](https://github.com/jadenfix/remi) (journal import exists today) and its traces to [Palette](https://github.com/jadenfix/palette) for evals and CI gates
+- using the local Wasmtime tier for hermetic untrusted scalar wasm tools, with [cradle](https://github.com/jadenfix/cradle) still available as the remote sandbox lane
+- giving its agents web hands via [tempo](https://github.com/jadenfix/tempo) and running under [tempOS](https://github.com/jadenfix/tempOS) authority and policy

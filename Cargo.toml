@@ -12,8 +12,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/jadenfix/beater.js"
-rust-version = "1.94"
+repository = "https://github.com/jadenfix/temp.js"
+rust-version = "1.96"
 
 [workspace.dependencies]
 # JS engine (pin exact — deno_core moves fast; bump deliberately)
