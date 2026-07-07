@@ -167,6 +167,68 @@ export function inspectPath() {
 }
 JS
 
+mkdir -p "$APP/node_modules/urled"
+cat >"$APP/node_modules/urled/package.json" <<'JSON'
+{
+  "name": "urled",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  }
+}
+JSON
+
+cat >"$APP/node_modules/urled/index.js" <<'JS'
+import url, {
+  fileURLToPath,
+  pathToFileURL,
+  URL,
+  URLSearchParams,
+} from "node:url";
+import { fileURLToPath as bareFileURLToPath } from "url";
+
+function rejects(callback) {
+  try {
+    callback();
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+export function inspectUrl() {
+  const parsed = new URL("../api/health?q=beater#frag", "https://example.test/app/routes/");
+  const params = new URLSearchParams([
+    ["q", "beater js"],
+    ["q", "agent"],
+  ]);
+  const nullParams = new URLSearchParams(null);
+  const mutable = new URL("https://idp.example/cb");
+  mutable.searchParams.append("state", "a=b=");
+  return {
+    filePath: fileURLToPath("file:///tmp/beater/routes/index.ts"),
+    localhostPath: fileURLToPath(new URL("file://localhost/tmp/beater/routes/index.ts")),
+    bareFilePath: bareFileURLToPath("file:///tmp/beater/bare.ts"),
+    fileHref: pathToFileURL("/tmp/beater/space name.ts").href,
+    encodedHref: pathToFileURL("/tmp/beater/hash#query?.ts").href,
+    defaultHref: url.pathToFileURL("/tmp/beater/default.ts").href,
+    parsedHref: parsed.href,
+    paramsAll: params.getAll("q"),
+    stringParam: new URLSearchParams("sig=a=b=&empty").get("sig"),
+    nullParams: nullParams.toString(),
+    mutableHref: mutable.href,
+    queryOnlyHref: new URL("?page=2", "https://example.test/app/items?old=1#top").href,
+    hashOnlyHref: new URL("#next", "https://example.test/app/items?old=1#top").href,
+    importedGlobal: URL === globalThis.URL,
+    paramsGlobal: URLSearchParams === globalThis.URLSearchParams,
+    importMetaPath: fileURLToPath(import.meta.url).endsWith("/node_modules/urled/index.js"),
+    badHostRejected: rejects(() => fileURLToPath("file://evil.test/tmp/beater.ts")),
+    encodedSlashRejected: rejects(() => fileURLToPath("file:///tmp/a%2Fb.ts")),
+    relativePathRejected: rejects(() => pathToFileURL("tmp/beater.ts")),
+  };
+}
+JS
+
 cat >"$APP/app/routes/api/zod.ts" <<'TS'
 import { z } from "zod";
 
@@ -217,6 +279,18 @@ export function GET() {
     status: 200,
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(inspectPath()),
+  };
+}
+TS
+
+cat >"$APP/app/routes/api/urled.ts" <<'TS'
+import { inspectUrl } from "urled";
+
+export function GET() {
+  return {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(inspectUrl()),
   };
 }
 TS
@@ -350,6 +424,38 @@ if path_payload != expected_path:
     sys.exit(f"unexpected /api/pathed payload: {path_payload!r}")
 
 conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+conn.request("GET", "/api/urled")
+response = conn.getresponse()
+body = response.read().decode("utf-8")
+conn.close()
+if response.status != 200:
+    sys.exit(f"expected 200 from /api/urled, got {response.status}: {body}")
+url_payload = json.loads(body)
+expected_url = {
+    "filePath": "/tmp/beater/routes/index.ts",
+    "localhostPath": "/tmp/beater/routes/index.ts",
+    "bareFilePath": "/tmp/beater/bare.ts",
+    "fileHref": "file:///tmp/beater/space%20name.ts",
+    "encodedHref": "file:///tmp/beater/hash%23query%3F.ts",
+    "defaultHref": "file:///tmp/beater/default.ts",
+    "parsedHref": "https://example.test/app/api/health?q=beater#frag",
+    "paramsAll": ["beater js", "agent"],
+    "stringParam": "a=b=",
+    "nullParams": "",
+    "mutableHref": "https://idp.example/cb?state=a%3Db%3D",
+    "queryOnlyHref": "https://example.test/app/items?page=2",
+    "hashOnlyHref": "https://example.test/app/items?old=1#next",
+    "importedGlobal": True,
+    "paramsGlobal": True,
+    "importMetaPath": True,
+    "badHostRejected": True,
+    "encodedSlashRejected": True,
+    "relativePathRejected": True,
+}
+if url_payload != expected_url:
+    sys.exit(f"unexpected /api/urled payload: {url_payload!r}")
+
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
 conn.request("GET", "/api/buffered")
 response = conn.getresponse()
 body = response.read().decode("utf-8")
@@ -401,6 +507,7 @@ print(
     f"zod import returned {zod_payload['value']}; "
     f"cjs doubled {cjs_payload['doubled']}; "
     f"path resolved {path_payload['resolved']}; "
+    f"url file {url_payload['filePath']}; "
     f"buffer base64 {buffer_payload['base64']}; "
     f"process env {process_payload['nodeEnv']}; "
     "require failed closed"

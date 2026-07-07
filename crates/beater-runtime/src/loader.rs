@@ -55,6 +55,7 @@ fn vendor_specifier(specifier: &str) -> Option<&'static str> {
         "node:buffer" | "buffer" => Some("beater:vendor/node-buffer"),
         "node:path" | "path" => Some("beater:vendor/node-path"),
         "node:process" | "process" => Some("beater:vendor/node-process"),
+        "node:url" | "url" => Some("beater:vendor/node-url"),
         _ => None,
     }
 }
@@ -72,6 +73,7 @@ fn vendor_source(specifier: &str) -> Option<&'static str> {
         "beater:vendor/node-buffer" => Some(include_str!("../assets/vendor/node-buffer.mjs")),
         "beater:vendor/node-path" => Some(include_str!("../assets/vendor/node-path.mjs")),
         "beater:vendor/node-process" => Some(include_str!("../assets/vendor/node-process.mjs")),
+        "beater:vendor/node-url" => Some(include_str!("../assets/vendor/node-url.mjs")),
         _ => None,
     }
 }
@@ -1416,6 +1418,23 @@ mod tests {
     }
 
     #[test]
+    fn node_url_vendor_specifiers_resolve_to_checked_in_shim() {
+        assert_eq!(
+            super::vendor_specifier("node:url"),
+            Some("beater:vendor/node-url")
+        );
+        assert_eq!(
+            super::vendor_specifier("url"),
+            Some("beater:vendor/node-url")
+        );
+
+        let source = super::vendor_source("beater:vendor/node-url").unwrap();
+        assert!(source.contains("deterministic file URL shim"));
+        assert!(source.contains("export function fileURLToPath"));
+        assert!(source.contains("export function pathToFileURL"));
+    }
+
+    #[test]
     fn node_buffer_vendor_module_loads_from_beater_scheme() {
         let specifier = ModuleSpecifier::parse("beater:vendor/node-buffer").unwrap();
         let source = source_text(load_sync(&specifier).unwrap());
@@ -1441,6 +1460,16 @@ mod tests {
         assert!(source.contains("sep = \"/\""));
         assert!(source.contains("default path"));
         assert!(source.contains("posix"));
+    }
+
+    #[test]
+    fn node_url_vendor_module_loads_from_beater_scheme() {
+        let specifier = ModuleSpecifier::parse("beater:vendor/node-url").unwrap();
+        let source = source_text(load_sync(&specifier).unwrap());
+
+        assert!(source.contains("URLSearchParams"));
+        assert!(source.contains("encoded slash"));
+        assert!(source.contains("default url"));
     }
 
     #[test]
