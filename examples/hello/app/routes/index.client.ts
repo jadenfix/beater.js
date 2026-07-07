@@ -31,6 +31,21 @@ if (root) {
 }
 
 if (rscRoot) {
+  type RscManifestRoute = {
+    id: string;
+    route: string;
+    transport: string;
+    version: number;
+    flight: string;
+    client?: string | null;
+  };
+
+  type RscManifest = {
+    protocol: string;
+    version: number;
+    routes: RscManifestRoute[];
+  };
+
   type FlightState = {
     began: boolean;
     ended: boolean;
@@ -54,7 +69,17 @@ if (rscRoot) {
   };
 
   const renderFlight = async () => {
-    const response = await fetch("/_beater/rsc/index.flight", {
+    const manifestResponse = await fetch("/_beater/rsc/manifest.json", {
+      headers: { accept: "application/json" },
+    });
+    if (!manifestResponse.ok) throw new Error(`RSC manifest returned ${manifestResponse.status}`);
+    const manifest = (await manifestResponse.json()) as RscManifest;
+    if (manifest.protocol !== "beater-rsc-manifest") {
+      throw new Error("RSC manifest protocol mismatch");
+    }
+    const route = manifest.routes.find((entry) => entry.route === "/" && entry.transport === "beater-flight");
+    if (!route) throw new Error("RSC manifest did not include the current route");
+    const response = await fetch(route.flight, {
       headers: { accept: "text/x-component" },
     });
     if (!response.ok) throw new Error(`RSC flight returned ${response.status}`);

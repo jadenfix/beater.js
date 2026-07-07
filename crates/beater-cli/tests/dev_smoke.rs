@@ -801,6 +801,26 @@ export function GET() {
     assert!(flight.contains("H["), "{flight}");
     assert!(flight.contains("E{\"ok\":true}"), "{flight}");
 
+    let rsc_manifest =
+        http_request(port, "GET", "/_beater/rsc/manifest.json", None).expect("GET RSC manifest");
+    assert!(rsc_manifest.starts_with("HTTP/1.1 200"), "{rsc_manifest}");
+    assert!(
+        rsc_manifest.contains("content-type: application/json"),
+        "{rsc_manifest}"
+    );
+    assert!(
+        rsc_manifest.contains(r#""protocol":"beater-rsc-manifest""#),
+        "{rsc_manifest}"
+    );
+    assert!(
+        rsc_manifest.contains(r#""flight":"/_beater/rsc/index.flight""#),
+        "{rsc_manifest}"
+    );
+    assert!(
+        rsc_manifest.contains(r#""client":"/_beater/client/index.js""#),
+        "{rsc_manifest}"
+    );
+
     let doctor = Command::new(&beater)
         .arg("doctor")
         .arg(&app)
