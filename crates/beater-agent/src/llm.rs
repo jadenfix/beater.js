@@ -26,20 +26,20 @@ pub struct LlmSelection {
 
 impl LlmSelection {
     pub fn from_config(config: &AgentConfig) -> Result<Self> {
-        let generic_provider_env = std::env::var_os("BEATER_LLM_API_KEY").is_some()
-            || std::env::var_os("BEATER_LLM_BASE_URL").is_some();
-        let provider = match std::env::var("BEATER_LLM_PROVIDER") {
-            Ok(provider) => provider,
-            Err(_) if generic_provider_env => {
+        let generic_provider_env = env_non_empty("BEATER_LLM_API_KEY").is_some()
+            || env_non_empty("BEATER_LLM_BASE_URL").is_some();
+        let provider = match env_non_empty("BEATER_LLM_PROVIDER") {
+            Some(provider) => provider,
+            None if generic_provider_env => {
                 bail!(
                     "BEATER_LLM_PROVIDER is required when using BEATER_LLM_API_KEY or BEATER_LLM_BASE_URL"
                 )
             }
-            Err(_) => config.provider.clone(),
+            None => config.provider.clone(),
         };
         Ok(Self {
             provider,
-            model: std::env::var("BEATER_LLM_MODEL").unwrap_or_else(|_| config.model.clone()),
+            model: env_non_empty("BEATER_LLM_MODEL").unwrap_or_else(|| config.model.clone()),
         })
     }
 }
@@ -80,6 +80,10 @@ fn normalize_provider(provider: &str) -> String {
     provider.trim().to_ascii_lowercase().replace('_', "-")
 }
 
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
 pub struct OpenAiCompatible {
     http: reqwest::Client,
     api_key: String,
@@ -88,16 +92,16 @@ pub struct OpenAiCompatible {
 
 impl OpenAiCompatible {
     fn from_env() -> Result<Self> {
-        let api_key = std::env::var("BEATER_LLM_API_KEY")
-            .or_else(|_| std::env::var("BEATER_OPENAI_API_KEY"))
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+        let api_key = env_non_empty("BEATER_LLM_API_KEY")
+            .or_else(|| env_non_empty("BEATER_OPENAI_API_KEY"))
+            .or_else(|| env_non_empty("OPENAI_API_KEY"))
             .context(
                 "BEATER_LLM_API_KEY, BEATER_OPENAI_API_KEY, or OPENAI_API_KEY is not set for provider openai-compatible",
             )?;
-        let base_url = std::env::var("BEATER_LLM_BASE_URL")
-            .or_else(|_| std::env::var("BEATER_OPENAI_BASE_URL"))
-            .or_else(|_| std::env::var("OPENAI_BASE_URL"))
-            .unwrap_or_else(|_| DEFAULT_OPENAI_BASE_URL.to_string());
+        let base_url = env_non_empty("BEATER_LLM_BASE_URL")
+            .or_else(|| env_non_empty("BEATER_OPENAI_BASE_URL"))
+            .or_else(|| env_non_empty("OPENAI_BASE_URL"))
+            .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
         Self::new(api_key, &base_url, DEFAULT_REQUEST_TIMEOUT)
     }
 
@@ -734,6 +738,20 @@ mod tests {
 
         assert_eq!(selection.provider, "openai-compatible");
         assert_eq!(selection.model, "provider-model");
+    }
+
+    #[test]
+    fn empty_generic_llm_env_is_ignored() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key = EnvGuard::set("BEATER_LLM_API_KEY", "");
+        let _base = EnvGuard::set("BEATER_LLM_BASE_URL", "");
+        let _provider = EnvGuard::unset("BEATER_LLM_PROVIDER");
+        let _model = EnvGuard::set("BEATER_LLM_MODEL", "");
+
+        let selection = LlmSelection::from_config(&fixture_config()).unwrap();
+
+        assert_eq!(selection.provider, "anthropic");
+        assert_eq!(selection.model, "claude-fixture");
     }
     use serde_json::json;
     use std::collections::HashMap;

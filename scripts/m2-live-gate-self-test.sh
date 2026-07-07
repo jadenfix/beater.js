@@ -128,6 +128,8 @@ touch "$DRY_APP/agents/support/tools/slow_summarize_once.py"
 BEATER_APP="$DRY_APP" \
 BEATER_BIN="/bin/sh" \
 M2_GATE_OUT="$TMP/dry-out" \
+M2_GATE_PROVIDER="" \
+M2_GATE_MODEL="" \
 BEATER_LLM_PROVIDER="openai-compatible" \
 BEATER_LLM_MODEL="model-fixture" \
 BEATER_LLM_API_KEY="fixture-key" \
@@ -150,6 +152,8 @@ touch "$TMP/non-empty-out/existing"
 if BEATER_APP="$DRY_APP" \
   BEATER_BIN="/bin/sh" \
   M2_GATE_OUT="$TMP/non-empty-out" \
+  M2_GATE_PROVIDER="" \
+  M2_GATE_MODEL="" \
   BEATER_LLM_PROVIDER="openai-compatible" \
   BEATER_LLM_MODEL="model-fixture" \
   BEATER_LLM_API_KEY="fixture-key" \

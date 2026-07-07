@@ -19,12 +19,12 @@ pub struct Anthropic {
 
 impl Anthropic {
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("BEATER_LLM_API_KEY")
-            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+        let api_key = env_non_empty("BEATER_LLM_API_KEY")
+            .or_else(|| env_non_empty("ANTHROPIC_API_KEY"))
             .context("BEATER_LLM_API_KEY or ANTHROPIC_API_KEY is not set for provider anthropic")?;
-        let base_url = std::env::var("BEATER_LLM_BASE_URL")
-            .or_else(|_| std::env::var("ANTHROPIC_BASE_URL"))
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base_url = env_non_empty("BEATER_LLM_BASE_URL")
+            .or_else(|| env_non_empty("ANTHROPIC_BASE_URL"))
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         validate_anthropic_base_url(
             &messages_url(&base_url),
             env_flag("BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL"),
@@ -87,6 +87,10 @@ impl Anthropic {
         }
         assembler.finish()
     }
+}
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 #[derive(Default)]
