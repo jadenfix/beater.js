@@ -78,7 +78,7 @@ pub fn run(
         "agent.ts declares name {:?} but directory is {agent_name:?}",
         config.name
     );
-    let llm = LlmSelection::from_config(&config);
+    let llm = LlmSelection::from_config(&config)?;
     let client = LlmClient::from_provider(&llm.provider)?;
     let journal = Journal::open(app_dir)?;
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -123,7 +123,7 @@ pub fn resume(
     let config_value = load_config(&run.agent)?;
     let (config, registry) = setup(app_dir, config_value, venv.as_ref(), &beatbox)?;
     let steps = journal.steps(run_id)?;
-    let llm = LlmSelection::from_config(&config);
+    let llm = LlmSelection::from_config(&config)?;
 
     let ctx = Ctx {
         journal,

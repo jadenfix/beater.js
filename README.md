@@ -37,8 +37,9 @@ cargo build --workspace
 python3.11 -m venv my-app/.venv                          # optional: enables third-party Python packages
 ./target/debug/beater dev my-app                         # serve routes with hot reload
 BEATER_MCP_TOKEN=dev-token ./target/debug/beater dev my-app --host 0.0.0.0 --base-url https://hello.example.com
-export ANTHROPIC_API_KEY=sk-ant-...                     # default Anthropic provider for live agent runs
-# Or use an OpenAI-compatible provider such as NVIDIA with BEATER_LLM_PROVIDER, BEATER_LLM_MODEL, BEATER_OPENAI_BASE_URL, and BEATER_OPENAI_API_KEY.
+export BEATER_LLM_PROVIDER=anthropic                    # default live agent provider
+export BEATER_LLM_API_KEY=...                           # provider key; never commit it
+# Or set BEATER_LLM_PROVIDER=openai-compatible, BEATER_LLM_MODEL, BEATER_LLM_BASE_URL, and BEATER_LLM_API_KEY for NVIDIA-style endpoints.
 ./target/debug/beater agent run --app my-app support "summarize 3,1,4,1,5"
 ./target/debug/beater agent resume --app my-app <run_id>
 ./target/debug/beater doctor my-app                      # verify Python/venv/V8 wiring
@@ -114,17 +115,17 @@ export default defineAgent({
 });
 ```
 
-The runner keeps one canonical journal/tool shape and adapts at the network boundary. Anthropic uses `ANTHROPIC_API_KEY` plus optional `ANTHROPIC_BASE_URL`; custom Anthropic HTTPS origins require `BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL=1`, and HTTP loopback mocks require `BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK=1`. OpenAI-compatible chat-completions providers use:
+The runner keeps one canonical journal/tool shape and adapts at the network boundary. Deployments can use the provider-agnostic env surface:
 
 ```sh
 export BEATER_LLM_PROVIDER=openai-compatible
 export BEATER_LLM_MODEL=z-ai/glm-5.2
-export BEATER_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+export BEATER_LLM_BASE_URL=https://integrate.api.nvidia.com/v1
 export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
-export BEATER_OPENAI_API_KEY=...
+export BEATER_LLM_API_KEY=...
 ```
 
-`BEATER_LLM_PROVIDER` and `BEATER_LLM_MODEL` override `agent.ts` for smoke tests and deployments. `BEATER_OPENAI_*` take precedence over `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
+`BEATER_LLM_PROVIDER` and `BEATER_LLM_MODEL` override `agent.ts` for smoke tests and deployments. `BEATER_LLM_API_KEY` and `BEATER_LLM_BASE_URL` are read by the selected provider adapter, and `beater agent run` refuses them unless `BEATER_LLM_PROVIDER` is explicit. Provider-specific aliases remain supported: Anthropic also accepts `ANTHROPIC_API_KEY` plus optional `ANTHROPIC_BASE_URL`; OpenAI-compatible chat-completions providers also accept `BEATER_OPENAI_API_KEY` or `OPENAI_API_KEY` plus `BEATER_OPENAI_BASE_URL` or `OPENAI_BASE_URL`. Adapter-specific safety flags still apply: custom Anthropic HTTPS origins require `BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL=1`; custom OpenAI-compatible HTTPS origins require `BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1`; insecure HTTP is accepted only for explicit loopback fixtures.
 
 Run `scripts/llm-provider-conformance-gate.cjs` after `cargo build --bin beater` for the no-secret provider proof. It drives the real `beater agent run` loop through loopback Anthropic and OpenAI-compatible SSE mocks, verifies Python tool execution, checks OpenAI tool-name sanitization/fallback IDs, and asserts both providers write the same canonical journal shape.
 
@@ -133,9 +134,9 @@ Run `scripts/llm-live-provider-smoke.cjs` only when you intentionally want to sp
 ```sh
 export BEATER_LIVE_PROVIDER=openai-compatible
 export BEATER_LLM_MODEL=z-ai/glm-5.2
-export BEATER_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+export BEATER_LLM_BASE_URL=https://integrate.api.nvidia.com/v1
 export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
-export BEATER_OPENAI_API_KEY=...
+export BEATER_LLM_API_KEY=...
 node scripts/llm-live-provider-smoke.cjs --dry-run
 node scripts/llm-live-provider-smoke.cjs
 ```
@@ -145,9 +146,9 @@ The M2 crash/resume live gate uses the same provider abstraction. It defaults to
 ```sh
 export BEATER_LLM_PROVIDER=openai-compatible
 export BEATER_LLM_MODEL=z-ai/glm-5.2
-export BEATER_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+export BEATER_LLM_BASE_URL=https://integrate.api.nvidia.com/v1
 export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
-export BEATER_OPENAI_API_KEY=...
+export BEATER_LLM_API_KEY=...
 scripts/m2-live-gate.sh --dry-run
 scripts/m2-live-gate.sh
 ```

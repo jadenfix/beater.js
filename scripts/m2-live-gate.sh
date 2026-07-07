@@ -48,6 +48,7 @@ Configuration is read from environment variables:
   BEATER_APP, BEATER_BIN, M2_GATE_OUT
   M2_GATE_PROVIDER or BEATER_LLM_PROVIDER
   M2_GATE_MODEL or BEATER_LLM_MODEL
+  BEATER_LLM_API_KEY, BEATER_LLM_BASE_URL
   ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL
   BEATER_OPENAI_API_KEY or OPENAI_API_KEY
   BEATER_OPENAI_BASE_URL or OPENAI_BASE_URL
@@ -147,6 +148,9 @@ canonical_provider() {
 selected_provider() {
   local requested="${M2_GATE_PROVIDER:-${BEATER_LLM_PROVIDER:-}}"
   if [[ -z "$requested" ]]; then
+    if [[ -n "${BEATER_LLM_API_KEY:-}${BEATER_LLM_BASE_URL:-}" ]]; then
+      fail "BEATER_LLM_PROVIDER is required when using BEATER_LLM_API_KEY or BEATER_LLM_BASE_URL"
+    fi
     if [[ -z "${ANTHROPIC_API_KEY:-}" && -n "${BEATER_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}" ]]; then
       requested="openai-compatible"
     else
@@ -173,6 +177,85 @@ validate_provider_base_url_for_evidence() {
   fi
 }
 
+env_flag() {
+  local value="${!1:-}"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "TRUE" || "$value" == "yes" || "$value" == "YES" ]]
+}
+
+base_url_host() {
+  local raw="$1"
+  local authority="${raw#*://}"
+  authority="${authority%%/*}"
+  if [[ "$authority" == \[*\]* ]]; then
+    local host="${authority%%]*}"
+    printf '%s\n' "${host#[}"
+  else
+    printf '%s\n' "${authority%%:*}"
+  fi
+}
+
+is_loopback_host() {
+  local host
+  local a b c d part value
+  host="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$host" == "localhost" || "$host" == "::1" ]]; then
+    return 0
+  fi
+  if [[ "$host" =~ ^127\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    IFS='.' read -r a b c d <<<"$host"
+    for part in "$a" "$b" "$c" "$d"; do
+      [[ "$part" =~ ^[0-9]+$ ]] || return 1
+      [[ "$part" == "0" || "$part" != 0* ]] || return 1
+      value=$((10#$part))
+      (( value >= 0 && value <= 255 )) || return 1
+    done
+    return 0
+  fi
+  return 1
+}
+
+validate_provider_base_url_policy() {
+  local provider="$1"
+  local raw="$2"
+  local scheme="${raw%%:*}"
+  local host
+
+  [[ "$raw" == *"://"* ]] || fail "$provider base URL must include a scheme and host"
+  host="$(base_url_host "$raw")"
+  [[ -n "$host" ]] || fail "$provider base URL must include a host"
+
+  case "$provider" in
+    anthropic)
+      if [[ "$scheme" == "https" && "$host" == "api.anthropic.com" ]]; then
+        return 0
+      fi
+      if [[ "$scheme" == "https" ]]; then
+        env_flag BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL || fail "custom Anthropic HTTPS origins require BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL=1"
+        return 0
+      fi
+      if [[ "$scheme" == "http" ]] && is_loopback_host "$host"; then
+        env_flag BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK || fail "Anthropic HTTP loopback requires BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK=1"
+        return 0
+      fi
+      fail "Anthropic base URL must use https, or http loopback with BEATER_ANTHROPIC_ALLOW_INSECURE_LOOPBACK=1"
+      ;;
+    openai-compatible)
+      if [[ "$scheme" == "https" && "$host" == "api.openai.com" ]]; then
+        return 0
+      fi
+      if [[ "$scheme" == "https" ]]; then
+        env_flag BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL || fail "custom OpenAI-compatible HTTPS origins require BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1"
+        return 0
+      fi
+      if [[ "$scheme" == "http" ]] && is_loopback_host "$host"; then
+        env_flag BEATER_OPENAI_ALLOW_INSECURE_LOOPBACK || fail "OpenAI-compatible HTTP loopback requires BEATER_OPENAI_ALLOW_INSECURE_LOOPBACK=1"
+        return 0
+      fi
+      fail "OpenAI-compatible base URL must use https, or http loopback with BEATER_OPENAI_ALLOW_INSECURE_LOOPBACK=1"
+      ;;
+  esac
+}
+
 configure_provider() {
   LLM_PROVIDER="$(selected_provider)"
   LLM_MODEL="${M2_GATE_MODEL:-${BEATER_LLM_MODEL:-}}"
@@ -180,17 +263,18 @@ configure_provider() {
 
   case "$LLM_PROVIDER" in
     anthropic)
-      [[ -n "${ANTHROPIC_API_KEY:-}" ]] || fail "ANTHROPIC_API_KEY is not set for provider anthropic"
-      LLM_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+      [[ -n "${BEATER_LLM_API_KEY:-${ANTHROPIC_API_KEY:-}}" ]] || fail "BEATER_LLM_API_KEY or ANTHROPIC_API_KEY is not set for provider anthropic"
+      LLM_BASE_URL="${BEATER_LLM_BASE_URL:-${ANTHROPIC_BASE_URL:-https://api.anthropic.com}}"
       ;;
     openai-compatible)
-      [[ -n "${BEATER_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}" ]] || fail "BEATER_OPENAI_API_KEY or OPENAI_API_KEY is not set for provider openai-compatible"
+      [[ -n "${BEATER_LLM_API_KEY:-${BEATER_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}}" ]] || fail "BEATER_LLM_API_KEY, BEATER_OPENAI_API_KEY, or OPENAI_API_KEY is not set for provider openai-compatible"
       [[ -n "$LLM_MODEL" ]] || fail "BEATER_LLM_MODEL or M2_GATE_MODEL is required for provider openai-compatible so the Anthropic example model is not sent to a different provider"
-      LLM_BASE_URL="${BEATER_OPENAI_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}"
+      LLM_BASE_URL="${BEATER_LLM_BASE_URL:-${BEATER_OPENAI_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}}"
       ;;
   esac
 
   validate_provider_base_url_for_evidence "$LLM_BASE_URL"
+  validate_provider_base_url_policy "$LLM_PROVIDER" "$LLM_BASE_URL"
   export BEATER_LLM_PROVIDER="$LLM_PROVIDER"
   if [[ -n "$LLM_MODEL" ]]; then
     export BEATER_LLM_MODEL="$LLM_MODEL"

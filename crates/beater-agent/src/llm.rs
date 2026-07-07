@@ -25,12 +25,22 @@ pub struct LlmSelection {
 }
 
 impl LlmSelection {
-    pub fn from_config(config: &AgentConfig) -> Self {
-        Self {
-            provider: std::env::var("BEATER_LLM_PROVIDER")
-                .unwrap_or_else(|_| config.provider.clone()),
-            model: std::env::var("BEATER_LLM_MODEL").unwrap_or_else(|_| config.model.clone()),
-        }
+    pub fn from_config(config: &AgentConfig) -> Result<Self> {
+        let generic_provider_env = env_non_empty("BEATER_LLM_API_KEY").is_some()
+            || env_non_empty("BEATER_LLM_BASE_URL").is_some();
+        let provider = match env_non_empty("BEATER_LLM_PROVIDER") {
+            Some(provider) => provider,
+            None if generic_provider_env => {
+                bail!(
+                    "BEATER_LLM_PROVIDER is required when using BEATER_LLM_API_KEY or BEATER_LLM_BASE_URL"
+                )
+            }
+            None => config.provider.clone(),
+        };
+        Ok(Self {
+            provider,
+            model: env_non_empty("BEATER_LLM_MODEL").unwrap_or_else(|| config.model.clone()),
+        })
     }
 }
 
@@ -70,6 +80,10 @@ fn normalize_provider(provider: &str) -> String {
     provider.trim().to_ascii_lowercase().replace('_', "-")
 }
 
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
 pub struct OpenAiCompatible {
     http: reqwest::Client,
     api_key: String,
@@ -78,14 +92,16 @@ pub struct OpenAiCompatible {
 
 impl OpenAiCompatible {
     fn from_env() -> Result<Self> {
-        let api_key = std::env::var("BEATER_OPENAI_API_KEY")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+        let api_key = env_non_empty("BEATER_LLM_API_KEY")
+            .or_else(|| env_non_empty("BEATER_OPENAI_API_KEY"))
+            .or_else(|| env_non_empty("OPENAI_API_KEY"))
             .context(
-                "BEATER_OPENAI_API_KEY or OPENAI_API_KEY is not set for provider openai-compatible",
+                "BEATER_LLM_API_KEY, BEATER_OPENAI_API_KEY, or OPENAI_API_KEY is not set for provider openai-compatible",
             )?;
-        let base_url = std::env::var("BEATER_OPENAI_BASE_URL")
-            .or_else(|_| std::env::var("OPENAI_BASE_URL"))
-            .unwrap_or_else(|_| DEFAULT_OPENAI_BASE_URL.to_string());
+        let base_url = env_non_empty("BEATER_LLM_BASE_URL")
+            .or_else(|| env_non_empty("BEATER_OPENAI_BASE_URL"))
+            .or_else(|| env_non_empty("OPENAI_BASE_URL"))
+            .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
         Self::new(api_key, &base_url, DEFAULT_REQUEST_TIMEOUT)
     }
 
@@ -640,10 +656,103 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiStreamAssembler, SseEvent, ToolNameMap, handle_openai_event,
+        LlmSelection, OpenAiStreamAssembler, SseEvent, ToolNameMap, handle_openai_event,
         openai_fallback_tool_id_prefix, openai_request_body, openai_tool_name,
         validate_openai_base_url,
     };
+    use crate::registry::AgentConfig;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var(name).ok();
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name, previous }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = std::env::var(name).ok();
+            unsafe {
+                std::env::remove_var(name);
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(previous) => std::env::set_var(self.name, previous),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
+    fn fixture_config() -> AgentConfig {
+        AgentConfig {
+            name: "support".to_string(),
+            provider: "anthropic".to_string(),
+            model: "claude-fixture".to_string(),
+            system: String::new(),
+            tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn generic_llm_env_requires_explicit_provider_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key = EnvGuard::set("BEATER_LLM_API_KEY", "fixture-key");
+        let _base = EnvGuard::unset("BEATER_LLM_BASE_URL");
+        let _provider = EnvGuard::unset("BEATER_LLM_PROVIDER");
+
+        let err = match LlmSelection::from_config(&fixture_config()) {
+            Ok(_) => panic!("generic LLM env should require an explicit provider override"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("BEATER_LLM_PROVIDER is required"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn generic_llm_env_accepts_explicit_provider_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key = EnvGuard::set("BEATER_LLM_API_KEY", "fixture-key");
+        let _provider = EnvGuard::set("BEATER_LLM_PROVIDER", "openai-compatible");
+        let _model = EnvGuard::set("BEATER_LLM_MODEL", "provider-model");
+
+        let selection = LlmSelection::from_config(&fixture_config()).unwrap();
+
+        assert_eq!(selection.provider, "openai-compatible");
+        assert_eq!(selection.model, "provider-model");
+    }
+
+    #[test]
+    fn empty_generic_llm_env_is_ignored() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key = EnvGuard::set("BEATER_LLM_API_KEY", "");
+        let _base = EnvGuard::set("BEATER_LLM_BASE_URL", "");
+        let _provider = EnvGuard::unset("BEATER_LLM_PROVIDER");
+        let _model = EnvGuard::set("BEATER_LLM_MODEL", "");
+
+        let selection = LlmSelection::from_config(&fixture_config()).unwrap();
+
+        assert_eq!(selection.provider, "anthropic");
+        assert_eq!(selection.model, "claude-fixture");
+    }
     use serde_json::json;
     use std::collections::HashMap;
 

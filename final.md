@@ -128,10 +128,12 @@ The work below is not just about matching Node/Next request handling. The end st
 
 ### A1. Prerequisite: funded supported-provider API access in the shell environment
 
-The only external input needed is a funded live provider that satisfies the canonical tool-call contract. Anthropic remains the default path:
+The only external input needed is a funded live provider that satisfies the canonical tool-call contract. Use the provider-agnostic deployment surface so the key, model, and base URL travel with the selected adapter:
 
 ```sh
-echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshenv
+export BEATER_LLM_PROVIDER=anthropic
+export BEATER_LLM_MODEL=claude-opus-4-8
+export BEATER_LLM_API_KEY=...
 ```
 
 OpenAI-compatible providers, including NVIDIA-style endpoints, are also valid when the provider, model, base URL, custom-origin opt-in, and key are configured together:
@@ -139,9 +141,9 @@ OpenAI-compatible providers, including NVIDIA-style endpoints, are also valid wh
 ```sh
 export BEATER_LLM_PROVIDER=openai-compatible
 export BEATER_LLM_MODEL=z-ai/glm-5.2
-export BEATER_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+export BEATER_LLM_BASE_URL=https://integrate.api.nvidia.com/v1
 export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1
-export BEATER_OPENAI_API_KEY=...
+export BEATER_LLM_API_KEY=...
 ```
 
 Once the funded provider config is present and `./target/debug/beater` is built, run `scripts/m2-live-gate.sh --dry-run` first to validate the local binary, app fixtures, provider selection, model, base URL, and output path without making provider API calls. Then `scripts/m2-live-gate.sh` runs A3-A5 and writes transcripts plus an `evidence.md` manifest under `examples/hello/.beater/m2-gate/<timestamp-pid>/`. Authentication, billing, quota, or model-access failures before the first completed tool call are external-provider blockers, not M2 evidence; preserve the failed transcript if useful, but do not flip M2 to done.

@@ -25,6 +25,8 @@ redacted from saved logs.
 Environment:
   BEATER_LIVE_PROVIDER=anthropic|openai-compatible|all-configured
   BEATER_LLM_MODEL=<model>                         shared model override
+  BEATER_LLM_API_KEY=...                           shared provider key
+  BEATER_LLM_BASE_URL=https://...                  shared provider base URL
   BEATER_LIVE_ANTHROPIC_MODEL=<model>              Anthropic-specific model
   BEATER_LIVE_OPENAI_MODEL=<model>                 OpenAI-compatible model
   ANTHROPIC_API_KEY=...                            Anthropic live key
@@ -36,7 +38,7 @@ Environment:
 
 function parseArgs(argv) {
   const args = {
-    provider: process.env.BEATER_LIVE_PROVIDER ?? "all-configured",
+    provider: process.env.BEATER_LIVE_PROVIDER ?? process.env.BEATER_LLM_PROVIDER ?? "all-configured",
     dryRun: false,
     out: process.env.BEATER_LIVE_PROVIDER_OUT ?? defaultOut,
   };
@@ -82,6 +84,7 @@ function modelFor(provider) {
 }
 
 function keyFor(provider) {
+  if (process.env.BEATER_LLM_API_KEY) return process.env.BEATER_LLM_API_KEY;
   if (provider === "anthropic") return process.env.ANTHROPIC_API_KEY;
   if (provider === "openai-compatible") {
     return process.env.BEATER_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
@@ -90,6 +93,7 @@ function keyFor(provider) {
 }
 
 function baseUrlFor(provider) {
+  if (process.env.BEATER_LLM_BASE_URL) return process.env.BEATER_LLM_BASE_URL;
   if (provider === "anthropic") {
     return process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com";
   }
@@ -197,8 +201,8 @@ function providerConfig(provider, explicit) {
     if (!explicit) return null;
     const keyName =
       canonical === "anthropic"
-        ? "ANTHROPIC_API_KEY"
-        : "BEATER_OPENAI_API_KEY or OPENAI_API_KEY";
+        ? "BEATER_LLM_API_KEY or ANTHROPIC_API_KEY"
+        : "BEATER_LLM_API_KEY, BEATER_OPENAI_API_KEY, or OPENAI_API_KEY";
     throw new Error(`${keyName} is required for ${canonical} live smoke`);
   }
   if (!model) {
@@ -222,6 +226,20 @@ function selectedProviders(requested) {
     .map(canonicalProvider)
     .map((value) => value.trim())
     .filter(Boolean);
+  const usesGenericProviderEnv = process.env.BEATER_LLM_API_KEY || process.env.BEATER_LLM_BASE_URL;
+  if (usesGenericProviderEnv && values.length !== 1) {
+    throw new Error(
+      "BEATER_LLM_API_KEY or BEATER_LLM_BASE_URL requires exactly one BEATER_LIVE_PROVIDER or BEATER_LLM_PROVIDER",
+    );
+  }
+  if (
+    (values.length === 0 || values.includes("all-configured")) &&
+    usesGenericProviderEnv
+  ) {
+    throw new Error(
+      "BEATER_LIVE_PROVIDER or BEATER_LLM_PROVIDER is required when using BEATER_LLM_API_KEY or BEATER_LLM_BASE_URL",
+    );
+  }
   if (values.length === 0 || values.includes("all-configured")) {
     const configured = ["anthropic", "openai-compatible"]
       .map((provider) => providerConfig(provider, false))
@@ -238,6 +256,7 @@ function selectedProviders(requested) {
 
 function secretValues() {
   return [
+    process.env.BEATER_LLM_API_KEY,
     process.env.ANTHROPIC_API_KEY,
     process.env.BEATER_OPENAI_API_KEY,
     process.env.OPENAI_API_KEY,
@@ -320,12 +339,18 @@ function gateEnv(config) {
     BEATER_LLM_PROVIDER: config.provider,
     BEATER_LLM_MODEL: config.model,
   };
+  if (process.env.BEATER_LLM_API_KEY) env.BEATER_LLM_API_KEY = process.env.BEATER_LLM_API_KEY;
+  if (process.env.BEATER_LLM_BASE_URL) {
+    env.BEATER_LLM_BASE_URL = process.env.BEATER_LLM_BASE_URL;
+  }
   if (process.platform === "darwin" && !env.DYLD_FRAMEWORK_PATH) {
     env.DYLD_FRAMEWORK_PATH = macPythonFrameworkPath;
   }
   if (config.provider === "anthropic") {
-    env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-    if (process.env.ANTHROPIC_BASE_URL) env.ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL;
+    if (!process.env.BEATER_LLM_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+    if (!process.env.BEATER_LLM_BASE_URL && process.env.ANTHROPIC_BASE_URL) {
+      env.ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL;
+    }
     if (process.env.BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL) {
       env.BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL =
         process.env.BEATER_ANTHROPIC_ALLOW_CUSTOM_BASE_URL;
@@ -336,15 +361,19 @@ function gateEnv(config) {
     }
   }
   if (config.provider === "openai-compatible") {
-    if (process.env.BEATER_OPENAI_API_KEY) {
-      env.BEATER_OPENAI_API_KEY = process.env.BEATER_OPENAI_API_KEY;
-    } else {
-      env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!process.env.BEATER_LLM_API_KEY) {
+      if (process.env.BEATER_OPENAI_API_KEY) {
+        env.BEATER_OPENAI_API_KEY = process.env.BEATER_OPENAI_API_KEY;
+      } else {
+        env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+      }
     }
-    if (process.env.BEATER_OPENAI_BASE_URL) {
-      env.BEATER_OPENAI_BASE_URL = process.env.BEATER_OPENAI_BASE_URL;
+    if (!process.env.BEATER_LLM_BASE_URL) {
+      if (process.env.BEATER_OPENAI_BASE_URL) {
+        env.BEATER_OPENAI_BASE_URL = process.env.BEATER_OPENAI_BASE_URL;
+      }
+      if (process.env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = process.env.OPENAI_BASE_URL;
     }
-    if (process.env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = process.env.OPENAI_BASE_URL;
     if (process.env.BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL) {
       env.BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL =
         process.env.BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL;
