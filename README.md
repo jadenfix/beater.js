@@ -72,11 +72,11 @@ Client modules are route companions such as `app/routes/index.client.ts`. They a
 
 RSC transport is starting as route companions such as `app/routes/index.server.tsx`, streamed from `/_beater/rsc/index.flight` with `text/x-component` frames over the same isolate-to-host stream channel. This is the transport wedge; full React Flight client runtime and client-reference manifests are still Phase C work.
 
-`beater build` currently emits a host-platform bundle: copied app assets, the current `beater` binary, `run.sh`, `beater-build.json`, `.dockerignore`, and a Dockerfile that runs as a non-root `beater` user. Runtime state and common local credential files are excluded. The bundle launcher is tested by starting it and hitting `/api/health`, and CI runs a Linux Docker cold-start gate that builds an image, starts the container, verifies `/api/health`, and proves `/mcp` rejects unauthenticated requests while accepting a bearer token.
+`beater build` currently emits a host-platform bundle: copied app assets including a real `.venv` when present, the current `beater` binary, `run.sh`, `beater-build.json`, `.dockerignore`, and a Dockerfile that runs as a non-root `beater` user. Runtime state and common local credential files are excluded. The bundle launcher is tested by starting it and hitting `/api/health`, and CI runs a Linux Docker cold-start gate that builds an image from a Linux app copy with a real symlink-free `.venv`, starts the container, verifies `/api/health`, proves `beater doctor ./app` reports `venv ok:`, and proves `/mcp` rejects unauthenticated requests while accepting a bearer token.
 
 ## Docker deploy gate
 
-The end-to-end deploy proof lives in `scripts/docker-cold-start-gate.sh`. It builds the release CLI inside a Linux Docker builder, runs `beater build` against `examples/hello`, builds the generated Dockerfile, starts the image on a loopback-only published port, waits for `/api/health`, and checks authenticated MCP tool discovery.
+The end-to-end deploy proof lives in `scripts/docker-cold-start-gate.sh`. It builds the release CLI inside a Linux Docker builder, copies `examples/hello` into the gate workspace, creates a Linux `python3 -m venv --copies --without-pip` at `.venv`, writes an inert marker module under that venv's `site-packages`, runs `beater build` against that app copy, builds the generated Dockerfile, starts the image on a loopback-only published port, waits for `/api/health`, verifies `beater doctor ./app` sees the venv, and checks authenticated MCP tool discovery.
 
 Useful knobs:
 

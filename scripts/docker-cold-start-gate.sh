@@ -148,11 +148,37 @@ docker run --rm \
   bash -lc 'set -euo pipefail
     export PATH=/usr/local/cargo/bin:$PATH
     apt-get update
-    apt-get install -y --no-install-recommends ca-certificates file pkg-config python3-dev
+    apt-get install -y --no-install-recommends ca-certificates file pkg-config python3-dev python3-venv
     PYO3_PYTHON=/usr/bin/python3 CARGO_TARGET_DIR=/target cargo build --locked --release -p beater-cli
-    rm -rf /out/bundle
-    /target/release/beater build /src/examples/hello --out /out/bundle --force
+    rm -rf /out/app /out/bundle
+    cp -a /src/examples/hello /out/app
+    python3 -m venv --copies --without-pip /out/app/.venv
+    VENV_SITE=$(/out/app/.venv/bin/python - <<'"'"'PY'"'"'
+import sysconfig
+print(sysconfig.get_paths()["purelib"])
+PY
+)
+    mkdir -p "$VENV_SITE"
+    printf "%s\n" "VALUE = 'docker-gate'" >"$VENV_SITE/beater_docker_gate_marker.py"
+    if [ -L /out/app/.venv/lib64 ] && [ "$(readlink /out/app/.venv/lib64)" = "lib" ]; then
+      rm /out/app/.venv/lib64
+      mkdir /out/app/.venv/lib64
+    fi
+    if find /out/app/.venv -type l -print -quit | grep -q .; then
+      echo "generated venv still contains symlinks, which beater build refuses:" >&2
+      find /out/app/.venv -type l -print >&2
+      exit 1
+    fi
+    /target/release/beater build /out/app --out /out/bundle --force
     file /out/bundle/bin/beater
+    test -f /out/bundle/app/.venv/pyvenv.cfg
+    test -x /out/bundle/app/.venv/bin/python
+    test "$(find /out/bundle/app/.venv -name beater_docker_gate_marker.py | wc -l)" = "1"
+    if find /out/bundle/app/.venv -type l -print -quit | grep -q .; then
+      echo "bundled venv contains symlinks" >&2
+      find /out/bundle/app/.venv -type l -print >&2
+      exit 1
+    fi
     chown -R "$HOST_UID:$HOST_GID" /target /out
   ' 2>&1 | tee "$WORKDIR/logs/linux-bundle-build.log"
 
@@ -199,6 +225,22 @@ PY
 done
 
 docker logs "$CID" >"$WORKDIR/logs/container.log" 2>&1 || true
+docker exec "$CID" ./bin/beater doctor ./app >"$WORKDIR/logs/container-doctor.txt" 2>&1
+if ! grep -q "venv ok:" "$WORKDIR/logs/container-doctor.txt"; then
+  echo "container doctor did not report venv ok" >&2
+  cat "$WORKDIR/logs/container-doctor.txt" >&2
+  echo "logs: $WORKDIR/logs" >&2
+  exit 1
+fi
+docker exec "$CID" test -f /srv/beater/app/.venv/pyvenv.cfg
+docker exec "$CID" test -x /srv/beater/app/.venv/bin/python
+docker exec "$CID" sh -c 'test "$(find /srv/beater/app/.venv -name beater_docker_gate_marker.py | wc -l)" = "1"'
+if docker exec "$CID" sh -c 'find /srv/beater/app/.venv -type l -print -quit | grep -q .'; then
+  echo "container venv contains symlinks" >&2
+  docker exec "$CID" find /srv/beater/app/.venv -type l -print >&2 || true
+  echo "logs: $WORKDIR/logs" >&2
+  exit 1
+fi
 
 if [ "$elapsed" -gt "$COLD_START_MS" ]; then
   echo "docker cold start exceeded ${COLD_START_MS}ms: ${elapsed}ms" >&2
@@ -218,6 +260,7 @@ cat >"$WORKDIR/evidence.md" <<EOF2
 - health route: \`/api/health\`
 - MCP route: \`/mcp\`
 - MCP auth: unauthenticated 401 plus bearer-token tools/list success
+- bundled venv: \`beater doctor ./app\` reports \`venv ok:\`, marker module exists, and no symlinks remain
 - cold start: \`${elapsed}ms\`
 - limit: \`${COLD_START_MS}ms\`
 - logs: \`$WORKDIR/logs\`

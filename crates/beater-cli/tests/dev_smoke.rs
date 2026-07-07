@@ -900,6 +900,15 @@ fn build_creates_runnable_bundle_and_refuses_unsafe_output() {
         "//registry.example.test/:_authToken=secret",
     )
     .expect("write .npmrc");
+    std::fs::create_dir_all(app.join(".venv/lib/python3.11/site-packages"))
+        .expect("create synthetic venv site-packages");
+    std::fs::write(app.join(".venv/pyvenv.cfg"), "home = /usr/bin\n")
+        .expect("write synthetic venv config");
+    std::fs::write(
+        app.join(".venv/lib/python3.11/site-packages/beater_fixture.py"),
+        "VALUE = 'bundled'\n",
+    )
+    .expect("write synthetic venv package");
 
     let build = Command::new(&beater)
         .arg("build")
@@ -1046,6 +1055,8 @@ fn build_creates_runnable_bundle_and_refuses_unsafe_output() {
         "beater-build.json",
         "README.md",
         ".dockerignore",
+        "app/.venv/pyvenv.cfg",
+        "app/.venv/lib/python3.11/site-packages/beater_fixture.py",
     ] {
         assert!(
             bundle.join(relative_path).is_file(),
