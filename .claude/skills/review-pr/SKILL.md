@@ -49,6 +49,7 @@ Correctness & honesty of the contract:
 Resource, lifecycle & availability:
 - [ ] Everything that can grow is bounded: request bodies, journal entries, spawned tasks, isolate work queues, Python call payloads. Unbounded growth on remote-driven input is a blocker.
 - [ ] Every model/tool/subprocess round-trip has a timeout **and** a recovery path; cleanup runs on all exit paths including error and cancel.
+- [ ] Timer, stream, and async-iterator compatibility shims bound slow-consumer backlog; tests prove cancellation cleanup, closed-state behavior after `return()`/abort, and backpressure or drop semantics rather than only happy-path payload shape.
 - [ ] Locks are narrow and never held across `.await`; blocking Python (GIL) or synchronous V8 work must not stall the journal or the agent loop's liveness.
 
 Tests:
