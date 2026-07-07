@@ -30,26 +30,37 @@ impl LlmSelection {
     pub fn from_config(config: &AgentConfig) -> Result<Self> {
         let generic_provider_env = env_non_empty("BEATER_LLM_API_KEY").is_some()
             || env_non_empty("BEATER_LLM_BASE_URL").is_some();
-        let provider = match env_non_empty("BEATER_LLM_PROVIDER") {
+        let env_provider = env_non_empty("BEATER_LLM_PROVIDER");
+        let config_provider = config_non_empty(&config.provider);
+        let provider = match env_provider.clone() {
             Some(provider) => provider,
             None if generic_provider_env => {
                 bail!(
                     "BEATER_LLM_PROVIDER is required when using BEATER_LLM_API_KEY or BEATER_LLM_BASE_URL"
                 )
             }
-            None => config.provider.clone(),
+            None => config_provider.clone().context(
+                "LLM provider is required; set provider in agent.ts or BEATER_LLM_PROVIDER",
+            )?,
         };
         let provider = normalize_provider(&provider);
-        match canonical_provider(&provider) {
-            Some(_) => {}
+        let _canonical = match canonical_provider(&provider) {
+            Some(canonical) => canonical,
             None => bail!(
                 "unsupported LLM provider {provider:?}; supported providers: {SUPPORTED_PROVIDER_HINT}"
             ),
         };
-        Ok(Self {
-            provider,
-            model: env_non_empty("BEATER_LLM_MODEL").unwrap_or_else(|| config.model.clone()),
-        })
+        let config_model = config_non_empty(&config.model);
+        let env_model = env_non_empty("BEATER_LLM_MODEL");
+        let model = match env_model {
+            Some(model) => model,
+            None if env_provider.is_some() => {
+                bail!("BEATER_LLM_MODEL is required when BEATER_LLM_PROVIDER is set")
+            }
+            None => config_model
+                .context("LLM model is required; set model in agent.ts or BEATER_LLM_MODEL")?,
+        };
+        Ok(Self { provider, model })
     }
 }
 
@@ -104,6 +115,14 @@ fn canonical_provider(provider: &str) -> Option<&'static str> {
 
 fn env_non_empty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn config_non_empty(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 pub struct OpenAiCompatible {
@@ -785,8 +804,8 @@ mod tests {
     fn fixture_config() -> AgentConfig {
         AgentConfig {
             name: "support".to_string(),
-            provider: "anthropic".to_string(),
-            model: "claude-fixture".to_string(),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-fixture".to_string()),
             system: String::new(),
             tools: Vec::new(),
         }
@@ -820,6 +839,100 @@ mod tests {
         let selection = LlmSelection::from_config(&fixture_config()).unwrap();
 
         assert_eq!(selection.provider, "openai-compatible");
+        assert_eq!(selection.model, "provider-model");
+    }
+
+    #[test]
+    fn missing_provider_requires_agent_or_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key = EnvGuard::unset("BEATER_LLM_API_KEY");
+        let _base = EnvGuard::unset("BEATER_LLM_BASE_URL");
+        let _provider = EnvGuard::unset("BEATER_LLM_PROVIDER");
+        let _model = EnvGuard::unset("BEATER_LLM_MODEL");
+        let mut config = fixture_config();
+        config.provider = None;
+
+        let error = match LlmSelection::from_config(&config) {
+            Ok(_) => panic!("missing provider should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("LLM provider is required"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn missing_model_requires_agent_or_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key = EnvGuard::unset("BEATER_LLM_API_KEY");
+        let _base = EnvGuard::unset("BEATER_LLM_BASE_URL");
+        let _provider = EnvGuard::unset("BEATER_LLM_PROVIDER");
+        let _model = EnvGuard::unset("BEATER_LLM_MODEL");
+        let mut config = fixture_config();
+        config.model = None;
+
+        let error = match LlmSelection::from_config(&config) {
+            Ok(_) => panic!("missing model should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("LLM model is required"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn provider_env_override_requires_matching_model_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key = EnvGuard::unset("BEATER_LLM_API_KEY");
+        let _base = EnvGuard::unset("BEATER_LLM_BASE_URL");
+        let _provider = EnvGuard::set("BEATER_LLM_PROVIDER", "nvidia");
+        let _model = EnvGuard::unset("BEATER_LLM_MODEL");
+
+        let error = match LlmSelection::from_config(&fixture_config()) {
+            Ok(_) => panic!("provider override should require model override"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("BEATER_LLM_MODEL"), "{error:#}");
+    }
+
+    #[test]
+    fn provider_env_override_never_reuses_agent_model() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key = EnvGuard::unset("BEATER_LLM_API_KEY");
+        let _base = EnvGuard::set("BEATER_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1");
+        let _provider = EnvGuard::set("BEATER_LLM_PROVIDER", "openai-compatible");
+        let _model = EnvGuard::unset("BEATER_LLM_MODEL");
+        let mut config = fixture_config();
+        config.provider = Some("openai-compatible".to_string());
+        config.model = Some("stale-provider-model".to_string());
+
+        let error = match LlmSelection::from_config(&config) {
+            Ok(_) => panic!("provider override should require model override"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("BEATER_LLM_MODEL"), "{error:#}");
+    }
+
+    #[test]
+    fn env_can_fully_select_provider_and_model_without_agent_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key = EnvGuard::unset("BEATER_LLM_API_KEY");
+        let _base = EnvGuard::unset("BEATER_LLM_BASE_URL");
+        let _provider = EnvGuard::set("BEATER_LLM_PROVIDER", "nvidia");
+        let _model = EnvGuard::set("BEATER_LLM_MODEL", "provider-model");
+        let mut config = fixture_config();
+        config.provider = None;
+        config.model = None;
+
+        let selection = LlmSelection::from_config(&config).unwrap();
+
+        assert_eq!(selection.provider, "nvidia");
         assert_eq!(selection.model, "provider-model");
     }
 

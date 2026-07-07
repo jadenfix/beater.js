@@ -70,7 +70,7 @@ grep -q "BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL" "$TMP/custom-openai-without-flag.e
 
 bash -c 'set -euo pipefail; source "$1"; unset M2_GATE_PROVIDER M2_GATE_MODEL; export BEATER_LLM_PROVIDER=openai; export BEATER_LLM_MODEL=model-fixture; export BEATER_LLM_API_KEY=fixture-key; export BEATER_LLM_BASE_URL=https://integrate.api.nvidia.com/v1; export BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL=1; configure_provider; [[ "$LLM_PROVIDER" == "openai-compatible" ]] && [[ "$BEATER_LLM_PROVIDER" == "openai-compatible" ]] && [[ "$BEATER_LLM_MODEL" == "model-fixture" ]] && [[ "$LLM_BASE_URL" == "https://integrate.api.nvidia.com/v1" ]]' _ "$SCRIPT"
 
-bash -c 'set -euo pipefail; source "$1"; unset M2_GATE_PROVIDER M2_GATE_MODEL BEATER_LLM_PROVIDER BEATER_LLM_API_KEY BEATER_LLM_BASE_URL BEATER_OPENAI_BASE_URL OPENAI_BASE_URL BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL BEATER_OPENAI_ALLOW_INSECURE_LOOPBACK ANTHROPIC_API_KEY; export OPENAI_API_KEY=fixture-key; export BEATER_LLM_MODEL=model-fixture; configure_provider; [[ "$LLM_PROVIDER" == "openai-compatible" ]]' _ "$SCRIPT"
+bash -c 'set -euo pipefail; source "$1"; unset M2_GATE_PROVIDER M2_GATE_MODEL BEATER_LLM_PROVIDER BEATER_LLM_API_KEY BEATER_LLM_BASE_URL BEATER_OPENAI_BASE_URL OPENAI_BASE_URL BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL BEATER_OPENAI_ALLOW_INSECURE_LOOPBACK ANTHROPIC_API_KEY BEATER_NVIDIA_API_KEY NVIDIA_API_KEY; export OPENAI_API_KEY=fixture-key; export BEATER_LLM_MODEL=model-fixture; configure_provider; [[ "$LLM_PROVIDER" == "openai-compatible" ]]' _ "$SCRIPT"
 
 if bash -c 'set -euo pipefail; source "$1"; unset M2_GATE_PROVIDER M2_GATE_MODEL BEATER_OPENAI_ALLOW_CUSTOM_BASE_URL; export BEATER_LLM_PROVIDER=openai-compatible; export BEATER_LLM_MODEL=model-fixture; export BEATER_LLM_API_KEY=fixture-key; export BEATER_LLM_BASE_URL=http://127.evil.test/v1; export BEATER_OPENAI_ALLOW_INSECURE_LOOPBACK=1; configure_provider' _ "$SCRIPT" >"$TMP/evil-loopback.out" 2>"$TMP/evil-loopback.err"; then
   fail "configure_provider should reject hostnames that only look like loopback addresses"
@@ -94,6 +94,22 @@ fi
 grep -q "BEATER_LLM_PROVIDER is required" "$TMP/generic-without-provider.err" || {
   cat "$TMP/generic-without-provider.err" >&2
   fail "generic key without provider failure did not explain the issue"
+}
+
+if bash -c 'set -euo pipefail; source "$1"; unset M2_GATE_PROVIDER BEATER_LLM_PROVIDER BEATER_LLM_API_KEY BEATER_LLM_BASE_URL; export ANTHROPIC_API_KEY=fixture-anthropic; export NVIDIA_API_KEY=fixture-nvidia; selected_provider' _ "$SCRIPT" >"$TMP/ambiguous-provider.out" 2>"$TMP/ambiguous-provider.err"; then
+  fail "selected_provider should require an explicit provider when multiple provider keys are configured"
+fi
+grep -q "multiple provider key families" "$TMP/ambiguous-provider.err" || {
+  cat "$TMP/ambiguous-provider.err" >&2
+  fail "ambiguous provider failure did not explain the issue"
+}
+
+if bash -c 'set -euo pipefail; source "$1"; unset M2_GATE_PROVIDER BEATER_LLM_PROVIDER BEATER_LLM_MODEL M2_GATE_MODEL BEATER_LLM_API_KEY BEATER_LLM_BASE_URL BEATER_OPENAI_API_KEY OPENAI_API_KEY BEATER_NVIDIA_API_KEY NVIDIA_API_KEY; export ANTHROPIC_API_KEY=fixture-anthropic; configure_provider' _ "$SCRIPT" >"$TMP/anthropic-missing-model.out" 2>"$TMP/anthropic-missing-model.err"; then
+  fail "configure_provider should fail when anthropic has no explicit model"
+fi
+grep -q "BEATER_LLM_MODEL or M2_GATE_MODEL" "$TMP/anthropic-missing-model.err" || {
+  cat "$TMP/anthropic-missing-model.err" >&2
+  fail "anthropic provider failure did not explain the missing model"
 }
 
 if bash -c 'set -euo pipefail; source "$1"; validate_provider_base_url_for_evidence "https://user:secret@example.com/v1"' _ "$SCRIPT" >"$TMP/base-url-userinfo.out" 2>"$TMP/base-url-userinfo.err"; then
