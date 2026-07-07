@@ -236,6 +236,167 @@ export async function inspectEvents() {
 }
 JS
 
+mkdir -p "$APP/node_modules/utiled"
+cat >"$APP/node_modules/utiled/package.json" <<'JSON'
+{
+  "name": "utiled",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  }
+}
+JSON
+
+cat >"$APP/node_modules/utiled/index.js" <<'JS'
+import util, {
+  TextDecoder,
+  TextEncoder,
+  callbackify,
+  debuglog,
+  deprecate,
+  format,
+  inherits,
+  inspect,
+  isDeepStrictEqual,
+  promisify,
+  types,
+} from "node:util";
+import bareUtil from "util";
+import utilTypesDefault, { isDataView, isTypedArray } from "node:util/types";
+
+function Parent(name) {
+  this.name = name;
+}
+Parent.prototype.describe = function describe() {
+  return `parent:${this.name}`;
+};
+
+function Child(name) {
+  Parent.call(this, name);
+}
+inherits(Child, Parent);
+
+function callbackAdd(left, right, callback) {
+  callback(null, left + right);
+}
+
+const receiver = {
+  offset: 4,
+  add(value, callback) {
+    callback(null, this.offset + value);
+  },
+};
+
+function customOriginal() {}
+customOriginal[promisify.custom] = () => Promise.resolve("custom-result");
+
+export async function inspectUtil() {
+  const child = new Child("beater");
+  const encoded = new TextEncoder().encode("beater");
+  const decoded = new TextDecoder().decode(encoded);
+  const callbackified = callbackify(async (value) => value.toUpperCase());
+  const callbackOrder = [];
+  const callbackValue = await new Promise((resolve, reject) => {
+    callbackified("ok", (error, value) => {
+      callbackOrder.push("callback");
+      if (error) reject(error);
+      else resolve(value);
+    });
+    callbackOrder.push("after-call");
+  });
+  const callbackFalsyReason = await new Promise((resolve) => {
+    callbackify(async () => Promise.reject(null))((error) => {
+      resolve(
+        error.message === "Promise was rejected with a falsy value" &&
+          Object.prototype.hasOwnProperty.call(error, "reason") &&
+          error.reason === null
+      );
+    });
+  });
+  const circular = {};
+  circular.self = circular;
+  const getterObject = {};
+  Object.defineProperty(getterObject, "value", {
+    enumerable: true,
+    get() {
+      throw new Error("getter should not run");
+    },
+  });
+  const getterArray = [];
+  Object.defineProperty(getterArray, "0", {
+    enumerable: true,
+    get() {
+      throw new Error("array getter should not run");
+    },
+  });
+  const wideObject = {};
+  const wideMap = new Map();
+  const wideSet = new Set();
+  for (let index = 0; index < 35; index += 1) {
+    wideObject[`k${index}`] = index;
+    wideMap.set(`k${index}`, index);
+    wideSet.add(index);
+  }
+  const deprecated = deprecate((value) => `dep:${value}`)("x");
+  const debug = debuglog("beater");
+  const viewBytes = new Uint8Array([88, 98, 101, 97, 116, 101, 114, 89]);
+  const view = new DataView(viewBytes.buffer, 1, 6);
+
+  return {
+    bareDefaultMatches: bareUtil.format === format,
+    callbackFalsyReason,
+    callbackified: callbackValue,
+    customPromisify: await promisify(customOriginal)(),
+    decoded,
+    decodedMalformed: new TextDecoder().decode(new Uint8Array([0xff])),
+    decodedOutOfRangeRejected: new TextDecoder()
+      .decode(new Uint8Array([0xf4, 0x90, 0x80, 0x80]))
+      .includes("\ufffd"),
+    decodedView: new TextDecoder().decode(view),
+    deepEqual: isDeepStrictEqual({ a: [1, "x"] }, { a: [1, "x"] }),
+    deepArrayBufferFalse: !isDeepStrictEqual(new Uint8Array([1]).buffer, new Uint8Array([2]).buffer),
+    deepDateFalse: !isDeepStrictEqual(new Date(0), new Date(1)),
+    deepMapFalse: !isDeepStrictEqual(new Map([["a", 1]]), new Map([["a", 2]])),
+    deepRegExpFalse: !isDeepStrictEqual(/a/g, /a/i),
+    deprecated,
+    debugEnabled: debug.enabled,
+    encoded: [...encoded],
+    encoderIsGlobal: globalThis.TextEncoder === undefined || TextEncoder === globalThis.TextEncoder,
+    decoderIsGlobal: globalThis.TextDecoder === undefined || TextDecoder === globalThis.TextDecoder,
+    format: format("id:%s count:%d data:%j %%", "beater", 7, { ok: true }),
+    inherits: child instanceof Parent && child.describe(),
+    inspect: inspect({ alpha: 1, beta: ["x"] }),
+    inspectCircular: inspect(circular),
+    inspectGetterArray: inspect(getterArray),
+    inspectGetter: inspect(getterObject),
+    inspectWideMapBounded: inspect(wideMap).includes("... 3 more items"),
+    inspectWideBounded: inspect(wideObject).includes("... more items"),
+    inspectWideSetBounded: inspect(wideSet).includes("... 3 more items"),
+    promisified: await promisify(callbackAdd)(2, 5),
+    promisifiedReceiver: await promisify(receiver.add).call(receiver, 3),
+    sameDefault: util.promisify === promisify && util.types === types,
+    callbackOrder,
+    types: {
+      arrayBuffer: types.isArrayBuffer(new ArrayBuffer(2)),
+      dataView: types.isDataView(new DataView(new ArrayBuffer(2))),
+      date: types.isDate(new Date(0)),
+      map: types.isMap(new Map()),
+      nativeError: types.isNativeError(new Error("x")),
+      promise: types.isPromise(Promise.resolve(1)),
+      set: types.isSet(new Set()),
+      thenable: types.isPromise({ then() {} }),
+      typedArray: types.isTypedArray(new Uint8Array([1])),
+      uint8Array: types.isUint8Array(new Uint8Array([1])),
+    },
+    utilTypes: {
+      defaultMatches: utilTypesDefault === types,
+      dataView: isDataView(new DataView(new ArrayBuffer(2))),
+      typedArray: isTypedArray(new Uint8Array([1])),
+    },
+  };
+}
+JS
+
 mkdir -p "$APP/node_modules/pathed"
 cat >"$APP/node_modules/pathed/package.json" <<'JSON'
 {
@@ -466,6 +627,18 @@ export async function GET() {
 }
 TS
 
+cat >"$APP/app/routes/api/utiled.ts" <<'TS'
+import { inspectUtil } from "utiled";
+
+export async function GET() {
+  return {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(await inspectUtil()),
+  };
+}
+TS
+
 cat >"$APP/app/routes/api/pathed.ts" <<'TS'
 import { inspectPath } from "pathed";
 
@@ -623,6 +796,67 @@ expected_events = {
 }
 if events_payload != expected_events:
     sys.exit(f"unexpected /api/evented payload: {events_payload!r}")
+
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+conn.request("GET", "/api/utiled")
+response = conn.getresponse()
+body = response.read().decode("utf-8")
+conn.close()
+if response.status != 200:
+    sys.exit(f"expected 200 from /api/utiled, got {response.status}: {body}")
+util_payload = json.loads(body)
+expected_util = {
+    "bareDefaultMatches": True,
+    "callbackFalsyReason": True,
+    "callbackOrder": ["after-call", "callback"],
+    "callbackified": "OK",
+    "customPromisify": "custom-result",
+    "decoderIsGlobal": True,
+    "decoded": "beater",
+    "decodedMalformed": "\ufffd",
+    "decodedOutOfRangeRejected": True,
+    "decodedView": "beater",
+    "deepArrayBufferFalse": True,
+    "deepEqual": True,
+    "deepDateFalse": True,
+    "deepMapFalse": True,
+    "deepRegExpFalse": True,
+    "deprecated": "dep:x",
+    "debugEnabled": False,
+    "encoded": [98, 101, 97, 116, 101, 114],
+    "encoderIsGlobal": True,
+    "format": "id:beater count:7 data:{\"ok\":true} %",
+    "inherits": "parent:beater",
+    "inspect": "{ alpha: 1, beta: [ 'x' ] }",
+    "inspectCircular": "{ self: [Circular] }",
+    "inspectGetterArray": "[ [Getter] ]",
+    "inspectGetter": "{ value: [Getter] }",
+    "inspectWideMapBounded": True,
+    "inspectWideBounded": True,
+    "inspectWideSetBounded": True,
+    "promisified": 7,
+    "promisifiedReceiver": 7,
+    "sameDefault": True,
+    "types": {
+        "arrayBuffer": True,
+        "dataView": True,
+        "date": True,
+        "map": True,
+        "nativeError": True,
+        "promise": True,
+        "set": True,
+        "thenable": False,
+        "typedArray": True,
+        "uint8Array": True,
+    },
+    "utilTypes": {
+        "dataView": True,
+        "defaultMatches": True,
+        "typedArray": True,
+    },
+}
+if util_payload != expected_util:
+    sys.exit(f"unexpected /api/utiled payload: {util_payload!r}")
 
 conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
 conn.request("GET", "/api/pathed")
@@ -790,6 +1024,7 @@ print(
     f"zod import returned {zod_payload['value']}; "
     f"cjs doubled {cjs_payload['doubled']}; "
     f"events seen {','.join(events_payload['seen'])}; "
+    f"util format {util_payload['format']}; "
     f"path resolved {path_payload['resolved']}; "
     f"os platform {os_payload['platform']}; "
     f"url file {url_payload['filePath']}; "
