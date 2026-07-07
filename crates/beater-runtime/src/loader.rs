@@ -58,6 +58,8 @@ fn vendor_specifier(specifier: &str) -> Option<&'static str> {
         "node:path" | "path" => Some("beater:vendor/node-path"),
         "node:process" | "process" => Some("beater:vendor/node-process"),
         "node:url" | "url" => Some("beater:vendor/node-url"),
+        "node:util/types" | "util/types" => Some("beater:vendor/node-util-types"),
+        "node:util" | "util" => Some("beater:vendor/node-util"),
         _ => None,
     }
 }
@@ -78,6 +80,10 @@ fn vendor_source(specifier: &str) -> Option<&'static str> {
         "beater:vendor/node-path" => Some(include_str!("../assets/vendor/node-path.mjs")),
         "beater:vendor/node-process" => Some(include_str!("../assets/vendor/node-process.mjs")),
         "beater:vendor/node-url" => Some(include_str!("../assets/vendor/node-url.mjs")),
+        "beater:vendor/node-util-types" => {
+            Some(include_str!("../assets/vendor/node-util-types.mjs"))
+        }
+        "beater:vendor/node-util" => Some(include_str!("../assets/vendor/node-util.mjs")),
         _ => None,
     }
 }
@@ -1470,6 +1476,35 @@ mod tests {
     }
 
     #[test]
+    fn node_util_vendor_specifiers_resolve_to_checked_in_shim() {
+        assert_eq!(
+            super::vendor_specifier("node:util"),
+            Some("beater:vendor/node-util")
+        );
+        assert_eq!(
+            super::vendor_specifier("util"),
+            Some("beater:vendor/node-util")
+        );
+        assert_eq!(
+            super::vendor_specifier("node:util/types"),
+            Some("beater:vendor/node-util-types")
+        );
+        assert_eq!(
+            super::vendor_specifier("util/types"),
+            Some("beater:vendor/node-util-types")
+        );
+
+        let source = super::vendor_source("beater:vendor/node-util").unwrap();
+        assert!(source.contains("deterministic util shim"));
+        assert!(source.contains("export function promisify"));
+        assert!(source.contains("export const types"));
+
+        let types_source = super::vendor_source("beater:vendor/node-util-types").unwrap();
+        assert!(types_source.contains("export default types"));
+        assert!(types_source.contains("isTypedArray"));
+    }
+
+    #[test]
     fn node_buffer_vendor_module_loads_from_beater_scheme() {
         let specifier = ModuleSpecifier::parse("beater:vendor/node-buffer").unwrap();
         let source = source_text(load_sync(&specifier).unwrap());
@@ -1525,6 +1560,22 @@ mod tests {
         assert!(source.contains("URLSearchParams"));
         assert!(source.contains("encoded slash"));
         assert!(source.contains("default url"));
+    }
+
+    #[test]
+    fn node_util_vendor_module_loads_from_beater_scheme() {
+        let specifier = ModuleSpecifier::parse("beater:vendor/node-util").unwrap();
+        let source = source_text(load_sync(&specifier).unwrap());
+
+        assert!(source.contains("promisify.custom"));
+        assert!(source.contains("TextEncoder"));
+        assert!(source.contains("default util"));
+
+        let types_specifier = ModuleSpecifier::parse("beater:vendor/node-util-types").unwrap();
+        let types_source = source_text(load_sync(&types_specifier).unwrap());
+
+        assert!(types_source.contains("isArrayBuffer"));
+        assert!(types_source.contains("isDataView"));
     }
 
     #[test]
