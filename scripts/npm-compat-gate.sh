@@ -202,6 +202,8 @@ export function inspectUrl() {
     ["q", "beater js"],
     ["q", "agent"],
   ]);
+  const mutable = new URL("https://idp.example/cb");
+  mutable.searchParams.append("state", "a=b=");
   return {
     filePath: fileURLToPath("file:///tmp/beater/routes/index.ts"),
     localhostPath: fileURLToPath(new URL("file://localhost/tmp/beater/routes/index.ts")),
@@ -211,6 +213,10 @@ export function inspectUrl() {
     defaultHref: url.pathToFileURL("/tmp/beater/default.ts").href,
     parsedHref: parsed.href,
     paramsAll: params.getAll("q"),
+    stringParam: new URLSearchParams("sig=a=b=&empty").get("sig"),
+    mutableHref: mutable.href,
+    queryOnlyHref: new URL("?page=2", "https://example.test/app/items?old=1#top").href,
+    hashOnlyHref: new URL("#next", "https://example.test/app/items?old=1#top").href,
     importedGlobal: URL === globalThis.URL,
     paramsGlobal: URLSearchParams === globalThis.URLSearchParams,
     importMetaPath: fileURLToPath(import.meta.url).endsWith("/node_modules/urled/index.js"),
@@ -432,6 +438,10 @@ expected_url = {
     "defaultHref": "file:///tmp/beater/default.ts",
     "parsedHref": "https://example.test/app/api/health?q=beater#frag",
     "paramsAll": ["beater js", "agent"],
+    "stringParam": "a=b=",
+    "mutableHref": "https://idp.example/cb?state=a%3Db%3D",
+    "queryOnlyHref": "https://example.test/app/items?page=2",
+    "hashOnlyHref": "https://example.test/app/items?old=1#next",
     "importedGlobal": True,
     "paramsGlobal": True,
     "importMetaPath": True,

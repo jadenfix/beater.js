@@ -18,29 +18,34 @@ function decodeQuery(value) {
 
 export class URLSearchParams {
   #entries = [];
+  #onChange;
 
-  constructor(init = "") {
+  constructor(init = "", onChange = undefined) {
+    this.#onChange = onChange;
     if (typeof init === "string") {
       const raw = init.startsWith("?") ? init.slice(1) : init;
       if (raw) {
         for (const pair of raw.split("&")) {
-          const [name, value = ""] = pair.split("=", 2);
-          this.append(decodeQuery(name), decodeQuery(value));
+          const index = pair.indexOf("=");
+          const name = index === -1 ? pair : pair.slice(0, index);
+          const value = index === -1 ? "" : pair.slice(index + 1);
+          this.#entries.push([decodeQuery(name), decodeQuery(value)]);
         }
       }
     } else if (Symbol.iterator in Object(init)) {
       for (const [name, value] of init) {
-        this.append(name, value);
+        this.#entries.push([String(name), String(value)]);
       }
     } else if (init && typeof init === "object") {
       for (const [name, value] of Object.entries(init)) {
-        this.append(name, value);
+        this.#entries.push([String(name), String(value)]);
       }
     }
   }
 
   append(name, value) {
     this.#entries.push([String(name), String(value)]);
+    this.#commit();
   }
 
   get(name) {
@@ -70,6 +75,12 @@ export class URLSearchParams {
     return this.#entries
       .map(([name, value]) => `${encodeQuery(name)}=${encodeQuery(value)}`)
       .join("&");
+  }
+
+  #commit() {
+    if (this.#onChange) {
+      this.#onChange(this.toString());
+    }
   }
 }
 
@@ -149,7 +160,8 @@ function parseAbsolute(input) {
 }
 
 function parseUrl(input, base) {
-  const absolute = parseAbsolute(String(input));
+  input = String(input);
+  const absolute = parseAbsolute(input);
   if (absolute) {
     return absolute;
   }
@@ -157,7 +169,26 @@ function parseUrl(input, base) {
     throw new TypeError(`Invalid URL: ${input}`);
   }
   const baseUrl = base instanceof URL ? base : new URL(String(base));
-  const { rest: relativePath, search, hash } = splitSuffix(String(input));
+  if (input.startsWith("?")) {
+    const { search, hash } = splitSuffix(input);
+    return {
+      protocol: baseUrl.protocol,
+      host: baseUrl.host,
+      pathname: baseUrl.pathname,
+      search,
+      hash,
+    };
+  }
+  if (input.startsWith("#")) {
+    return {
+      protocol: baseUrl.protocol,
+      host: baseUrl.host,
+      pathname: baseUrl.pathname,
+      search: baseUrl.search,
+      hash: input,
+    };
+  }
+  const { rest: relativePath, search, hash } = splitSuffix(input);
   let pathname;
   if (relativePath.startsWith("/")) {
     pathname = normalizePath(relativePath);
@@ -185,7 +216,9 @@ export class URL {
     this.pathname = parsed.pathname;
     this.search = parsed.search;
     this.hash = parsed.hash;
-    this.searchParams = new URLSearchParams(this.search);
+    this.searchParams = new URLSearchParams(this.search, (value) => {
+      this.search = value ? `?${value}` : "";
+    });
   }
 
   get href() {
