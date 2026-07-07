@@ -638,6 +638,149 @@ export function inspectQuerystring() {
 }
 JS
 
+mkdir -p "$APP/node_modules/timered"
+cat >"$APP/node_modules/timered/package.json" <<'JSON'
+{
+  "name": "timered",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  }
+}
+JSON
+
+cat >"$APP/node_modules/timered/index.js" <<'JS'
+import timers, {
+  clearImmediate,
+  clearInterval,
+  clearTimeout,
+  setImmediate,
+  setInterval,
+  setTimeout,
+} from "node:timers";
+import bareTimers from "timers";
+import timersPromises, {
+  scheduler,
+  setImmediate as promiseImmediate,
+  setInterval as promiseInterval,
+  setTimeout as promiseTimeout,
+} from "node:timers/promises";
+import bareTimersPromises from "timers/promises";
+import { promisify } from "node:util";
+
+export async function inspectTimers() {
+  const order = [];
+  const canceled = [];
+  const handle = setTimeout((label) => order.push(label), 0, "timeout");
+  const canceledTimeout = setTimeout(() => canceled.push("timeout"), 0);
+  clearTimeout(canceledTimeout);
+  const canceledImmediate = setImmediate(() => canceled.push("immediate"));
+  clearImmediate(canceledImmediate);
+  const refBefore = handle.hasRef();
+  const unrefReturnsSelf = handle.unref() === handle;
+  const refAfterUnref = handle.hasRef();
+  const refReturnsSelf = handle.ref() === handle;
+  const refAfterRef = handle.hasRef();
+  setImmediate((label) => order.push(label), "immediate");
+  await promiseTimeout(10);
+
+  let intervalCount = 0;
+  await new Promise((resolve) => {
+    const intervalHandle = setInterval((label) => {
+      order.push(`${label}:${intervalCount}`);
+      intervalCount += 1;
+      if (intervalCount === 2) {
+        clearInterval(intervalHandle);
+        resolve();
+      }
+    }, 1, "interval");
+  });
+
+  const promised = await promiseTimeout(0, "promise-timeout", { ref: false });
+  const immediate = await promiseImmediate("promise-immediate", { ref: false });
+  await scheduler.yield();
+  await scheduler.wait(0, { ref: false });
+  const waited = "scheduler-wait";
+  const promisified = await promisify(setTimeout)(0, "promisified-timeout", { ref: false });
+  const ticks = [];
+  const iterator = promiseInterval(1, "tick", { ref: false });
+  ticks.push((await iterator.next()).value);
+  ticks.push((await iterator.next()).value);
+  await iterator.return();
+  const afterReturn = await iterator.next();
+
+  const slowIterator = promiseInterval(1, "slow", { ref: false });
+  await promiseTimeout(5);
+  await slowIterator.return();
+  const slowAfterReturn = await slowIterator.next();
+
+  const beforeController = new AbortController();
+  beforeController.abort();
+  const abortedBefore = await promiseImmediate("late", {
+    signal: beforeController.signal,
+  }).catch((error) => ({
+    code: error.code,
+    name: error.name,
+  }));
+
+  const controller = new AbortController();
+  const aborted = promiseTimeout(1000, "late", { signal: controller.signal }).catch((error) => ({
+    code: error.code,
+    name: error.name,
+  }));
+  controller.abort();
+
+  const promisifiedAbortController = new AbortController();
+  const promisifiedAborted = promisify(setTimeout)(1000, "late", {
+    signal: promisifiedAbortController.signal,
+  }).catch((error) => ({
+    code: error.code,
+    name: error.name,
+  }));
+  promisifiedAbortController.abort();
+
+  const promisifiedImmediateAbortController = new AbortController();
+  promisifiedImmediateAbortController.abort();
+  const promisifiedImmediateAborted = promisify(setImmediate)("late", {
+    signal: promisifiedImmediateAbortController.signal,
+  }).catch((error) => ({
+    code: error.code,
+    name: error.name,
+  }));
+
+  return {
+    aborted: await aborted,
+    abortedBefore,
+    afterReturn,
+    bareDefaultMatches: bareTimers.setTimeout === setTimeout,
+    canceled,
+    defaultStatics:
+      timers.setTimeout === setTimeout &&
+      timers.clearTimeout === clearTimeout &&
+      timers.setImmediate === setImmediate,
+    intervalCount,
+    order,
+    promisified,
+    promisifiedAborted: await promisifiedAborted,
+    promisifiedImmediateAborted: await promisifiedImmediateAborted,
+    promised,
+    promiseDefaultMatches: timersPromises.setTimeout === promiseTimeout,
+    promiseBareMatches: bareTimersPromises.setImmediate === promiseImmediate,
+    ref: {
+      refAfterRef,
+      refAfterUnref,
+      refBefore,
+      refReturnsSelf,
+      unrefReturnsSelf,
+    },
+    ticks,
+    slowAfterReturn,
+    waited,
+    immediate,
+  };
+}
+JS
+
 mkdir -p "$APP/node_modules/pathed"
 cat >"$APP/node_modules/pathed/package.json" <<'JSON'
 {
@@ -900,6 +1043,18 @@ export function GET() {
     status: 200,
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(inspectQuerystring()),
+  };
+}
+TS
+
+cat >"$APP/app/routes/api/timered.ts" <<'TS'
+import { inspectTimers } from "timered";
+
+export async function GET() {
+  return {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(await inspectTimers()),
   };
 }
 TS
@@ -1250,6 +1405,60 @@ if query_payload != expected_query:
     sys.exit(f"unexpected /api/queried payload: {query_payload!r}")
 
 conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+conn.request("GET", "/api/timered")
+response = conn.getresponse()
+body = response.read().decode("utf-8")
+conn.close()
+if response.status != 200:
+    sys.exit(f"expected 200 from /api/timered, got {response.status}: {body}")
+timer_payload = json.loads(body)
+expected_timer = {
+    "aborted": {
+        "code": "ABORT_ERR",
+        "name": "AbortError",
+    },
+    "abortedBefore": {
+        "code": "ABORT_ERR",
+        "name": "AbortError",
+    },
+    "afterReturn": {
+        "done": True,
+    },
+    "bareDefaultMatches": True,
+    "canceled": [],
+    "defaultStatics": True,
+    "immediate": "promise-immediate",
+    "intervalCount": 2,
+    "order": ["timeout", "immediate", "interval:0", "interval:1"],
+    "promisified": "promisified-timeout",
+    "promisifiedAborted": {
+        "code": "ABORT_ERR",
+        "name": "AbortError",
+    },
+    "promisifiedImmediateAborted": {
+        "code": "ABORT_ERR",
+        "name": "AbortError",
+    },
+    "promised": "promise-timeout",
+    "promiseBareMatches": True,
+    "promiseDefaultMatches": True,
+    "ref": {
+        "refAfterRef": True,
+        "refAfterUnref": False,
+        "refBefore": True,
+        "refReturnsSelf": True,
+        "unrefReturnsSelf": True,
+    },
+    "slowAfterReturn": {
+        "done": True,
+    },
+    "ticks": ["tick", "tick"],
+    "waited": "scheduler-wait",
+}
+if timer_payload != expected_timer:
+    sys.exit(f"unexpected /api/timered payload: {timer_payload!r}")
+
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
 conn.request("GET", "/api/pathed")
 response = conn.getresponse()
 body = response.read().decode("utf-8")
@@ -1418,6 +1627,7 @@ print(
     f"util format {util_payload['format']}; "
     f"assert strict {assert_payload['strictFailure']['operator']}; "
     f"query {query_payload['stringified']}; "
+    f"timers {timer_payload['promised']}; "
     f"path resolved {path_payload['resolved']}; "
     f"os platform {os_payload['platform']}; "
     f"url file {url_payload['filePath']}; "

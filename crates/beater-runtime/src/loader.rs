@@ -60,6 +60,8 @@ fn vendor_specifier(specifier: &str) -> Option<&'static str> {
         "node:path" | "path" => Some("beater:vendor/node-path"),
         "node:process" | "process" => Some("beater:vendor/node-process"),
         "node:querystring" | "querystring" => Some("beater:vendor/node-querystring"),
+        "node:timers/promises" | "timers/promises" => Some("beater:vendor/node-timers-promises"),
+        "node:timers" | "timers" => Some("beater:vendor/node-timers"),
         "node:url" | "url" => Some("beater:vendor/node-url"),
         "node:util/types" | "util/types" => Some("beater:vendor/node-util-types"),
         "node:util" | "util" => Some("beater:vendor/node-util"),
@@ -88,6 +90,10 @@ fn vendor_source(specifier: &str) -> Option<&'static str> {
         "beater:vendor/node-process" => Some(include_str!("../assets/vendor/node-process.mjs")),
         "beater:vendor/node-querystring" => {
             Some(include_str!("../assets/vendor/node-querystring.mjs"))
+        }
+        "beater:vendor/node-timers" => Some(include_str!("../assets/vendor/node-timers.mjs")),
+        "beater:vendor/node-timers-promises" => {
+            Some(include_str!("../assets/vendor/node-timers-promises.mjs"))
         }
         "beater:vendor/node-url" => Some(include_str!("../assets/vendor/node-url.mjs")),
         "beater:vendor/node-util-types" => {
@@ -1532,6 +1538,36 @@ mod tests {
     }
 
     #[test]
+    fn node_timers_vendor_specifiers_resolve_to_checked_in_shims() {
+        assert_eq!(
+            super::vendor_specifier("node:timers"),
+            Some("beater:vendor/node-timers")
+        );
+        assert_eq!(
+            super::vendor_specifier("timers"),
+            Some("beater:vendor/node-timers")
+        );
+        assert_eq!(
+            super::vendor_specifier("node:timers/promises"),
+            Some("beater:vendor/node-timers-promises")
+        );
+        assert_eq!(
+            super::vendor_specifier("timers/promises"),
+            Some("beater:vendor/node-timers-promises")
+        );
+
+        let source = super::vendor_source("beater:vendor/node-timers").unwrap();
+        assert!(source.contains("Minimal timer shim"));
+        assert!(source.contains("export function setImmediate"));
+        assert!(source.contains("export function clearInterval"));
+
+        let promises_source = super::vendor_source("beater:vendor/node-timers-promises").unwrap();
+        assert!(promises_source.contains("Minimal promises timer shim"));
+        assert!(promises_source.contains("export function setInterval"));
+        assert!(promises_source.contains("export const scheduler"));
+    }
+
+    #[test]
     fn node_util_vendor_specifiers_resolve_to_checked_in_shim() {
         assert_eq!(
             super::vendor_specifier("node:util"),
@@ -1612,6 +1648,24 @@ mod tests {
         assert!(source.contains("parse(query"));
         assert!(source.contains("stringify(object"));
         assert!(source.contains("default querystring"));
+    }
+
+    #[test]
+    fn node_timers_vendor_modules_load_from_beater_scheme() {
+        let specifier = ModuleSpecifier::parse("beater:vendor/node-timers").unwrap();
+        let source = source_text(load_sync(&specifier).unwrap());
+
+        assert!(source.contains("default timers"));
+        assert!(source.contains("unref()"));
+        assert!(source.contains("setTimeout(callback"));
+
+        let promises_specifier =
+            ModuleSpecifier::parse("beater:vendor/node-timers-promises").unwrap();
+        let promises_source = source_text(load_sync(&promises_specifier).unwrap());
+
+        assert!(promises_source.contains("scheduler"));
+        assert!(promises_source.contains("AbortError"));
+        assert!(promises_source.contains("[Symbol.asyncIterator]"));
     }
 
     #[test]
@@ -2012,6 +2066,10 @@ mod tests {
             "import promises from 'fs/promises';\nconsole.log(promises);\n",
         );
         app.write(
+            "app/routes/timers-promises.client.ts",
+            "import timers from 'timers/promises';\nconsole.log(timers);\n",
+        );
+        app.write(
             "app/routes/url.client.ts",
             "import 'https://cdn.example.test/module.js';\n",
         );
@@ -2024,6 +2082,10 @@ mod tests {
             ),
             (
                 "builtin-subpath.client.ts",
+                "Node built-in imports are not supported",
+            ),
+            (
+                "timers-promises.client.ts",
                 "Node built-in imports are not supported",
             ),
             ("url.client.ts", "URL imports are not supported"),
